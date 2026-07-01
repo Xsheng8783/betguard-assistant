@@ -1,0 +1,738 @@
+from __future__ import annotations
+
+import re
+from dataclasses import replace
+from decimal import Decimal, ROUND_HALF_UP
+
+from betguard.expander import expand_tail
+from betguard.games import ACTIVE_GAMES
+from betguard.models import BetAmount, JsonNumber, ParsedBet
+from betguard.normalizer import normalize_input
+
+
+COMMON_MONEY_VALUES = {50, 100, 200, 500, 1000}
+CHINESE_TWO = "\u4e8c"
+CHINESE_ALT_TWO = "\u5169"
+CHINESE_THREE = "\u4e09"
+CHINESE_FOUR = "\u56db"
+STAR_WORD = "\u661f"
+UNIT_WORD = "\u652f"
+YUAN_WORD = "\u5143"
+BLOCK_WORD = "\u584a"
+COMMA_WORD = "\u3001"
+FULL_COMMA = "\uff0c"
+TOUCH_WORD = "\u78b0"
+TAIL_WORD = "\u5c3e"
+CAR_WORD = "\u8eca"
+FULL_OPEN_PAREN = "\uff08"
+FULL_CLOSE_PAREN = "\uff09"
+MULTIPLY_SIGN = "\u00d7"
+ALLOWED_CHINESE_CHARS = set("二三四兩星元塊支車尾碰今彩天天樂港六合大")
+GAME_MARKER_PATTERN = re.compile(r"\u4eca\u5f69|(?<!\d)539(?!\d)")
+NUMBER_DELIMITERS = set(f"./-{COMMA_WORD},{FULL_COMMA} \t\r\n")
+COLUMN_INNER_DELIMITERS = set(f".-{COMMA_WORD},{FULL_COMMA} \t\r\n")
+AMOUNT_KIND_PATTERN = f"{UNIT_WORD}|{YUAN_WORD}|{BLOCK_WORD}"
+TAIL_OPERATOR_AMOUNT_PATTERN = re.compile(
+    rf"(?P<op>[=/])\s*(?P<value>\d+(?:\.\d+)?)(?P<kind>{AMOUNT_KIND_PATTERN})?\s*$"
+)
+X_AMOUNT_PATTERN = re.compile(
+    rf"[xX]\s*(?P<value>\d+(?:\.\d+)?)(?:\s*{UNIT_WORD})?\s*$"
+)
+BARE_TAIL_AMOUNT_PATTERN = re.compile(
+    rf"(?P<value>\d+)(?P<kind>{AMOUNT_KIND_PATTERN})?\s*$"
+)
+PER_STAR_AMOUNT_PATTERN = re.compile(
+    rf"(?P<star>{CHINESE_TWO}{STAR_WORD}|{CHINESE_ALT_TWO}{STAR_WORD}|"
+    rf"{CHINESE_THREE}{STAR_WORD}|{CHINESE_FOUR}{STAR_WORD}|[234]{STAR_WORD}|"
+    rf"{CHINESE_TWO}|{CHINESE_ALT_TWO}|{CHINESE_THREE}|{CHINESE_FOUR})"
+    rf"\s*(?P<value>\d+(?:\.\d+)?)(?P<kind>{AMOUNT_KIND_PATTERN})"
+)
+COLUMN_SPLIT_PATTERN = re.compile(rf"\s*(?:/|{TOUCH_WORD}|{MULTIPLY_SIGN}|[xX])\s*")
+TAIL_SHORTHAND_SPLIT_PATTERN = re.compile(rf"[{COMMA_WORD}{FULL_COMMA},\s]+")
+
+
+class ParseError(ValueError):
+    def __init__(self, message: str, *, errors: list[str] | None = None) -> None:
+        super().__init__(message)
+        self.errors = errors or [message]
+
+
+def parse_line(text: str, *, default_game: str = "539") -> ParsedBet:
+    raw = normalize_input(text)
+    diagnostics = _input_diagnostics(raw)
+    value = _remove_game_markers(raw)
+    game = ACTIVE_GAMES.get(default_game)
+    if game is None:
+        raise ParseError(f"unknown game: {default_game}")
+
+    try:
+        bet = _parse_line_without_diagnostics(value, game_name=game.name)
+    except ParseError as exc:
+        if not diagnostics:
+            raise exc
+        fallback_value = _sanitize_for_diagnostic_parse(value)
+        try:
+            bet = _parse_line_without_diagnostics(fallback_value, game_name=game.name)
+        except ParseError:
+            raise ParseError(diagnostics[0], errors=diagnostics) from exc
+
+    if diagnostics:
+        bet = replace(bet, parse_errors=diagnostics)
+    return bet
+
+
+def _parse_line_without_diagnostics(value: str, *, game_name: str) -> ParsedBet:
+    if CAR_WORD in value:
+        return _parse_car_line(value, game_name=game_name)
+
+    column_bet = _parse_column_line(value, game_name=game_name)
+    if column_bet is not None:
+        return column_bet
+
+    return _parse_normal_line(value, game_name=game_name)
+
+
+def _input_diagnostics(text: str) -> list[str]:
+    errors: list[str] = []
+    unsupported = _unsupported_chinese_characters(text)
+    if unsupported:
+        errors.append(f"unsupported characters: {unsupported}")
+
+    for number in _ambiguous_long_numbers(text):
+        errors.append(f"ambiguous long number {number}")
+    return _dedupe_strings(errors)
+
+
+def _unsupported_chinese_characters(text: str) -> str:
+    chars: list[str] = []
+    for char in text:
+        if "\u4e00" <= char <= "\u9fff" and char not in ALLOWED_CHINESE_CHARS:
+            chars.append(char)
+    return "".join(_dedupe_strings(chars))
+
+
+def _ambiguous_long_numbers(text: str) -> list[str]:
+    values: list[str] = []
+    for match in re.finditer(r"\d{3,}", text):
+        value = match.group(0)
+        if _is_allowed_long_number(text, match):
+            continue
+        values.append(value)
+    return _dedupe_strings(values)
+
+
+def _is_allowed_long_number(text: str, match: re.Match[str]) -> bool:
+    value = match.group(0)
+    if value == "234":
+        return True
+
+    number = int(value)
+    if number in COMMON_MONEY_VALUES:
+        return True
+
+    before = _previous_non_space(text, match.start())
+    after = _next_non_space(text, match.end())
+    if after in {YUAN_WORD, BLOCK_WORD, UNIT_WORD}:
+        return True
+    if before in {"/", "=", "x", "X", MULTIPLY_SIGN} and number >= 50:
+        return True
+    if match.end() == len(text.rstrip()) and number >= 50:
+        return True
+    return False
+
+
+def _previous_non_space(text: str, index: int) -> str | None:
+    pos = index - 1
+    while pos >= 0 and text[pos].isspace():
+        pos -= 1
+    return text[pos] if pos >= 0 else None
+
+
+def _next_non_space(text: str, index: int) -> str | None:
+    pos = index
+    while pos < len(text) and text[pos].isspace():
+        pos += 1
+    return text[pos] if pos < len(text) else None
+
+
+def _sanitize_for_diagnostic_parse(text: str) -> str:
+    sanitized = "".join(
+        " " if "\u4e00" <= char <= "\u9fff" and char not in ALLOWED_CHINESE_CHARS else char
+        for char in text
+    )
+    for match in reversed(list(re.finditer(r"\d{3,}", sanitized))):
+        if _is_allowed_long_number(sanitized, match):
+            continue
+        sanitized = sanitized[: match.start()] + " " + sanitized[match.end() :]
+    return sanitized
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value not in seen:
+            result.append(value)
+            seen.add(value)
+    return result
+
+
+def _parse_car_line(value: str, *, game_name: str) -> ParsedBet:
+    parentheses = re.fullmatch(
+        rf"\s*(?P<number>\d+)\s*[({FULL_OPEN_PAREN}]\s*"
+        rf"(?P<units>\d+(?:\.\d+)?)\s*{CAR_WORD}\s*[){FULL_CLOSE_PAREN}]\s*",
+        value,
+    )
+    if parentheses:
+        number = int(parentheses.group("number"))
+        car_units, money = _car_units_to_amount(parentheses.group("units"))
+        return ParsedBet(
+            game=game_name,
+            type="car",
+            numbers=[number],
+            number=number,
+            car_units=car_units,
+            stars=[],
+            unit=None,
+            money=money,
+        )
+
+    before, after = value.split(CAR_WORD, 1)
+    before_numbers = [int(token) for token in re.findall(r"\d+", before)]
+    number = before_numbers[0] if len(before_numbers) == 1 and re.fullmatch(r"\s*\d+\s*", before) else None
+
+    amount_match = re.fullmatch(
+        rf"\s*(?P<value>\d+(?:\.\d+)?)?\s*(?P<kind>{AMOUNT_KIND_PATTERN})?\s*",
+        after,
+    )
+    car_units: JsonNumber | None = None
+    money: int | None = None
+    if amount_match and amount_match.group("value") is not None:
+        if amount_match.group("kind") in {YUAN_WORD, BLOCK_WORD}:
+            car_units, money = _car_money_to_amount(amount_match.group("value"))
+        else:
+            car_units, money = _car_units_to_amount(amount_match.group("value"))
+
+    return ParsedBet(
+        game=game_name,
+        type="car",
+        numbers=[number] if number is not None else before_numbers,
+        number=number,
+        car_units=car_units,
+        stars=[],
+        unit=None,
+        money=money,
+    )
+
+
+def _car_units_to_amount(value: str) -> tuple[JsonNumber, int]:
+    units = Decimal(value)
+    return _number_for_json(units), _money_from_unit(units)
+
+
+def _car_money_to_amount(value: str) -> tuple[JsonNumber, int]:
+    money = _money_from_decimal(Decimal(value))
+    return _number_for_json(Decimal(money) / Decimal("100")), money
+
+
+def _parse_normal_line(value: str, *, game_name: str) -> ParsedBet:
+    game = ACTIVE_GAMES[game_name]
+    has_per_star_bets = _has_per_star_bet_sequence(value)
+    stars: list[int] = []
+    amount: BetAmount | None = None
+    if not has_per_star_bets:
+        value, stars, amount = _peel_star_amount_suffix(value)
+        if amount is None:
+            value, amount = _peel_tail_amount(value)
+
+    if not stars and not has_per_star_bets:
+        value, stars = _peel_star_suffix(value, allow_numeric=amount is not None)
+
+    numbers, remainder = _consume_numbers(value)
+    if not numbers:
+        raise ParseError("missing numbers")
+
+    bets: dict[str, BetAmount] = {}
+    remainder = remainder.strip()
+    if stars and remainder:
+        raise ParseError("unsupported or unclear betting format")
+
+    if remainder:
+        per_star = _parse_per_star_bets(remainder)
+        if per_star is not None:
+            stars, bets = per_star
+            if amount is not None:
+                raise ParseError("cannot mix total amount and per-star amounts")
+        else:
+            parsed_stars, remainder = _parse_stars_from_start(remainder)
+            if parsed_stars:
+                stars = parsed_stars
+            remainder = remainder.strip()
+            if amount is None and remainder:
+                amount, remainder = _parse_amount_from_start(remainder)
+            if remainder.strip():
+                raise ParseError("unsupported or unclear betting format")
+
+    if not stars:
+        stars = game.default_stars(len(numbers))
+
+    unit = amount.unit if amount is not None else None
+    money = amount.money if amount is not None else None
+
+    return ParsedBet(
+        game=game.name,
+        type="normal",
+        numbers=numbers,
+        stars=stars,
+        unit=unit,
+        money=money,
+        bets=bets,
+    )
+
+
+def _parse_column_line(value: str, *, game_name: str) -> ParsedBet | None:
+    working, stars, amount = _peel_star_amount_suffix(value)
+    if amount is None:
+        working, amount = _peel_tail_amount(working)
+
+    if not stars:
+        working, stars = _peel_star_suffix(working, allow_numeric=amount is not None)
+
+    columns = _parse_column_parts(working)
+    if columns is None:
+        return None
+
+    numbers = [number for column in columns for number in column]
+    unit = amount.unit if amount is not None else None
+    money = amount.money if amount is not None else None
+
+    return ParsedBet(
+        game=game_name,
+        type="column",
+        numbers=numbers,
+        columns=columns,
+        stars=stars,
+        unit=unit,
+        money=money,
+    )
+
+
+def _parse_column_parts(text: str) -> list[list[int]] | None:
+    value = text.strip()
+    shorthand = _parse_tail_shorthand(value)
+    if shorthand is not None:
+        return shorthand
+
+    if not _has_column_separator(value):
+        return None
+
+    raw_parts = COLUMN_SPLIT_PATTERN.split(value)
+    if len(raw_parts) < 2:
+        return None
+
+    columns = [_parse_column_numbers(part) for part in raw_parts]
+    return columns
+
+
+def _has_column_separator(text: str) -> bool:
+    return (
+        "/" in text
+        or TOUCH_WORD in text
+        or MULTIPLY_SIGN in text
+        or TAIL_WORD in text
+        or bool(re.search(r"(?<=\d)\s*[xX]\s*(?=\d)", text))
+    )
+
+
+def _parse_tail_shorthand(text: str) -> list[list[int]] | None:
+    value = text.strip()
+    if not value.startswith(TAIL_WORD):
+        return None
+
+    body = value[len(TAIL_WORD) :].strip()
+    if not body:
+        return None
+
+    parts = [part for part in TAIL_SHORTHAND_SPLIT_PATTERN.split(body) if part]
+    if len(parts) < 2:
+        return None
+
+    columns: list[list[int]] = []
+    for part in parts:
+        if not re.fullmatch(r"\d", part):
+            raise ParseError("tail must be between 0 and 9")
+        columns.append(expand_tail(int(part)))
+    return columns
+
+
+def _parse_column_numbers(text: str) -> list[int]:
+    value = text.strip()
+    if not value:
+        return []
+
+    tail = _parse_tail_column(value)
+    if tail is not None:
+        return tail
+
+    numbers: list[int] = []
+    index = 0
+    length = len(value)
+    while index < length:
+        while index < length and value[index] in COLUMN_INNER_DELIMITERS:
+            index += 1
+        if index >= length:
+            break
+
+        match = re.match(r"\d+", value[index:])
+        if not match:
+            raise ParseError("unsupported or unclear column format")
+        token = match.group(0)
+        if len(token) > 2:
+            raise ParseError("unsupported or unclear column format")
+        numbers.append(int(token))
+        index += len(token)
+
+        if index < length and value[index] not in COLUMN_INNER_DELIMITERS:
+            raise ParseError("unsupported or unclear column format")
+
+    return numbers
+
+
+def _parse_tail_column(text: str) -> list[int] | None:
+    match = re.fullmatch(rf"(?:(?P<prefix>{TAIL_WORD})(?P<prefix_tail>\d)|(?P<suffix_tail>\d){TAIL_WORD})", text)
+    if not match:
+        return None
+
+    tail = match.group("prefix_tail") or match.group("suffix_tail")
+    return expand_tail(int(tail))
+
+
+def _remove_game_markers(text: str) -> str:
+    return GAME_MARKER_PATTERN.sub(" ", text).strip()
+
+
+def _peel_star_amount_suffix(text: str) -> tuple[str, list[int], BetAmount | None]:
+    pattern = re.compile(
+        rf"^(?P<prefix>.+)(?P<before>\s+|[./]+)(?P<star>{_star_token_source(include_numeric=True)})"
+        rf"(?P<sep>[./]|\s+|[xX{MULTIPLY_SIGN}])?"
+        rf"(?P<value>\d+(?:\.\d+)?)(?P<kind>{AMOUNT_KIND_PATTERN})?\s*$"
+    )
+    match = pattern.match(text)
+    if not match:
+        return text, [], None
+
+    if not _valid_star_amount_suffix(match):
+        return text, [], None
+
+    return (
+        match.group("prefix").strip(),
+        _stars_from_token(match.group("star")),
+        _amount_after_star(match.group("value"), match.group("kind"), match.group("sep")),
+    )
+
+
+def _valid_star_amount_suffix(match: re.Match[str]) -> bool:
+    star = _compact_star_token(match.group("star"))
+    sep = match.group("sep") or ""
+    before = match.group("before") or ""
+    token = match.group("star")
+
+    if sep == "/" and star != "234":
+        return False
+    if sep == "/" and not match.group("value").isdigit():
+        return False
+    if (
+        token.isdigit()
+        and len(star) == 1
+        and sep == ""
+        and any(char in before for char in "./")
+    ):
+        return False
+    return True
+
+
+def _compact_star_token(token: str) -> str:
+    cleaned = token.replace(STAR_WORD, "")
+    cleaned = re.sub(rf"[,{FULL_COMMA}{COMMA_WORD}\s]+", "", cleaned)
+    return (
+        cleaned.replace(CHINESE_TWO, "2")
+        .replace(CHINESE_ALT_TWO, "2")
+        .replace(CHINESE_THREE, "3")
+        .replace(CHINESE_FOUR, "4")
+    )
+
+
+def _amount_after_star(value: str, kind: str | None, sep: str | None) -> BetAmount:
+    if kind == UNIT_WORD or sep in {"x", "X", MULTIPLY_SIGN} or "." in value:
+        return _amount_from_parts(value, UNIT_WORD, source="star")
+    if kind in {YUAN_WORD, BLOCK_WORD}:
+        return _amount_from_parts(value, kind, source="star")
+    if _is_common_money(Decimal(value)):
+        return _amount_from_parts(value, None, source="/")
+    return _amount_from_parts(value, UNIT_WORD, source="star")
+
+
+def _peel_tail_amount(text: str) -> tuple[str, BetAmount | None]:
+    x_match = X_AMOUNT_PATTERN.search(text)
+    if x_match:
+        amount = _amount_from_parts(x_match.group("value"), UNIT_WORD, source="x")
+        return text[: x_match.start()].strip(), amount
+
+    match = TAIL_OPERATOR_AMOUNT_PATTERN.search(text)
+    if match:
+        op = match.group("op")
+        value = match.group("value")
+        kind = match.group("kind")
+        if op != "/" or _looks_like_slash_amount(value, kind):
+            amount = _amount_from_parts(value, kind, source=op)
+            return text[: match.start()].strip(), amount
+
+    bare_match = BARE_TAIL_AMOUNT_PATTERN.search(text)
+    if not bare_match:
+        return text, None
+
+    value = bare_match.group("value")
+    kind = bare_match.group("kind")
+    if _is_per_star_tail(text, bare_match.start()):
+        return text, None
+    if kind is None and not _looks_like_bare_tail_amount(value):
+        return text, None
+
+    amount = _amount_from_parts(value, kind, source="bare")
+    return text[: bare_match.start()].strip(), amount
+
+
+def _looks_like_slash_amount(value: str, kind: str | None) -> bool:
+    if kind is not None or "." in value:
+        return True
+    number = int(value)
+    return number > 39 or number in COMMON_MONEY_VALUES
+
+
+def _looks_like_bare_tail_amount(value: str) -> bool:
+    number = int(value)
+    return number >= 50 or number in COMMON_MONEY_VALUES
+
+
+def _is_per_star_tail(text: str, start: int) -> bool:
+    index = start - 1
+    while index >= 0 and text[index].isspace():
+        index -= 1
+    return index >= 0 and text[index] in f"{STAR_WORD}{CHINESE_TWO}{CHINESE_ALT_TWO}{CHINESE_THREE}{CHINESE_FOUR}"
+
+
+def _peel_star_suffix(text: str, *, allow_numeric: bool) -> tuple[str, list[int]]:
+    for pattern in _star_suffix_patterns(allow_numeric=allow_numeric):
+        match = pattern.match(text)
+        if match:
+            return match.group("prefix").strip(), _stars_from_token(match.group("star"))
+    return text, []
+
+
+def _star_suffix_patterns(*, allow_numeric: bool) -> list[re.Pattern[str]]:
+    star_sources = [_star_token_source(include_numeric=False)]
+    if allow_numeric:
+        star_sources.append(_star_token_source(include_numeric=True))
+    return [
+        re.compile(rf"^(?P<prefix>.+?)\s+(?P<star>{source})\s*$")
+        for source in star_sources
+    ]
+
+
+def _star_token_source(*, include_numeric: bool) -> str:
+    chinese = (
+        rf"{CHINESE_TWO}{CHINESE_THREE}{CHINESE_FOUR}|"
+        rf"{CHINESE_ALT_TWO}{CHINESE_THREE}{CHINESE_FOUR}|"
+        rf"{CHINESE_TWO}{CHINESE_THREE}|"
+        rf"{CHINESE_ALT_TWO}{CHINESE_THREE}|"
+        rf"{CHINESE_TWO}{STAR_WORD}|{CHINESE_ALT_TWO}{STAR_WORD}|"
+        rf"{CHINESE_THREE}{STAR_WORD}|{CHINESE_FOUR}{STAR_WORD}|"
+        rf"{CHINESE_TWO}|{CHINESE_ALT_TWO}|{CHINESE_THREE}|{CHINESE_FOUR}|[234]{STAR_WORD}"
+    )
+    if not include_numeric:
+        return chinese
+    return (
+        rf"{chinese}|"
+        rf"[234]\s*[,{FULL_COMMA}{COMMA_WORD}]\s*[234]\s*[,{FULL_COMMA}{COMMA_WORD}]\s*[234]|"
+        rf"[234]\s+[234]\s+[234]|"
+        rf"[234]\s*[,{FULL_COMMA}{COMMA_WORD}]\s*[234]|"
+        rf"[234]\s+[234]|234|23|[234]"
+    )
+
+
+def _consume_numbers(text: str) -> tuple[list[int], str]:
+    numbers: list[int] = []
+    index = 0
+    length = len(text)
+
+    while index < length:
+        while index < length and text[index] in NUMBER_DELIMITERS:
+            index += 1
+
+        match = re.match(r"\d+", text[index:])
+        if not match:
+            break
+
+        token = match.group(0)
+        end = index + len(token)
+        if len(token) > 2:
+            break
+        if end < length and text[end] in f"{YUAN_WORD}{BLOCK_WORD}{UNIT_WORD}":
+            break
+
+        numbers.append(int(token))
+        index = end
+
+        if index >= length or text[index] not in NUMBER_DELIMITERS:
+            break
+
+    return numbers, text[index:]
+
+
+def _parse_per_star_bets(remainder: str) -> tuple[list[int], dict[str, BetAmount]] | None:
+    matches = list(PER_STAR_AMOUNT_PATTERN.finditer(remainder))
+    if not matches:
+        return None
+
+    leftover = PER_STAR_AMOUNT_PATTERN.sub("", remainder).strip()
+    if leftover:
+        return None
+
+    stars: list[int] = []
+    bets: dict[str, BetAmount] = {}
+    for match in matches:
+        star_values = _stars_from_token(match.group("star"))
+        if len(star_values) != 1:
+            return None
+        star = star_values[0]
+        stars.append(star)
+        amount = _amount_from_parts(
+            match.group("value"),
+            match.group("kind"),
+            source="per-star",
+            include_unit_for_money=False,
+        )
+        bets[str(star)] = amount
+
+    return _dedupe_preserve_order(stars), bets
+
+
+def _has_per_star_bet_sequence(text: str) -> bool:
+    return len(list(PER_STAR_AMOUNT_PATTERN.finditer(text))) >= 2
+
+
+def _parse_stars_from_start(remainder: str) -> tuple[list[int], str]:
+    value = remainder.lstrip()
+    for pattern in _star_start_patterns():
+        match = pattern.match(value)
+        if match:
+            token = match.group(0)
+            return _stars_from_token(token), value[match.end() :]
+    return [], remainder
+
+
+def _star_start_patterns() -> list[re.Pattern[str]]:
+    return [
+        re.compile(_star_token_source(include_numeric=True)),
+    ]
+
+
+def _stars_from_token(token: str) -> list[int]:
+    translated = _compact_star_token(token)
+    stars = [int(char) for char in translated if char in "234"]
+    if not stars or len(stars) != len(translated):
+        raise ParseError(f"unknown star token: {token}")
+    return _dedupe_preserve_order(stars)
+
+
+def _parse_amount_from_start(remainder: str) -> tuple[BetAmount, str]:
+    value = remainder.lstrip()
+    x_match = re.match(rf"[xX]\s*(?P<value>\d+(?:\.\d+)?)(?:\s*{UNIT_WORD})?", value)
+    if x_match:
+        return _amount_from_parts(x_match.group("value"), UNIT_WORD, source="x"), value[x_match.end() :]
+
+    match = re.match(rf"(?P<value>\d+(?:\.\d+)?)(?P<kind>{AMOUNT_KIND_PATTERN})?", value)
+    if not match:
+        raise ParseError("missing or unclear amount")
+    return (
+        _amount_from_parts(match.group("value"), match.group("kind"), source="bare"),
+        value[match.end() :],
+    )
+
+
+def _amount_from_parts(
+    value: str,
+    kind: str | None,
+    *,
+    source: str,
+    include_unit_for_money: bool = True,
+) -> BetAmount:
+    if "." in value and kind is None and source == "bare":
+        raise ParseError("bare decimal amount is not allowed")
+
+    decimal_value = Decimal(value)
+    if decimal_value <= 0:
+        return BetAmount(unit=_number_for_json(decimal_value), money=0)
+
+    if kind == UNIT_WORD or source == "x":
+        unit = _number_for_json(decimal_value)
+        return BetAmount(unit=unit, money=_money_from_unit(decimal_value))
+
+    if kind in {YUAN_WORD, BLOCK_WORD}:
+        money = _money_from_decimal(decimal_value)
+        unit = _number_for_json(decimal_value / Decimal("100")) if include_unit_for_money else None
+        return BetAmount(unit=unit, money=money)
+
+    if source == "/":
+        money = _money_from_decimal(decimal_value)
+        return BetAmount(unit=_number_for_json(decimal_value / Decimal("100")), money=money)
+
+    if source == "=":
+        if _is_common_money(decimal_value):
+            money = _money_from_decimal(decimal_value)
+            return BetAmount(unit=_number_for_json(decimal_value / Decimal("100")), money=money)
+        return BetAmount(
+            unit=_number_for_json(decimal_value),
+            money=_money_from_unit(decimal_value),
+        )
+
+    if _is_common_money(decimal_value):
+        money = _money_from_decimal(decimal_value)
+        return BetAmount(unit=_number_for_json(decimal_value / Decimal("100")), money=money)
+
+    return BetAmount(
+        unit=_number_for_json(decimal_value),
+        money=_money_from_unit(decimal_value),
+    )
+
+
+def _is_common_money(value: Decimal) -> bool:
+    if value != value.to_integral_value():
+        return False
+    integer = int(value)
+    return integer in COMMON_MONEY_VALUES or integer >= 50
+
+
+def _money_from_unit(unit: Decimal) -> int:
+    return int((unit * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def _money_from_decimal(value: Decimal) -> int:
+    return int(value.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def _number_for_json(value: Decimal) -> JsonNumber:
+    normalized = value.normalize()
+    if normalized == normalized.to_integral_value():
+        return int(normalized)
+    return float(normalized)
+
+
+def _dedupe_preserve_order(values: list[int]) -> list[int]:
+    seen: set[int] = set()
+    result: list[int] = []
+    for value in values:
+        if value not in seen:
+            result.append(value)
+            seen.add(value)
+    return result

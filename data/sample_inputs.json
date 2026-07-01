@@ -1,0 +1,131 @@
+[
+  {
+    "input": "06-13-23-22/50",
+    "expected": {
+      "game": "539",
+      "type": "normal",
+      "numbers": [
+        6,
+        13,
+        23,
+        22
+      ],
+      "stars": [
+        2,
+        3,
+        4
+      ],
+      "unit": 0.5,
+      "money": 50,
+      "status": "ok"
+    }
+  },
+  {
+    "input": "17.20/28/34 二三×1",
+    "expected": {
+      "game": "539",
+      "type": "column",
+      "columns": [
+        [
+          17,
+          20
+        ],
+        [
+          28
+        ],
+        [
+          34
+        ]
+      ],
+      "stars": [
+        2,
+        3
+      ],
+      "unit": 1,
+      "money": 100,
+      "status": "ok"
+    }
+  },
+  {
+    "input": "尾2、5 二50元",
+    "expected": {
+      "game": "539",
+      "type": "column",
+      "columns": [
+        [
+          2,
+          12,
+          22,
+          32
+        ],
+        [
+          5,
+          15,
+          25,
+          35
+        ]
+      ],
+      "stars": [
+        2
+      ],
+      "unit": 0.5,
+      "money": 50,
+      "status": "ok"
+    }
+  },
+  {
+    "input": "10（2車）",
+    "expected": {
+      "game": "539",
+      "type": "car",
+      "number": 10,
+      "car_units": 2,
+      "money": 200,
+      "status": "ok"
+    }
+  },
+  {
+    "input": "32車10元",
+    "expected": {
+      "game": "539",
+      "type": "car",
+      "number": 32,
+      "car_units": 0.1,
+      "money": 10,
+      "status": "ok"
+    }
+  },
+  {
+    "input": "16車",
+    "expected": {
+      "game": "539",
+      "type": "car",
+      "number": 16,
+      "status": "error",
+      "errors": [
+        "missing car amount"
+      ]
+    }
+  },
+  {
+    "name": "batch_review_example",
+    "input": "06-13-23-22/50\n17.20/28/34 二三×1\n尾2、5 二50元\n32車10元\n13.38.13 二三100",
+    "expected": {
+      "total": 5,
+      "ok": 4,
+      "warning": 0,
+      "error": 1,
+      "can_continue": false
+    }
+  },
+  {
+    "input": "32.10,1500..15.23.32.10.20.21..234.100臂",
+    "expected": {
+      "status": "error",
+      "errors": [
+        "unsupported characters: 臂",
+        "ambiguous long number 1500"
+      ]
+    }
+  }
+]
