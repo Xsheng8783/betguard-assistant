@@ -81,8 +81,8 @@ VALID_POLICY_CASES = {
         "type": "normal",
         "numbers": [11, 28, 37],
         "stars": [2, 3],
-        "money": 100,
-        "unit": 1,
+        "money": 200,
+        "unit": 2,
     },
     "08 28 33 39 440": {
         "type": "normal",

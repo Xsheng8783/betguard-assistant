@@ -328,10 +328,19 @@ def test_two_number_colon_x_unit_regression() -> None:
     assert report["money"] == 1000
 
 
-def test_three_numbers_640_is_confirmed_one_unit_shorthand() -> None:
+def test_three_numbers_640_is_confirmed_two_units_shorthand() -> None:
     report = report_for("11.28.37.640")
 
     assert report["numbers"] == [11, 28, 37]
+    assert report["stars"] == [2, 3]
+    assert report["unit"] == 2
+    assert report["money"] == 200
+
+
+def test_three_numbers_320_is_confirmed_one_unit_shorthand() -> None:
+    report = report_for("19.27.35.320")
+
+    assert report["numbers"] == [19, 27, 35]
     assert report["stars"] == [2, 3]
     assert report["unit"] == 1
     assert report["money"] == 100

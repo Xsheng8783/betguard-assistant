@@ -109,6 +109,16 @@ def test_review_console_html_shows_confirmed_shorthand_amount_not_literal_code()
     assert "4.4" not in html
 
 
+def test_review_console_html_shows_three_number_640_as_two_units_not_literal_code() -> None:
+    queue = build_batch_mock_queue("11 22 33 640")
+
+    html = render_review_console_html(queue, queue_path="queue_state.json")
+
+    assert "200" in html
+    assert "640" not in queue["items"][0]["parsed_summary"]
+    assert "6.4" not in html
+
+
 def test_review_console_actions_include_accept_reject_mock_next_and_audit_export() -> None:
     needs_review = build_review_console_model(
         build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}50..40{CAR}10{YUAN}"),

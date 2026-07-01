@@ -241,7 +241,11 @@ def _suspicious_paste_notes(value: str) -> list[str]:
         notes.append("suspicious pasted token requires manual review")
     if value.lower().startswith("港"):
         notes.append("game prefix requires manual review")
-    if re.search(r"-\d+(?:\.\d+)?$", compact) and not re.search(r"/\d+$", compact):
+    if (
+        re.search(r"-\d+(?:\.\d+)?$", compact)
+        and not re.search(r"/\d+$", compact)
+        and not _is_confirmed_hyphen_amount(value)
+    ):
         notes.append("hyphen amount requires manual review")
     if re.fullmatch(r"\d{1,2}[xX×*]\d+(?:\.\d+)?", compact):
         notes.append("single-number multiplier requires manual review")
@@ -249,9 +253,28 @@ def _suspicious_paste_notes(value: str) -> list[str]:
         re.search(r"=\s*\d+", value)
         and "." in value.split("=")[0]
         and len(re.findall(r"\d{1,2}", value.split("=")[0])) >= 3
+        and not _is_confirmed_star_equals_amount(value)
     ):
         notes.append("equals amount with three or more numbers requires manual review")
     return _dedupe(notes)
+
+
+def _is_confirmed_hyphen_amount(value: str) -> bool:
+    return bool(
+        re.fullmatch(
+            r"\s*\d{1,2}(?:[.\-\s、,，]+\d{1,2}){2,}\s*-\s*(?:50|100)\s*",
+            value,
+        )
+    )
+
+
+def _is_confirmed_star_equals_amount(value: str) -> bool:
+    return bool(
+        re.fullmatch(
+            r"\s*\d{1,2}(?:[.\-\s、,，]+\d{1,2})+\.?\s*=\s*[234](?:[.、,，]\s*[234]){0,2}\s*=\s*\d+(?:\.\d+)?(?:支|元|塊)?\s*",
+            value,
+        )
+    )
 
 
 def _expand_multi_car_fragment(value: str) -> list[str]:

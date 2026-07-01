@@ -198,24 +198,118 @@ def test_four_number_880_shorthand_is_one_unit_per_star() -> None:
     assert result["money"] == 100
 
 
-def test_three_number_320_shorthand_is_half_unit_per_star() -> None:
+def test_three_number_320_shorthand_is_one_unit_per_star() -> None:
     result = _result("11 22 33 320")
-
-    assert result["status"] == "ok"
-    assert result["numbers"] == [11, 22, 33]
-    assert result["stars"] == [2, 3]
-    assert result["unit"] == 0.5
-    assert result["money"] == 50
-
-
-def test_three_number_640_shorthand_is_one_unit_per_star() -> None:
-    result = _result("11 22 33 640")
 
     assert result["status"] == "ok"
     assert result["numbers"] == [11, 22, 33]
     assert result["stars"] == [2, 3]
     assert result["unit"] == 1
     assert result["money"] == 100
+
+
+def test_three_number_640_shorthand_is_two_units_per_star() -> None:
+    result = _result("11 22 33 640")
+
+    assert result["status"] == "ok"
+    assert result["numbers"] == [11, 22, 33]
+    assert result["stars"] == [2, 3]
+    assert result["unit"] == 2
+    assert result["money"] == 200
+
+
+def test_three_number_320_dotted_shorthand_is_one_unit_per_star() -> None:
+    result = _result("19.27.35.320")
+
+    assert result["status"] == "ok"
+    assert result["numbers"] == [19, 27, 35]
+    assert result["stars"] == [2, 3]
+    assert result["unit"] == 1
+    assert result["money"] == 100
+
+
+def test_confirmed_three_number_bare_100_is_one_unit_per_star() -> None:
+    result = _result("08 14 23 100")
+
+    assert result["status"] == "ok"
+    assert result["numbers"] == [8, 14, 23]
+    assert result["stars"] == [2, 3]
+    assert result["unit"] == 1
+    assert result["money"] == 100
+
+
+def test_confirmed_three_number_hyphen_100_is_tail_amount() -> None:
+    queue = build_batch_mock_queue("12.38.22-100")
+    result = queue["items"][0]["review_result"]
+
+    assert queue["status"] == READY_FOR_QUEUE
+    assert result["status"] == "ok"
+    assert result["numbers"] == [12, 38, 22]
+    assert result["stars"] == [2, 3]
+    assert result["unit"] == 1
+    assert result["money"] == 100
+
+
+def test_confirmed_four_number_spaced_hyphen_50_is_tail_amount() -> None:
+    queue = build_batch_mock_queue("02-03-16-20 -50")
+    result = queue["items"][0]["review_result"]
+
+    assert queue["status"] == READY_FOR_QUEUE
+    assert result["status"] == "ok"
+    assert result["numbers"] == [2, 3, 16, 20]
+    assert result["stars"] == [2, 3, 4]
+    assert result["unit"] == 0.5
+    assert result["money"] == 50
+
+
+def test_paired_slash_dunhao_column_group_with_numeric_stars() -> None:
+    result = _result(f"12/17{DUN}20/06 23{STAR}X1")
+
+    assert result["status"] == "ok"
+    assert result["type"] == "column"
+    assert result["columns"] == [[12, 17], [20, 6]]
+    assert result["stars"] == [2, 3]
+    assert result["unit"] == 1
+    assert result["money"] == 100
+
+
+def test_column_groups_with_zhuyin_x_are_normalized() -> None:
+    text = "17.20/18.25/24.14/08.29" + THREE + FOUR + "\u3128" + "0.1"
+    queue = build_batch_mock_queue(text)
+    result = queue["items"][0]["review_result"]
+
+    assert queue["status"] == READY_FOR_QUEUE
+    assert result["status"] == "ok"
+    assert result["type"] == "column"
+    assert result["columns"] == [[17, 20], [18, 25], [24, 14], [8, 29]]
+    assert result["stars"] == [3, 4]
+    assert result["unit"] == 0.1
+    assert result["money"] == 10
+    assert "normalized" in " ".join(queue["items"][0]["preprocessing_notes"])
+
+
+def test_column_groups_with_attached_chinese_stars_x_unit() -> None:
+    result = _result(f"17.20/14.18/25.29{TWO}{THREE}{FOUR}x0.5")
+
+    assert result["status"] == "ok"
+    assert result["type"] == "column"
+    assert result["columns"] == [[17, 20], [14, 18], [25, 29]]
+    assert result["stars"] == [2, 3, 4]
+    assert result["unit"] == 0.5
+    assert result["money"] == 50
+
+
+def test_explicit_equals_star_amount_is_confirmed_format() -> None:
+    queue = build_batch_mock_queue("04.07.17.23.=2.3=500")
+    result = queue["items"][0]["review_result"]
+
+    assert queue["status"] == READY_FOR_QUEUE
+    assert result["status"] == "ok"
+    assert result["type"] == "normal"
+    assert result["numbers"] == [4, 7, 17, 23]
+    assert result["stars"] == [2, 3]
+    assert result["unit"] == 5
+    assert result["money"] == 500
 
 
 def test_equals_with_ping_still_needs_review_or_invalid() -> None:
