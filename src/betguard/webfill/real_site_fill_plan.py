@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from betguard.webfill.batch_queue import PENDING, READY_FOR_QUEUE, READY_TO_FILL, get_current_item
+from betguard.webfill.batch_queue import CURRENT, PENDING, READY_FOR_QUEUE, READY_TO_FILL, get_current_item
 
 
 FINAL_DECISION = {
@@ -20,14 +20,14 @@ def build_real_site_assisted_fill_plan(
     report = _base_report()
 
     if queue.get("status") != READY_FOR_QUEUE:
-        report["errors"].append(f"queue status must be READY_FOR_QUEUE, got {queue.get('status')}")
+        report["errors"].append(f"queue status must be READY, got {queue.get('status')}")
         return report
 
     item = get_current_item(queue)
     if item is None:
         report["errors"].append("current queue item not found")
         return report
-    if item.get("status") not in {PENDING, READY_TO_FILL}:
+    if item.get("status") not in {CURRENT, PENDING, READY_TO_FILL}:
         report["item"] = _item_summary(item)
         report["errors"].append(f"current item is not ready: {item.get('status')}")
         return report
@@ -224,4 +224,3 @@ def _danger_label(candidate: dict[str, Any]) -> str:
     if isinstance(selectors, list) and selectors:
         return str(selectors[0])
     return "unknown danger candidate"
-

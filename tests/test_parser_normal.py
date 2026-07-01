@@ -292,6 +292,51 @@ def test_multi_number_small_bare_amount_after_star_is_money() -> None:
     assert report["money"] == 15
 
 
+def test_attached_explicit_star_single_digit_is_unit() -> None:
+    report = report_for(f"04.32.33{TWO_THREE}2")
+
+    assert report["numbers"] == [4, 32, 33]
+    assert report["stars"] == [2, 3]
+    assert report["unit"] == 2
+    assert report["money"] == 200
+
+
+def test_attached_explicit_star_single_digit_five_is_unit() -> None:
+    report = report_for(f"01.03.35{TWO_THREE}5")
+
+    assert report["numbers"] == [1, 3, 35]
+    assert report["stars"] == [2, 3]
+    assert report["unit"] == 5
+    assert report["money"] == 500
+
+
+def test_four_numbers_440_is_confirmed_half_unit_shorthand() -> None:
+    report = report_for("08 28 33 39 440")
+
+    assert report["numbers"] == [8, 28, 33, 39]
+    assert report["stars"] == [2, 3, 4]
+    assert report["unit"] == 0.5
+    assert report["money"] == 50
+
+
+def test_two_number_colon_x_unit_regression() -> None:
+    report = report_for("22-33:x10")
+
+    assert report["numbers"] == [22, 33]
+    assert report["stars"] == [2]
+    assert report["unit"] == 10
+    assert report["money"] == 1000
+
+
+def test_three_numbers_640_is_confirmed_one_unit_shorthand() -> None:
+    report = report_for("11.28.37.640")
+
+    assert report["numbers"] == [11, 28, 37]
+    assert report["stars"] == [2, 3]
+    assert report["unit"] == 1
+    assert report["money"] == 100
+
+
 def test_parenthesized_star_equals_money_regression() -> None:
     report = report_for("04-11-18(23=300)")
 

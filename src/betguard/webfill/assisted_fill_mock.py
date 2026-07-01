@@ -20,6 +20,11 @@ def build_mock_fill_report(text: str) -> dict[str, Any]:
     if review_result.get("status") != "ok":
         return _blocked_report(text, _review_block_reason(review_result), review_result=review_result)
 
+    if review_result.get("type") == "column":
+        return _column_mock_fill_report(text, review_result)
+    if review_result.get("type") == "car":
+        return _car_mock_fill_report(text, review_result)
+
     fill_plan = build_fill_plan(review_result)
     if fill_plan.get("errors"):
         return _blocked_report(text, "; ".join(fill_plan["errors"]), review_result=review_result, fill_plan=fill_plan)
@@ -35,13 +40,64 @@ def build_mock_fill_report(text: str) -> dict[str, Any]:
         "mode": "assisted_fill_mock",
         "status": "COMPLETED_MOCK_ONLY",
         "original": text,
+        "bet_type": "normal",
         "selected_numbers": selected_numbers,
+        "selected_columns": [],
         "filled_amounts": filled_amounts,
         "skipped": skipped,
         "danger_buttons_detected": list(DANGER_BUTTONS),
         "danger_buttons_clicked": [],
         "review_result": review_result,
         "fill_plan": fill_plan,
+        "final_decision": dict(FINAL_DECISION),
+        "warnings": [],
+        "errors": [],
+    }
+
+
+def _car_mock_fill_report(text: str, review_result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "mode": "assisted_fill_mock",
+        "status": "COMPLETED_MOCK_ONLY",
+        "original": text,
+        "bet_type": "car",
+        "page_kind": "car",
+        "selected_numbers": [],
+        "selected_columns": [],
+        "selected_car_number": int(review_result.get("number")),
+        "car_units": review_result.get("car_units"),
+        "filled_amount": review_result.get("money"),
+        "filled_amounts": {},
+        "skipped": list(STAR_FIELDS),
+        "danger_buttons_detected": list(DANGER_BUTTONS),
+        "danger_buttons_clicked": [],
+        "review_result": review_result,
+        "fill_plan": None,
+        "final_decision": dict(FINAL_DECISION),
+        "warnings": [],
+        "errors": [],
+    }
+
+
+def _column_mock_fill_report(text: str, review_result: dict[str, Any]) -> dict[str, Any]:
+    filled_amounts = _filled_amounts_for_result(review_result)
+    selected_columns = [
+        {"column": index, "numbers": [int(number) for number in column]}
+        for index, column in enumerate(review_result.get("columns", []), start=1)
+    ]
+    return {
+        "mode": "assisted_fill_mock",
+        "status": "COMPLETED_MOCK_ONLY",
+        "original": text,
+        "bet_type": "column",
+        "selected_numbers": [],
+        "selected_columns": selected_columns,
+        "filled_amounts": filled_amounts,
+        "skipped": [star for star in STAR_FIELDS if star not in filled_amounts],
+        "danger_buttons_detected": list(DANGER_BUTTONS),
+        "danger_buttons_clicked": [],
+        "review_result": review_result,
+        "fill_plan": None,
         "final_decision": dict(FINAL_DECISION),
         "warnings": [],
         "errors": [],
@@ -146,6 +202,25 @@ def _read_mock_danger_labels(page: Any) -> list[str]:
 def _read_danger_clicked_state(page: Any) -> list[str]:
     clicked = page.evaluate("document.body.dataset.dangerClicked || ''")
     return ["unexpected danger button click detected"] if clicked else []
+
+
+def _filled_amounts_for_result(result: dict[str, Any]) -> dict[str, int]:
+    bets = result.get("bets") or {}
+    filled: dict[str, int] = {}
+    for star in result.get("stars", []):
+        label = _star_label(star)
+        per_star = bets.get(str(star), {}) if isinstance(bets, dict) else {}
+        money = per_star.get("money") if isinstance(per_star, dict) else None
+        if money is None:
+            money = result.get("money")
+        if money is not None:
+            filled[label] = int(money)
+    return filled
+
+
+def _star_label(star: Any) -> str:
+    index = int(star) - 2
+    return STAR_FIELDS[index] if 0 <= index < len(STAR_FIELDS) else f"{star}星"
 
 
 def _blocked_report(

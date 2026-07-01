@@ -81,6 +81,14 @@ def attach_summaries(data: dict[str, Any]) -> dict[str, Any]:
 
 def _format_normal_summary(result: dict[str, Any]) -> str:
     numbers = ", ".join(_format_number(number) for number in result.get("numbers", []))
+    bets = result.get("bets") or {}
+    if bets:
+        parts = [f"一般：{numbers}"]
+        for star in result.get("stars", []):
+            amount = bets.get(str(star), {}) if isinstance(bets, dict) else {}
+            money = amount.get("money") if isinstance(amount, dict) else None
+            parts.append(f"{CHINESE_STARS.get(star, str(star))}星{_format_money(money)}")
+        return "｜".join(parts)
     return "｜".join(
         [
             f"一般：{numbers}",

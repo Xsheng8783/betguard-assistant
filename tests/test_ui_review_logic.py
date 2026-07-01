@@ -112,12 +112,9 @@ def test_next_step_state_ok_shows_webfill_flow() -> None:
     assert state["title"] == "✅ 檢查通過"
     assert "可以進入網站帶入號碼與金額" in state["messages"]
     assert state["steps"] == [
-        "開啟網站",
-        "手動登入",
-        "進入正確彩種與玩法頁",
-        "由系統帶入號碼與金額",
-        "使用者本人確認畫面",
-        "使用者本人按確認 / 送出",
+        "下載 JSON / CSV",
+        "複製 OK 摘要",
+        "可進入逐筆人工確認流程",
     ]
     assert state["button_text"] == "網站帶入功能準備中"
     assert state["note"] == "目前此版本只做安全檢查，不會操作網站。"
@@ -132,9 +129,9 @@ def test_next_step_state_error_shows_fix_flow() -> None:
     assert state["title"] == "⛔ 已擋下"
     assert "目前不可進入網站帶入" in state["messages"]
     assert state["steps"] == [
-        "查看錯誤原因",
-        "修正下牌文字",
-        "重新開始檢查",
+        "查看錯誤筆數",
+        "修正紅色項目",
+        "重新檢查",
     ]
 
 

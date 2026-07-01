@@ -108,7 +108,7 @@ def _validate_columns(
     warnings: list[str],
 ) -> None:
     game = ACTIVE_GAMES[bet.game]
-    if len(bet.columns) < 2:
+    if len(bet.columns) < 2 and not _is_flat_column_group(bet):
         errors.append("column bet requires at least 2 columns")
 
     for index, column in enumerate(bet.columns, start=1):
@@ -140,6 +140,10 @@ def _required_numbers_for_star(star: int) -> int | None:
     if star in (2, 3, 4):
         return star
     return None
+
+
+def _is_flat_column_group(bet: ParsedBet) -> bool:
+    return len(bet.columns) == 1 and len(bet.columns[0]) >= 2 and bool(bet.stars)
 
 
 def _range_error(game_name: str, number: int) -> str:

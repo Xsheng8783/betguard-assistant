@@ -49,7 +49,7 @@ def test_duplicate_blocks_batch_and_does_not_open_mock_page() -> None:
 
     assert report["status"] == BATCH_BLOCKED
     assert report["mock_page_opened"] is False
-    assert report["summary"]["blocked"] == 1
+    assert report["summary"]["blocked"] == 2
     assert all(item["selected_numbers"] == [] for item in report["items"])
     assert all(item["filled_amounts"] == {} for item in report["items"])
 
@@ -153,4 +153,3 @@ def test_cli_batch_mock_run_uses_mock_runner(capsys, monkeypatch, tmp_path) -> N
     output = json.loads(capsys.readouterr().out)
     assert output["status"] == "COMPLETED_MOCK_ONLY"
     assert output["final_decision"]["real_site_auto_submit"] is False
-

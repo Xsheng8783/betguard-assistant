@@ -6,6 +6,14 @@ __pycache__/
 
 review_logs/
 input.txt
+imput.txt.txt
+queue_state.json
+demo_out/
+review_out/
+audit.json
+audit_after_next.json
+review.html
+review_after_next.html
 
 .env
 .env.*

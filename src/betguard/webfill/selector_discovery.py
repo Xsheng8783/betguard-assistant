@@ -88,6 +88,123 @@ def run_selector_discovery(url: str, *, probe_route: str | None = None) -> dict[
         return report
 
 
+def run_selector_route_probe(url: str, route_name: str) -> dict[str, Any]:
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError(
+            "Playwright is not installed. Run: python -m pip install playwright && python -m playwright install chromium"
+        ) from exc
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=False)
+        context = browser.new_context()
+        page = context.new_page()
+        warnings: list[str] = []
+        errors: list[str] = []
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=15000)
+        except Exception as exc:  # pragma: no cover - depends on live browser state
+            warnings.append(f"initial page load warning: {exc}")
+
+        input("請在瀏覽器中手動登入並停在系統首頁，完成後回到終端機按 Enter 繼續。")
+        report = discover_route_probe(
+            context.pages,
+            url=url,
+            context=context,
+            route_name=route_name,
+            initial_warnings=warnings,
+            initial_errors=errors,
+        )
+        browser.close()
+        return report
+
+
+def discover_route_probe(
+    pages: list[Any],
+    *,
+    url: str,
+    context: Any,
+    route_name: str,
+    initial_warnings: list[str] | None = None,
+    initial_errors: list[str] | None = None,
+) -> dict[str, Any]:
+    warnings: list[str] = list(initial_warnings or [])
+    errors: list[str] = list(initial_errors or [])
+    open_pages = [page for page in pages if not _is_closed(page)]
+    active_page = open_pages[-1] if open_pages else None
+    if active_page is None:
+        errors.append("active page not found")
+        return build_route_probe_report(
+            url=url,
+            active_url=url,
+            route_name=route_name,
+            global_config=_empty_global_config(),
+            route_page_scan=None,
+            warnings=warnings,
+            errors=errors,
+        )
+
+    _wait_for_page(active_page, warnings, 1)
+    active_url = _safe_page_url(active_page) or url
+    active_scan = _scan_page(
+        active_page,
+        page_index=1,
+        source_url=active_url,
+        source_kind="active_page",
+        frame_name="",
+        warnings=warnings,
+    )
+    global_config = extract_global_config_from_html(_global_config_source(active_scan))
+    route_path = str((global_config.get("routes") or {}).get(route_name, ""))
+    route_target = (
+        _route_probe_target_details(
+            active_url,
+            route_path,
+            global_config=global_config,
+            frame_sources=active_scan["frame_elements"] + active_scan["iframe_elements"],
+            live_frames=active_scan["live_frames"],
+        )
+        if route_path
+        else {"resolved_url": None, "origin_source": "", "gid_source": "", "warning": ""}
+    )
+    resolved_url = str(route_target.get("resolved_url") or "")
+    if route_target.get("warning"):
+        _append_warning_once(warnings, str(route_target["warning"]))
+
+    if not resolved_url:
+        errors.append(f"route not found for probe: {route_name}")
+        return build_route_probe_report(
+            url=url,
+            active_url=active_url,
+            route_name=route_name,
+            global_config=global_config,
+            route_page_scan=None,
+            warnings=warnings,
+            errors=errors,
+        )
+
+    route_page_scan = _goto_and_scan_route(
+        context,
+        active_page=active_page,
+        resolved_url=resolved_url,
+        route_name=route_name,
+        warnings=warnings,
+        page_index=2,
+    )
+    route_page_scan["origin_source"] = route_target.get("origin_source")
+    route_page_scan["gid_source"] = route_target.get("gid_source")
+    return build_route_probe_report(
+        url=url,
+        active_url=active_url,
+        route_name=route_name,
+        global_config=global_config,
+        route_page_scan=route_page_scan,
+        warnings=warnings,
+        errors=errors,
+    )
+
+
 def discover_selectors(
     pages: list[Any],
     *,
@@ -139,9 +256,12 @@ def discover_selectors(
             route_base_url = _select_route_base_url(active_page_url, state["frame_urls"], url)
             route_state, route_probe_report = _probe_route(
                 context,
+                active_page=open_pages[-1] if open_pages else None,
                 active_url=route_base_url,
                 route_name=probe_route,
                 global_config=global_config,
+                frame_elements=state["frame_elements"] + state["iframe_elements"],
+                live_frames=state["live_frames"],
                 warnings=warnings,
                 page_index=len(open_pages) + 1,
             )
@@ -303,6 +423,60 @@ def active_origin_url(active_url: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, "/", "", ""))
 
 
+def get_authenticated_origin(
+    active_url: str,
+    frame_elements: list[dict[str, Any]] | None = None,
+    live_frames: list[dict[str, Any]] | None = None,
+) -> str:
+    return _authenticated_origin_details(active_url, frame_elements or [], live_frames or [])["origin"]
+
+
+def _authenticated_origin_details(
+    active_url: str,
+    frame_elements: list[dict[str, Any]],
+    live_frames: list[dict[str, Any]],
+) -> dict[str, str]:
+    candidates: list[tuple[str, str]] = []
+
+    def add(url: str, source: str) -> None:
+        origin = _origin_without_path(url)
+        if origin:
+            candidates.append((origin, source))
+
+    add(active_url, "active_page.url")
+    for item in frame_elements:
+        add(str(item.get("frame_url", "")), "frame_elements.frame_url")
+    for item in live_frames:
+        add(str(item.get("url", "")), "live_frames.url")
+
+    for origin, source in candidates:
+        if _is_authenticated_origin(origin):
+            return {"origin": origin, "origin_source": source, "warning": ""}
+
+    if candidates:
+        origin, source = candidates[0]
+        warning = "route probe origin fallback is www; login redirect likely" if _is_www_origin(origin) else ""
+        return {"origin": origin, "origin_source": source, "warning": warning}
+
+    return {"origin": "", "origin_source": "", "warning": ""}
+
+
+def _origin_without_path(url: str) -> str:
+    parsed = urlsplit(str(url or "").strip())
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+
+
+def _is_authenticated_origin(origin: str) -> bool:
+    host = urlsplit(str(origin or "")).netloc.lower()
+    return host in {"w0.gts362.com", "w1.gts362.com"}
+
+
+def _is_www_origin(origin: str) -> bool:
+    return urlsplit(str(origin or "")).netloc.lower() == "www.gts362.com"
+
+
 def build_route_url(active_url: str, route: str) -> str | None:
     route = str(route or "").strip()
     active = urlsplit(str(active_url or "").strip())
@@ -324,6 +498,250 @@ def build_route_url(active_url: str, route: str) -> str | None:
     else:
         full_path = route_path
     return urlunsplit((active.scheme, active.netloc, full_path, route_parts.query, route_parts.fragment))
+
+
+def build_route_probe_url(
+    active_url: str,
+    route: str,
+    *,
+    global_config: dict[str, Any] | None = None,
+    frame_sources: list[Any] | None = None,
+    frame_elements: list[dict[str, Any]] | None = None,
+    live_frames: list[dict[str, Any]] | None = None,
+) -> str | None:
+    return _route_probe_target_details(
+        active_url,
+        route,
+        global_config=global_config,
+        frame_sources=frame_sources,
+        frame_elements=frame_elements,
+        live_frames=live_frames,
+    )["resolved_url"]
+
+
+def _route_probe_target_details(
+    active_url: str,
+    route: str,
+    *,
+    global_config: dict[str, Any] | None = None,
+    frame_sources: list[Any] | None = None,
+    frame_elements: list[dict[str, Any]] | None = None,
+    live_frames: list[dict[str, Any]] | None = None,
+) -> dict[str, str | None]:
+    route = str(route or "").strip()
+    combined_frame_sources = list(frame_sources or [])
+    if frame_elements:
+        combined_frame_sources.extend(frame_elements)
+    origin_details = _authenticated_origin_details(
+        active_url,
+        [item for item in combined_frame_sources if isinstance(item, dict)],
+        list(live_frames or []),
+    )
+    origin = str(origin_details["origin"])
+    if not route or not origin:
+        return {
+            "resolved_url": None,
+            "origin_source": str(origin_details["origin_source"]),
+            "gid_source": "",
+            "warning": str(origin_details["warning"]),
+        }
+
+    route_parts = urlsplit(route)
+    if route_parts.scheme and route_parts.netloc:
+        return {
+            "resolved_url": urldefrag(route)[0],
+            "origin_source": "route",
+            "gid_source": "",
+            "warning": str(origin_details["warning"]),
+        }
+
+    route_path = route_parts.path or ""
+    if not route_path.startswith("/"):
+        route_path = f"/{route_path}"
+
+    if route_path.startswith("/Front/"):
+        token, gid_source = _route_token_with_source(active_url, global_config or {}, combined_frame_sources)
+        full_path = f"/{token}{route_path}" if token else route_path
+    else:
+        gid_source = ""
+        full_path = route_path
+    origin_parts = urlsplit(origin)
+    return {
+        "resolved_url": urlunsplit(
+            (origin_parts.scheme, origin_parts.netloc, full_path, route_parts.query, route_parts.fragment)
+        ),
+        "origin_source": str(origin_details["origin_source"]),
+        "gid_source": gid_source,
+        "warning": str(origin_details["warning"]),
+    }
+
+
+def extract_global_config_from_html(html: str) -> dict[str, Any]:
+    return extract_global_routes_from_html(html)
+
+
+def detect_404_page(text: str, html: str = "") -> bool:
+    content = "\n".join([str(text or ""), str(html or "")]).lower()
+    return any(
+        marker.lower() in content
+        for marker in (
+            "HTTP 404",
+            "404 not found",
+            "404 -",
+            ">404<",
+            "找不到資源",
+            "要求的 URL",
+        )
+    )
+
+
+def _route_token_from_active_url(active_url: str) -> str:
+    path = urlsplit(str(active_url or "")).path or ""
+    front_index = path.find("/Front/")
+    if front_index > 0:
+        prefix = path[:front_index].strip("/")
+        return prefix.split("/", 1)[0] if prefix else ""
+    segment = _first_path_segment(path)
+    return "" if segment == "Front" else segment
+
+
+def _route_token_with_source(
+    active_url: str,
+    global_config: dict[str, Any],
+    frame_sources: list[Any],
+) -> tuple[str, str]:
+    token = _route_token_from_active_url(active_url)
+    if token:
+        return token, "active_url"
+    token = _route_token_from_global_config(global_config)
+    if token:
+        return token, "global_config.gid"
+    token = _route_token_from_frame_sources(frame_sources)
+    if token:
+        return token, "frame_src"
+    return "", ""
+
+
+def _route_token_from_global_config(global_config: dict[str, Any]) -> str:
+    for key in ("gid", "GID", "global_gid"):
+        value = str(global_config.get(key) or "").strip().strip("/")
+        if value:
+            return value.split("/", 1)[0]
+    return ""
+
+
+def _route_token_from_frame_sources(frame_sources: list[Any]) -> str:
+    for item in frame_sources:
+        if isinstance(item, dict):
+            candidates = [item.get("src"), item.get("frame_url"), item.get("source_url")]
+        else:
+            candidates = [item]
+        for candidate in candidates:
+            token = _first_path_segment(urlsplit(str(candidate or "")).path)
+            if token and token != "Front":
+                return token
+    return ""
+
+
+def _first_path_segment(path: str) -> str:
+    parts = [part for part in str(path or "").split("/") if part]
+    return parts[0] if parts else ""
+
+
+def build_route_probe_report(
+    *,
+    url: str,
+    active_url: str,
+    route_name: str,
+    global_config: dict[str, Any],
+    route_page_scan: dict[str, Any] | None,
+    warnings: list[str] | None = None,
+    errors: list[str] | None = None,
+) -> dict[str, Any]:
+    report_warnings = list(warnings or [])
+    report_errors = list(errors or [])
+    routes = global_config.get("routes") if isinstance(global_config.get("routes"), dict) else {}
+    route_path = str(routes.get(route_name, ""))
+    target_details = _route_probe_target_details(active_url, route_path, global_config=global_config)
+    if target_details.get("warning"):
+        _append_warning_once(report_warnings, str(target_details["warning"]))
+    resolved_url = (
+        str(route_page_scan.get("resolved_url") or "")
+        if route_page_scan
+        else str(target_details.get("resolved_url") or "")
+    )
+    actual_url = str(route_page_scan.get("actual_url") or resolved_url) if route_page_scan else resolved_url
+    title = str(route_page_scan.get("title") or "") if route_page_scan else ""
+    origin_source = (
+        str(route_page_scan.get("origin_source") or target_details.get("origin_source") or "")
+        if route_page_scan
+        else str(target_details.get("origin_source") or "")
+    )
+    gid_source = (
+        str(route_page_scan.get("gid_source") or target_details.get("gid_source") or "")
+        if route_page_scan
+        else str(target_details.get("gid_source") or "")
+    )
+    probe_method = (
+        str(route_page_scan.get("probe_method") or "")
+        if route_page_scan
+        else ""
+    )
+    scan = route_page_scan.get("scan") if route_page_scan else None
+    text = "\n".join(scan.get("text_sources", [])) if scan else ""
+    html = "\n".join(scan.get("html_sources", [])) if scan else ""
+    elements = list(scan.get("elements", [])) if scan else []
+    appears_login_page = detect_login_page(text, html, elements)
+    is_404_page = detect_404_page("\n".join([title, text]), html)
+
+    if appears_login_page:
+        _append_warning_once(report_warnings, "route probe redirected to login page")
+        detection_elements: list[dict[str, Any]] = []
+    else:
+        detection_elements = elements
+
+    number_candidates = detect_number_candidates(detection_elements)
+    amount_field_candidates = detect_amount_field_candidates(detection_elements)
+    danger_candidates = detect_danger_candidates(detection_elements)
+    elements_sample_by_frame = scan.get("elements_sample_by_frame", {}) if scan else {}
+
+    if not route_path:
+        _append_warning_once(report_warnings, f"route not found for probe: {route_name}")
+    if html and not number_candidates:
+        _append_warning_once(report_warnings, "number candidates not found; inspect elements_sample_by_frame")
+
+    return {
+        "url": url,
+        "mode": "selector_discovery_route_probe",
+        "global_config": {
+            "game_id": global_config.get("game_id"),
+            "game_state": global_config.get("game_state") or {},
+            "default_page": global_config.get("default_page"),
+            "routes": dict(routes),
+        },
+        "route_probe": {
+            "route_name": route_name,
+            "route_path": route_path or None,
+            "resolved_url": resolved_url or None,
+            "actual_url": actual_url or None,
+            "origin_source": origin_source,
+            "gid_source": gid_source,
+            "probe_method": probe_method,
+            "title": title,
+            "appears_login_page": appears_login_page,
+            "is_404_page": is_404_page,
+            "text_length": len(text),
+            "html_length": len(html),
+        },
+        "number_candidates_count": len(number_candidates),
+        "number_candidates": number_candidates,
+        "route_probe_elements": detection_elements,
+        "amount_field_candidates": amount_field_candidates,
+        "danger_candidates": danger_candidates,
+        "elements_sample_by_frame": elements_sample_by_frame,
+        "warnings": report_warnings,
+        "errors": report_errors,
+    }
 
 
 def detect_login_page(text: str, html: str = "", elements: list[dict[str, Any]] | None = None) -> bool:
@@ -415,6 +833,7 @@ def extract_global_routes_from_html(html: str) -> dict[str, Any]:
     game_list_value = _extract_global_assignment(source, "GameList")
     all_game_value = _extract_global_assignment(source, "AllGame")
     config = _empty_global_config()
+    config["gid"] = _parse_string_value(_extract_global_assignment(source, "GID"))
     config["game_id"] = _parse_int(_extract_global_assignment(source, "GameID"))
     config["all_bet_state"] = _parse_int(_extract_global_assignment(source, "AllBetState"))
     config["game_state"] = _parse_js_value(_extract_global_assignment(source, "GameState")) or {}
@@ -560,6 +979,7 @@ def detect_danger_elements(elements: list[dict[str, Any]]) -> list[dict[str, Any
 
 def _empty_global_config() -> dict[str, Any]:
     return {
+        "gid": None,
         "game_id": None,
         "all_bet_state": None,
         "game_state": {},
@@ -860,18 +1280,107 @@ def _global_config_source(state: dict[str, Any]) -> str:
     )
 
 
+def _goto_and_scan_route(
+    context: Any,
+    *,
+    active_page: Any | None,
+    resolved_url: str,
+    route_name: str,
+    warnings: list[str],
+    page_index: int,
+) -> dict[str, Any]:
+    main_frame = _find_main_frame(active_page, warnings) if active_page is not None else None
+    if main_frame is not None:
+        status_code: int | None = None
+        try:
+            response = main_frame.goto(resolved_url, wait_until="domcontentloaded", timeout=15000)
+            status_code = int(response.status) if response is not None else None
+        except Exception as exc:  # pragma: no cover - depends on live browser state
+            warnings.append(f"route probe mainFrame load warning {resolved_url}: {exc}")
+        _wait_for_page(active_page, warnings, page_index)
+        return {
+            "resolved_url": resolved_url,
+            "actual_url": _safe_frame_url(main_frame) or _safe_page_url(active_page),
+            "title": _safe_page_title(active_page),
+            "status_code": status_code,
+            "probe_method": "mainFrame",
+            "scan": _scan_page(
+                active_page,
+                page_index=page_index,
+                source_url=resolved_url,
+                source_kind="route_probe",
+                frame_name=route_name,
+                warnings=warnings,
+            ),
+        }
+
+    page = context.new_page()
+    status_code = None
+    try:
+        try:
+            response = page.goto(resolved_url, wait_until="domcontentloaded", timeout=15000)
+            status_code = int(response.status) if response is not None else None
+        except Exception as exc:  # pragma: no cover - depends on live browser state
+            warnings.append(f"route probe page load warning {resolved_url}: {exc}")
+        _wait_for_page(page, warnings, page_index)
+        return {
+            "resolved_url": resolved_url,
+            "actual_url": _safe_page_url(page),
+            "title": _safe_page_title(page),
+            "status_code": status_code,
+            "probe_method": "new_page_fallback",
+            "scan": _scan_page(
+                page,
+                page_index=page_index,
+                source_url=resolved_url,
+                source_kind="route_probe",
+                frame_name=route_name,
+                warnings=warnings,
+            ),
+        }
+    finally:
+        try:
+            page.close()
+        except Exception:  # pragma: no cover - depends on live browser state
+            pass
+
+
+def _find_main_frame(page: Any, warnings: list[str]) -> Any | None:
+    for frame in _collect_all_frames(page, warnings):
+        if _safe_frame_name(frame) == "mainFrame":
+            return frame
+    return None
+
+
 def _probe_route(
     context: Any,
     *,
+    active_page: Any | None = None,
     active_url: str,
     route_name: str,
     global_config: dict[str, Any],
+    frame_elements: list[dict[str, Any]] | None = None,
+    live_frames: list[dict[str, Any]] | None = None,
     warnings: list[str],
     page_index: int,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     route = str((global_config.get("routes") or {}).get(route_name, ""))
-    route_url = build_route_url(active_url, route) if route else None
+    route_target = (
+        _route_probe_target_details(
+            active_url,
+            route,
+            global_config=global_config,
+            frame_sources=frame_elements or [],
+            live_frames=live_frames or [],
+        )
+        if route
+        else {"resolved_url": None, "origin_source": "", "gid_source": "", "warning": ""}
+    )
+    route_url = str(route_target.get("resolved_url") or "")
     route_warnings: list[str] = []
+    if route_target.get("warning"):
+        route_warnings.append(str(route_target["warning"]))
+        _append_warning_once(warnings, str(route_target["warning"]))
     if _route_url_missing_session_token(route_url, route):
         route_warnings.append("route url missing session token path")
         warnings.append("route url missing session token path")
@@ -884,6 +1393,9 @@ def _probe_route(
             "built_url": None,
             "url": None,
             "actual_url": None,
+            "origin_source": str(route_target.get("origin_source") or ""),
+            "gid_source": str(route_target.get("gid_source") or ""),
+            "probe_method": "",
             "status": "route_not_found",
             "appears_404": False,
             "appears_login_page": False,
@@ -898,87 +1410,73 @@ def _probe_route(
             "warnings": [f"route not found for probe: {route_name}"],
         }
 
-    page = context.new_page()
     probe_warnings: list[str] = list(route_warnings)
-    status_code: int | None = None
-    try:
-        try:
-            response = page.goto(route_url, wait_until="domcontentloaded", timeout=15000)
-            status_code = int(response.status) if response is not None else None
-        except Exception as exc:  # pragma: no cover - depends on live browser state
-            probe_warnings.append(f"route probe page load warning {route_url}: {exc}")
-        _wait_for_page(page, probe_warnings, page_index)
-        scan = _scan_page(
-            page,
-            page_index=page_index,
-            source_url=route_url,
-            source_kind="route_probe",
-            frame_name=route_name,
-            warnings=probe_warnings,
-        )
-        appears_login = bool(scan["live_frames"]) and all(
-            bool(frame.get("appears_login_page")) for frame in scan["live_frames"]
-        )
-        html = "\n".join(scan["html_sources"])
-        text = "\n".join(scan["text_sources"])
-        title = _safe_page_title(page)
-        appears_404 = _appears_404(status_code, title, text, html)
-        appears_market_closed = detect_market_closed(text, html, scan["elements"])
-        number_candidates = detect_number_candidates(scan["elements"])
-        amount_field_candidates = detect_amount_field_candidates(scan["elements"])
-        danger_candidates = detect_danger_candidates(scan["elements"])
-        has_bet_page_body = _has_bet_page_body(number_candidates, amount_field_candidates)
-        if appears_login:
-            probe_warnings.append("route probe redirected to login page")
-            warnings.append("route probe redirected to login page")
-            merge_state: dict[str, Any] | None = None
-        elif appears_404 or appears_market_closed or not has_bet_page_body:
-            merge_state = None
-        else:
-            merge_state = scan
+    route_page_scan = _goto_and_scan_route(
+        context,
+        active_page=active_page,
+        resolved_url=route_url,
+        route_name=route_name,
+        warnings=probe_warnings,
+        page_index=page_index,
+    )
+    scan = route_page_scan["scan"]
+    html = "\n".join(scan["html_sources"])
+    text = "\n".join(scan["text_sources"])
+    title = str(route_page_scan.get("title") or "")
+    appears_login = detect_login_page(text, html, scan["elements"])
+    appears_404 = _appears_404(route_page_scan.get("status_code"), title, text, html)
+    appears_market_closed = detect_market_closed(text, html, scan["elements"])
+    number_candidates = detect_number_candidates(scan["elements"])
+    amount_field_candidates = detect_amount_field_candidates(scan["elements"])
+    has_bet_page_body = _has_bet_page_body(number_candidates, amount_field_candidates)
+    if appears_login:
+        probe_warnings.append("route probe redirected to login page")
+        warnings.append("route probe redirected to login page")
+        merge_state: dict[str, Any] | None = None
+    elif appears_404 or appears_market_closed or not has_bet_page_body:
+        merge_state = None
+    else:
+        merge_state = scan
 
-        elements = scan["elements"] if merge_state is not None else []
-        report = {
-            "label": route_name,
-            "route_name": route_name,
-            "route": route,
-            "built_url": route_url,
-            "url": route_url,
-            "actual_url": _safe_page_url(page),
-            "status": _route_probe_status(
-                appears_login,
-                appears_404,
-                appears_market_closed,
-                not has_bet_page_body,
-            ),
-            "appears_404": appears_404,
-            "appears_login_page": appears_login,
-            "appears_market_closed": appears_market_closed,
-            "has_bet_page_body": has_bet_page_body,
-            "title": title,
-            "text_length": sum(len(text) for text in scan["text_sources"]),
-            "html_length": sum(len(html) for html in scan["html_sources"]),
-            "html_sample": _short_text(html, 500) if appears_404 else "",
-            "elements_sample": elements[:ELEMENT_SAMPLE_PER_FRAME],
-            "number_candidates": detect_number_candidates(elements),
-            "amount_field_candidates": detect_amount_field_candidates(elements),
-            "danger_candidates": detect_danger_candidates(elements),
-            "live_frames": scan["live_frames"],
-            "warnings": probe_warnings,
-        }
-        return merge_state, report
-    finally:
-        try:
-            page.close()
-        except Exception:  # pragma: no cover - depends on live browser state
-            pass
+    elements = scan["elements"] if merge_state is not None else []
+    report = {
+        "label": route_name,
+        "route_name": route_name,
+        "route": route,
+        "built_url": route_url,
+        "url": route_url,
+        "actual_url": route_page_scan.get("actual_url"),
+        "origin_source": str(route_target.get("origin_source") or ""),
+        "gid_source": str(route_target.get("gid_source") or ""),
+        "probe_method": route_page_scan.get("probe_method"),
+        "status": _route_probe_status(
+            appears_login,
+            appears_404,
+            appears_market_closed,
+            not has_bet_page_body,
+        ),
+        "appears_404": appears_404,
+        "appears_login_page": appears_login,
+        "appears_market_closed": appears_market_closed,
+        "has_bet_page_body": has_bet_page_body,
+        "title": title,
+        "text_length": sum(len(text) for text in scan["text_sources"]),
+        "html_length": sum(len(html) for html in scan["html_sources"]),
+        "html_sample": _short_text(html, 500) if appears_404 else "",
+        "elements_sample": elements[:ELEMENT_SAMPLE_PER_FRAME],
+        "number_candidates": detect_number_candidates(elements),
+        "amount_field_candidates": detect_amount_field_candidates(elements),
+        "danger_candidates": detect_danger_candidates(elements),
+        "live_frames": scan["live_frames"],
+        "warnings": probe_warnings,
+    }
+    return merge_state, report
 
 
 def _appears_404(status_code: int | None, title: str, text: str, html: str) -> bool:
     if status_code == 404:
         return True
-    content = "\n".join([title or "", text or "", html or ""]).lower()
-    return any(marker in content for marker in ("http 404", "404 not found", "404 -", ">404<"))
+    return detect_404_page("\n".join([title or "", text or ""]), html or "")
 
 
 def _has_bet_page_body(
@@ -1625,17 +2123,24 @@ __all__ = [
     "build_candidate_selectors",
     "build_market_state",
     "build_selector_discovery_report",
+    "build_route_probe_report",
+    "build_route_probe_url",
     "build_route_url",
     "detect_amount_fields",
     "detect_danger_elements",
+    "detect_404_page",
     "detect_login_page",
     "detect_market_closed",
     "detect_number_elements",
     "discover_selectors",
+    "discover_route_probe",
     "discover_available_labels",
+    "extract_global_config_from_html",
     "extract_global_routes_from_html",
+    "get_authenticated_origin",
     "mark_visited_url",
     "resolve_frame_src",
     "run_selector_discovery",
+    "run_selector_route_probe",
     "should_scan_frame_src",
 ]

@@ -61,6 +61,54 @@ def test_car_c_money_ten_yuan() -> None:
     assert report["status"] == "ok"
 
 
+def test_car_money_ten_yuan_with_spaces() -> None:
+    report = report_for(f"32 {CAR} 10{YUAN}")
+
+    assert report["type"] == "car"
+    assert report["number"] == 32
+    assert report["car_units"] == 0.1
+    assert report["money"] == 10
+    assert report["status"] == "ok"
+
+
+def test_car_bare_ten_is_money() -> None:
+    report = report_for(f"32{CAR}10")
+
+    assert report["type"] == "car"
+    assert report["number"] == 32
+    assert report["car_units"] == 0.1
+    assert report["money"] == 10
+    assert report["status"] == "ok"
+
+
+def test_car_bare_ten_with_space_before_car_is_money() -> None:
+    report = report_for(f"32 {CAR}10")
+
+    assert report["number"] == 32
+    assert report["car_units"] == 0.1
+    assert report["money"] == 10
+    assert report["status"] == "ok"
+
+
+def test_car_bare_ten_with_space_after_car_is_money() -> None:
+    report = report_for(f"32{CAR} 10")
+
+    assert report["number"] == 32
+    assert report["car_units"] == 0.1
+    assert report["money"] == 10
+    assert report["status"] == "ok"
+
+
+def test_car_leading_zero_number_twenty_yuan() -> None:
+    report = report_for(f"08{CAR}20{YUAN}")
+
+    assert report["type"] == "car"
+    assert report["number"] == 8
+    assert report["car_units"] == 0.2
+    assert report["money"] == 20
+    assert report["status"] == "ok"
+
+
 def test_car_d_money_fifty_yuan() -> None:
     report = report_for(f"32{CAR}50{YUAN}")
 
@@ -74,6 +122,16 @@ def test_car_money_one_hundred_yuan() -> None:
     report = report_for(f"32{CAR}100{YUAN}")
 
     assert report["number"] == 32
+    assert report["car_units"] == 1
+    assert report["money"] == 100
+    assert report["status"] == "ok"
+
+
+def test_car_39_one_hundred_yuan() -> None:
+    report = report_for(f"39{CAR}100{YUAN}")
+
+    assert report["type"] == "car"
+    assert report["number"] == 39
     assert report["car_units"] == 1
     assert report["money"] == 100
     assert report["status"] == "ok"
@@ -107,3 +165,17 @@ def test_car_h_missing_amount_is_error() -> None:
 
     assert report["status"] == "error"
     assert "missing car amount" in report["errors"]
+
+
+def test_car_zero_number_is_error() -> None:
+    report = report_for(f"00{CAR}10{YUAN}")
+
+    assert report["status"] == "error"
+    assert "number out of range 0; valid range is 1-39" in report["errors"]
+
+
+def test_car_missing_number_is_error() -> None:
+    report = report_for(f"{CAR}10{YUAN}")
+
+    assert report["status"] == "error"
+    assert "missing car number" in report["errors"]

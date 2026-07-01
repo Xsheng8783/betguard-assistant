@@ -33,7 +33,7 @@ NUMBER_DELIMITERS = set(f"./-{COMMA_WORD},{FULL_COMMA} \t\r\n")
 COLUMN_INNER_DELIMITERS = set(f".-{COMMA_WORD},{FULL_COMMA} \t\r\n")
 AMOUNT_KIND_PATTERN = f"{UNIT_WORD}|{YUAN_WORD}|{BLOCK_WORD}"
 TAIL_OPERATOR_AMOUNT_PATTERN = re.compile(
-    rf"(?P<op>[=/])\s*(?P<value>\d+(?:\.\d+)?)(?P<kind>{AMOUNT_KIND_PATTERN})?\s*$"
+    rf"(?P<op>[=/:])\s*(?P<value>\d+(?:\.\d+)?)(?P<kind>{AMOUNT_KIND_PATTERN})?\s*$"
 )
 X_AMOUNT_PATTERN = re.compile(
     rf"[xX]\s*(?P<value>\d+(?:\.\d+)?)(?:\s*{UNIT_WORD})?\s*$"
@@ -215,6 +215,8 @@ def _parse_car_line(value: str, *, game_name: str) -> ParsedBet:
     if amount_match and amount_match.group("value") is not None:
         if amount_match.group("kind") in {YUAN_WORD, BLOCK_WORD}:
             car_units, money = _car_money_to_amount(amount_match.group("value"))
+        elif _looks_like_bare_car_money(amount_match.group("value")):
+            car_units, money = _car_money_to_amount(amount_match.group("value"))
         else:
             car_units, money = _car_units_to_amount(amount_match.group("value"))
 
@@ -240,7 +242,16 @@ def _car_money_to_amount(value: str) -> tuple[JsonNumber, int]:
     return _number_for_json(Decimal(money) / Decimal("100")), money
 
 
+def _looks_like_bare_car_money(value: str) -> bool:
+    decimal_value = Decimal(value)
+    return decimal_value == decimal_value.to_integral_value() and decimal_value >= Decimal("10")
+
+
 def _parse_normal_line(value: str, *, game_name: str) -> ParsedBet:
+    shorthand = _parse_confirmed_shorthand_line(value, game_name=game_name)
+    if shorthand is not None:
+        return shorthand
+
     game = ACTIVE_GAMES[game_name]
     has_per_star_bets = _has_per_star_bet_sequence(value)
     stars: list[int] = []
@@ -263,26 +274,32 @@ def _parse_normal_line(value: str, *, game_name: str) -> ParsedBet:
         raise ParseError("unsupported or unclear betting format")
 
     if remainder:
-        per_star = _parse_per_star_bets(remainder)
+        per_star = _parse_per_star_bets(remainder, allow_single_group=len(numbers) >= 5)
         if per_star is not None:
             stars, bets = per_star
             if amount is not None:
                 raise ParseError("cannot mix total amount and per-star amounts")
         else:
-            parsed_stars, remainder = _parse_stars_from_start(remainder)
-            if parsed_stars:
-                stars = parsed_stars
+            if amount is None and _starts_with_long_bare_amount(remainder):
+                amount, remainder = _parse_amount_from_start(remainder, bare_small_as_money=True)
+            else:
+                parsed_stars, remainder = _parse_stars_from_start(remainder)
+                if parsed_stars:
+                    stars = parsed_stars
             remainder = remainder.strip()
             if amount is None and remainder:
                 amount, remainder = _parse_amount_from_start(
                     remainder,
-                    bare_small_as_money=len(numbers) >= 3,
+                    bare_small_as_money=len(numbers) >= 3 and not _single_digit_unit_after_explicit_stars(stars, remainder),
                 )
             if remainder.strip():
                 raise ParseError("unsupported or unclear betting format")
 
     if not stars:
         stars = game.default_stars(len(numbers))
+
+    if amount is None and bets:
+        amount = _shared_bet_amount(bets)
 
     unit = amount.unit if amount is not None else None
     money = amount.money if amount is not None else None
@@ -295,6 +312,61 @@ def _parse_normal_line(value: str, *, game_name: str) -> ParsedBet:
         unit=unit,
         money=money,
         bets=bets,
+    )
+
+
+def _shared_bet_amount(bets: dict[str, BetAmount]) -> BetAmount | None:
+    amounts = list(bets.values())
+    if not amounts:
+        return None
+    first = amounts[0]
+    if all(amount.unit == first.unit and amount.money == first.money for amount in amounts):
+        return first
+    return None
+
+
+def _parse_confirmed_shorthand_line(value: str, *, game_name: str) -> ParsedBet | None:
+    colon_x = re.fullmatch(r"\s*(?P<a>\d{1,2})-(?P<b>\d{1,2})\s*:\s*[xX]\s*(?P<unit>\d+(?:\.\d+)?)\s*", value)
+    if colon_x:
+        unit = Decimal(colon_x.group("unit"))
+        amount = BetAmount(unit=_number_for_json(unit), money=_money_from_unit(unit))
+        return ParsedBet(
+            game=game_name,
+            type="normal",
+            numbers=[int(colon_x.group("a")), int(colon_x.group("b"))],
+            stars=[2],
+            unit=amount.unit,
+            money=amount.money,
+        )
+
+    tokens = [token for token in re.split(rf"[.\s,{FULL_COMMA}{COMMA_WORD}-]+", value.strip()) if token]
+    if len(tokens) not in {4, 5} or not all(token.isdigit() for token in tokens):
+        return None
+
+    code = tokens[-1]
+    number_tokens = tokens[:-1]
+    shorthand_map = {
+        (3, "320"): ([2, 3], Decimal("0.5")),
+        (3, "640"): ([2, 3], Decimal("1")),
+        (4, "440"): ([2, 3, 4], Decimal("0.5")),
+        (4, "880"): ([2, 3, 4], Decimal("1")),
+    }
+    match = shorthand_map.get((len(number_tokens), code))
+    if match is None:
+        return None
+
+    if any(len(token) > 2 for token in number_tokens):
+        return None
+
+    stars, unit = match
+    amount = BetAmount(unit=_number_for_json(unit), money=_money_from_unit(unit))
+    return ParsedBet(
+        game=game_name,
+        type="normal",
+        numbers=[int(token) for token in number_tokens],
+        stars=stars,
+        unit=amount.unit,
+        money=amount.money,
     )
 
 
@@ -331,6 +403,10 @@ def _parse_column_parts(text: str) -> list[list[int]] | None:
     if shorthand is not None:
         return shorthand
 
+    flat_group = _parse_flat_slash_dunhao_column_group(value)
+    if flat_group is not None:
+        return [flat_group]
+
     if not _has_column_separator(value):
         return None
 
@@ -350,6 +426,14 @@ def _has_column_separator(text: str) -> bool:
         or TAIL_WORD in text
         or bool(re.search(r"(?<=\d)\s*[xX]\s*(?=\d)", text))
     )
+
+
+def _parse_flat_slash_dunhao_column_group(text: str) -> list[int] | None:
+    if "/" not in text or COMMA_WORD not in text:
+        return None
+    if re.fullmatch(r"\d{1,2}(?:/\d{1,2})+、\d{1,2}(?:、\d{1,2})*", text.strip()):
+        return [int(token) for token in re.findall(r"\d{1,2}", text)]
+    return None
 
 
 def _parse_tail_shorthand(text: str) -> list[list[int]] | None:
@@ -456,12 +540,14 @@ def _valid_star_amount_suffix(match: re.Match[str]) -> bool:
         and any(char in before for char in "./")
     ):
         return False
+    if token.isdigit() and len(star) == 1 and sep == "" and before.isspace() and len(match.group("value")) >= 2:
+        return False
     return True
 
 
 def _compact_star_token(token: str) -> str:
     cleaned = token.replace(STAR_WORD, "")
-    cleaned = re.sub(rf"[,{FULL_COMMA}{COMMA_WORD}\s]+", "", cleaned)
+    cleaned = re.sub(rf"[.,{FULL_COMMA}{COMMA_WORD}\s]+", "", cleaned)
     return (
         cleaned.replace(CHINESE_TWO, "2")
         .replace(CHINESE_ALT_TWO, "2")
@@ -496,7 +582,7 @@ def _peel_tail_amount(text: str) -> tuple[str, BetAmount | None]:
         value = match.group("value")
         kind = match.group("kind")
         if op != "/" or _looks_like_slash_amount(value, kind):
-            amount = _amount_from_parts(value, kind, source=op)
+            amount = _amount_from_parts(value, kind, source="/" if op == ":" else op)
             return text[: match.start()].strip(), amount
 
     bare_match = BARE_TAIL_AMOUNT_PATTERN.search(text)
@@ -555,6 +641,11 @@ def _star_token_source(*, include_numeric: bool) -> str:
     chinese = (
         rf"{CHINESE_TWO}{CHINESE_THREE}{CHINESE_FOUR}|"
         rf"{CHINESE_ALT_TWO}{CHINESE_THREE}{CHINESE_FOUR}|"
+        rf"{CHINESE_TWO}{COMMA_WORD}{CHINESE_THREE}{COMMA_WORD}{CHINESE_FOUR}|"
+        rf"{CHINESE_ALT_TWO}{COMMA_WORD}{CHINESE_THREE}{COMMA_WORD}{CHINESE_FOUR}|"
+        rf"{CHINESE_TWO}{COMMA_WORD}{CHINESE_THREE}|"
+        rf"{CHINESE_ALT_TWO}{COMMA_WORD}{CHINESE_THREE}|"
+        rf"{CHINESE_THREE}{COMMA_WORD}{CHINESE_FOUR}|"
         rf"{CHINESE_TWO}{CHINESE_THREE}|"
         rf"{CHINESE_ALT_TWO}{CHINESE_THREE}|"
         rf"{CHINESE_THREE}{CHINESE_FOUR}|"
@@ -566,6 +657,8 @@ def _star_token_source(*, include_numeric: bool) -> str:
         return chinese
     return (
         rf"{chinese}|"
+        rf"[234](?:\.[234])(?:\.[234])?|"
+        rf"[234]{{2,3}}{STAR_WORD}|"
         rf"[234]\s*[,{FULL_COMMA}{COMMA_WORD}]\s*[234]\s*[,{FULL_COMMA}{COMMA_WORD}]\s*[234]|"
         rf"[234]\s+[234]\s+[234]|"
         rf"[234]\s*[,{FULL_COMMA}{COMMA_WORD}]\s*[234]|"
@@ -602,36 +695,87 @@ def _consume_numbers(text: str) -> tuple[list[int], str]:
     return numbers, text[index:]
 
 
-def _parse_per_star_bets(remainder: str) -> tuple[list[int], dict[str, BetAmount]] | None:
-    matches = list(PER_STAR_AMOUNT_PATTERN.finditer(remainder))
-    if not matches:
-        return None
-
-    leftover = PER_STAR_AMOUNT_PATTERN.sub("", remainder).strip()
-    if leftover:
+def _parse_per_star_bets(
+    remainder: str,
+    *,
+    allow_single_group: bool = False,
+) -> tuple[list[int], dict[str, BetAmount]] | None:
+    value = remainder.strip()
+    if not value:
         return None
 
     stars: list[int] = []
     bets: dict[str, BetAmount] = {}
-    for match in matches:
-        star_values = _stars_from_token(match.group("star"))
-        if len(star_values) != 1:
+    group_count = 0
+    single_group_had_space_before_amount = False
+    index = 0
+    length = len(value)
+
+    while index < length:
+        while index < length and value[index] in f".,{FULL_COMMA}{COMMA_WORD} \t":
+            index += 1
+        if index >= length:
+            break
+
+        token_start = index
+        while index < length and not value[index].isdigit():
+            index += 1
+        raw_token = value[token_start:index]
+        token = raw_token.strip(f".,{FULL_COMMA}{COMMA_WORD} \t")
+        if not token:
             return None
-        star = star_values[0]
-        stars.append(star)
+
+        try:
+            star_values = _stars_from_token(token)
+        except ParseError:
+            if group_count > 0:
+                raise
+            return None
+
+        amount_match = re.match(rf"(?P<value>\d+(?:\.\d+)?)(?P<kind>{AMOUNT_KIND_PATTERN})?", value[index:])
+        if not amount_match:
+            raise ParseError(f"missing money for star {token}")
+
         amount = _amount_from_parts(
-            match.group("value"),
-            match.group("kind"),
+            amount_match.group("value"),
+            amount_match.group("kind"),
             source="per-star",
             include_unit_for_money=False,
         )
-        bets[str(star)] = amount
+        for star in star_values:
+            if str(star) in bets:
+                raise ParseError(f"duplicate amount for star {star}")
+            stars.append(star)
+            bets[str(star)] = amount
+        group_count += 1
+        if group_count == 1:
+            single_group_had_space_before_amount = bool(raw_token and raw_token[-1].isspace())
+        index += amount_match.end()
+
+    if group_count == 0:
+        return None
+    if group_count == 1 and not allow_single_group:
+        return None
+    if group_count == 1 and single_group_had_space_before_amount:
+        return None
 
     return _dedupe_preserve_order(stars), bets
 
 
 def _has_per_star_bet_sequence(text: str) -> bool:
-    return len(list(PER_STAR_AMOUNT_PATTERN.finditer(text))) >= 2
+    numbers, remainder = _consume_numbers(text)
+    if not numbers:
+        return len(list(PER_STAR_AMOUNT_PATTERN.finditer(text))) >= 2
+    return _looks_like_star_amount_remainder(remainder.strip(), allow_single_group=len(numbers) >= 5)
+
+
+def _looks_like_star_amount_remainder(remainder: str, *, allow_single_group: bool = True) -> bool:
+    if not remainder:
+        return False
+    try:
+        return _parse_per_star_bets(remainder, allow_single_group=allow_single_group) is not None
+    except ParseError:
+        return bool(re.search(rf"[{CHINESE_TWO}{CHINESE_ALT_TWO}{CHINESE_THREE}{CHINESE_FOUR}234].*\d", remainder))
 
 
 def _parse_stars_from_start(remainder: str) -> tuple[list[int], str]:
@@ -642,6 +786,16 @@ def _parse_stars_from_start(remainder: str) -> tuple[list[int], str]:
             token = match.group(0)
             return _stars_from_token(token), value[match.end() :]
     return [], remainder
+
+
+def _starts_with_long_bare_amount(remainder: str) -> bool:
+    return bool(re.match(r"\s*\d{3,}(?:元|塊)?(?:\s*$)", remainder))
+
+
+def _single_digit_unit_after_explicit_stars(stars: list[int], remainder: str) -> bool:
+    if not stars:
+        return False
+    return bool(re.fullmatch(r"\s*[1-9]\s*", remainder))
 
 
 def _star_start_patterns() -> list[re.Pattern[str]]:
@@ -706,6 +860,10 @@ def _amount_from_parts(
         return BetAmount(unit=_number_for_json(decimal_value / Decimal("100")), money=money)
 
     if source == "bare_money":
+        money = _money_from_decimal(decimal_value)
+        return BetAmount(unit=_number_for_json(decimal_value / Decimal("100")), money=money)
+
+    if source == "per-star" and kind is None and (decimal_value >= Decimal("10") or _is_common_money(decimal_value)):
         money = _money_from_decimal(decimal_value)
         return BetAmount(unit=_number_for_json(decimal_value / Decimal("100")), money=money)
 

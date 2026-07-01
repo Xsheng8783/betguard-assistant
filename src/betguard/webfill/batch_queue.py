@@ -8,16 +8,19 @@ from betguard.webfill.fill_plan import build_fill_plan
 
 
 QUEUE_MODE = "batch_assisted_fill_queue"
-READY_FOR_QUEUE = "READY_FOR_QUEUE"
+READY = "READY"
+READY_FOR_QUEUE = READY
 BATCH_BLOCKED = "BATCH_BLOCKED"
 WAITING_FOR_HUMAN_CONFIRM = "WAITING_FOR_HUMAN_CONFIRM"
 COMPLETED = "COMPLETED"
 
+CURRENT = "CURRENT"
 PENDING = "PENDING"
-READY_TO_FILL = "READY_TO_FILL"
+READY_TO_FILL = CURRENT
 DONE = "DONE"
 BLOCKED = "BLOCKED"
 
+BLOCKED_REASON = "review result is not ok"
 FINAL_DECISION = {
     "real_site_auto_submit": False,
     "human_required_each_item": True,
@@ -25,111 +28,134 @@ FINAL_DECISION = {
 
 
 def build_batch_queue(review_result: dict[str, Any]) -> dict[str, Any]:
+    can_continue = bool(review_result.get("can_continue"))
     items: list[dict[str, Any]] = []
-    blocked_count = 0
 
-    for position, item in enumerate(review_result.get("items", []), start=1):
+    for index, item in enumerate(review_result.get("items", [])):
         result = item.get("result", {})
-        status = result.get("status")
-        item_status = PENDING if status == "ok" else BLOCKED
-        if item_status == BLOCKED:
-            blocked_count += 1
+        summary = item.get("summary") or format_bet_summary(result)
+        item_status = BLOCKED if not can_continue or result.get("status") != "ok" else PENDING
+        if can_continue and index == 0:
+            item_status = CURRENT
         items.append(
             {
-                "index": position,
+                "index": index,
                 "line_no": item.get("line_no"),
-                "original": item.get("raw", ""),
-                "parsed_summary": item.get("summary") or format_bet_summary(result),
                 "status": item_status,
+                "original_text": item.get("raw", ""),
+                "summary": summary,
+                "parsed": result,
+                "original": item.get("raw", ""),
+                "parsed_summary": summary,
                 "review_result": result,
-                "fill_plan": build_fill_plan(result) if status == "ok" else {},
+                "fill_plan": build_fill_plan(result) if result.get("status") == "ok" else {},
                 "warnings": list(result.get("warnings", [])),
                 "errors": list(result.get("errors", [])),
             }
         )
 
-    queue_status = BATCH_BLOCKED if blocked_count else READY_FOR_QUEUE
     queue = {
         "mode": QUEUE_MODE,
-        "status": queue_status,
-        "summary": {},
+        "status": READY if can_continue else BATCH_BLOCKED,
+        "current_index": 0 if can_continue and items else None,
+        "total": len(items),
+        "done_count": 0,
         "items": items,
+        "summary": {},
         "final_decision": dict(FINAL_DECISION),
     }
+    if not can_continue:
+        queue["reason"] = BLOCKED_REASON
     return _refresh_summary(queue)
 
 
 def get_current_item(queue: dict[str, Any]) -> dict[str, Any] | None:
-    if queue.get("status") in {BATCH_BLOCKED, COMPLETED, WAITING_FOR_HUMAN_CONFIRM}:
+    if queue.get("status") != READY:
         return None
-    for item in queue.get("items", []):
-        if item.get("status") in {PENDING, READY_TO_FILL}:
-            return item
-    return None
+    return _find_item(queue, status=CURRENT)
 
 
-def mark_item_waiting_for_human(queue: dict[str, Any], item_index: int) -> dict[str, Any]:
+def mark_current_waiting_for_human(queue: dict[str, Any]) -> dict[str, Any]:
     updated = deepcopy(queue)
-    if updated.get("status") == BATCH_BLOCKED:
-        raise ValueError("batch is blocked")
-    if _find_item(updated, status=WAITING_FOR_HUMAN_CONFIRM) is not None:
-        raise ValueError("another item is already waiting for human confirmation")
+    if updated.get("status") != READY:
+        raise ValueError("queue status must be READY")
 
-    item = _find_item(updated, item_index=item_index)
+    item = _find_item(updated, status=CURRENT)
     if item is None:
-        raise ValueError(f"item {item_index} not found")
-    if item.get("status") not in {PENDING, READY_TO_FILL}:
-        raise ValueError(f"item {item_index} is not ready to fill")
+        raise ValueError("current item not found")
 
     item["status"] = WAITING_FOR_HUMAN_CONFIRM
     updated["status"] = WAITING_FOR_HUMAN_CONFIRM
+    updated["current_index"] = item.get("index")
     return _refresh_summary(updated)
+
+
+def mark_current_done_by_human(queue: dict[str, Any]) -> dict[str, Any]:
+    updated = deepcopy(queue)
+    item = _find_item(updated, status=WAITING_FOR_HUMAN_CONFIRM)
+    if item is None:
+        raise ValueError("current item must be WAITING_FOR_HUMAN_CONFIRM before DONE")
+
+    item["status"] = DONE
+    next_item = _next_pending_item(updated, int(item.get("index", -1)))
+    if next_item is None:
+        updated["status"] = COMPLETED
+        updated["current_index"] = None
+    else:
+        next_item["status"] = CURRENT
+        updated["status"] = READY
+        updated["current_index"] = next_item.get("index")
+    return _refresh_summary(updated)
+
+
+def reset_batch_queue(queue: dict[str, Any]) -> dict[str, Any]:
+    updated = deepcopy(queue)
+    if updated.get("status") == BATCH_BLOCKED:
+        raise ValueError("batch is blocked")
+
+    for index, item in enumerate(updated.get("items", [])):
+        item["status"] = CURRENT if index == 0 else PENDING
+    updated["status"] = READY if updated.get("items") else COMPLETED
+    updated["current_index"] = 0 if updated.get("items") else None
+    return _refresh_summary(updated)
+
+
+def mark_item_waiting_for_human(queue: dict[str, Any], item_index: int) -> dict[str, Any]:
+    current = get_current_item(queue)
+    if current is None:
+        raise ValueError("current item not found")
+    if current.get("index") != item_index:
+        raise ValueError("cannot skip current item")
+    return mark_current_waiting_for_human(queue)
 
 
 def mark_item_done_by_human(queue: dict[str, Any], item_index: int) -> dict[str, Any]:
-    updated = deepcopy(queue)
-    item = _find_item(updated, item_index=item_index)
-    if item is None:
-        raise ValueError(f"item {item_index} not found")
-    if item.get("status") != WAITING_FOR_HUMAN_CONFIRM:
+    waiting = _find_item(queue, status=WAITING_FOR_HUMAN_CONFIRM)
+    if waiting is None:
         raise ValueError("item must be WAITING_FOR_HUMAN_CONFIRM before DONE")
-
-    item["status"] = DONE
-    if any(existing.get("status") in {PENDING, READY_TO_FILL} for existing in updated.get("items", [])):
-        updated["status"] = READY_FOR_QUEUE
-    else:
-        updated["status"] = COMPLETED
-    return _refresh_summary(updated)
+    if waiting.get("index") != item_index:
+        raise ValueError("cannot skip current item")
+    return mark_current_done_by_human(queue)
 
 
 def format_pretty_batch_queue(queue: dict[str, Any]) -> str:
-    summary = queue.get("summary", {})
-    lines = [
-        "Batch Assisted Fill Queue",
-        "",
-        f"Status: {queue.get('status')}",
-        "",
-        "Summary:",
-        f"- total: {summary.get('total', 0)}",
-        f"- ok: {summary.get('ok', 0)}",
-        f"- blocked: {summary.get('blocked', 0)}",
-        f"- current: {summary.get('current_index', 0)}",
-        f"- remaining: {summary.get('remaining', 0)}",
-        "",
-        "Items:",
-    ]
-    for item in queue.get("items", []):
-        lines.extend(
+    if queue.get("status") == BATCH_BLOCKED:
+        return "\n".join(
             [
-                f"[{item.get('index')}] {item.get('status')}",
-                f"    {item.get('original', '')}",
-                f"    {item.get('parsed_summary', '')}",
+                "Batch Queue BLOCKED",
+                f"Reason: {queue.get('reason') or BLOCKED_REASON}",
             ]
         )
-        for error in item.get("errors", []):
-            lines.append(f"    - {error}")
-        for warning in item.get("warnings", []):
-            lines.append(f"    - {warning}")
+
+    lines = [
+        f"Batch Queue {queue.get('status')}",
+        f"Total: {queue.get('total', 0)}",
+        f"Current: {_current_display(queue)}",
+        "",
+    ]
+    for item in queue.get("items", []):
+        display_index = int(item.get("index", 0)) + 1
+        lines.append(f"[{display_index}] {item.get('status')} {item.get('summary', '')}")
 
     lines.extend(
         [
@@ -147,31 +173,52 @@ def format_pretty_batch_queue(queue: dict[str, Any]) -> str:
 def _refresh_summary(queue: dict[str, Any]) -> dict[str, Any]:
     items = list(queue.get("items", []))
     blocked = sum(1 for item in items if item.get("status") == BLOCKED)
-    ok = len(items) - blocked
+    done_count = sum(1 for item in items if item.get("status") == DONE)
     remaining = sum(
         1
         for item in items
-        if item.get("status") in {PENDING, READY_TO_FILL, WAITING_FOR_HUMAN_CONFIRM}
+        if item.get("status") in {CURRENT, PENDING, WAITING_FOR_HUMAN_CONFIRM}
     )
+    queue["total"] = len(items)
+    queue["done_count"] = done_count
+    queue["current_index"] = _current_index(queue)
     queue["summary"] = {
         "total": len(items),
-        "ok": ok,
+        "ok": len(items) - blocked,
         "blocked": blocked,
-        "current_index": _current_index(queue),
+        "current_index": _legacy_current_index(queue),
         "remaining": remaining,
     }
     queue["final_decision"] = dict(FINAL_DECISION)
     return queue
 
 
-def _current_index(queue: dict[str, Any]) -> int:
-    if queue.get("status") == BATCH_BLOCKED:
-        return 0
-    waiting = _find_item(queue, status=WAITING_FOR_HUMAN_CONFIRM)
-    if waiting is not None:
-        return int(waiting.get("index", 0))
-    current = get_current_item(queue)
-    return int(current.get("index", 0)) if current else 0
+def _current_index(queue: dict[str, Any]) -> int | None:
+    for status in (CURRENT, WAITING_FOR_HUMAN_CONFIRM):
+        item = _find_item(queue, status=status)
+        if item is not None:
+            return int(item.get("index", 0))
+    return None
+
+
+def _legacy_current_index(queue: dict[str, Any]) -> int:
+    current = _current_index(queue)
+    return int(current) + 1 if current is not None else 0
+
+
+def _current_display(queue: dict[str, Any]) -> str:
+    current = _current_index(queue)
+    total = int(queue.get("total", 0))
+    if current is None or total == 0:
+        return "-"
+    return f"{current + 1}/{total}"
+
+
+def _next_pending_item(queue: dict[str, Any], after_index: int) -> dict[str, Any] | None:
+    for item in queue.get("items", []):
+        if int(item.get("index", -1)) > after_index and item.get("status") == PENDING:
+            return item
+    return None
 
 
 def _find_item(

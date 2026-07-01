@@ -57,7 +57,7 @@ def test_ready_queue_with_full_selectors_builds_human_review_plan() -> None:
     report = build_real_site_assisted_fill_plan(queue, full_selector_report())
 
     assert report["status"] == "READY_FOR_HUMAN_REVIEW"
-    assert report["item"]["index"] == 1
+    assert report["item"]["index"] == 0
     assert report["item"]["original"] == f"06.13.23.22 {TWO_THREE}50"
     assert report["danger_check"]["danger_candidates_found"] is True
     assert report["danger_check"]["will_click_danger"] is False
@@ -79,17 +79,17 @@ def test_batch_blocked_queue_blocks_plan() -> None:
 
     assert queue["status"] == BATCH_BLOCKED
     assert report["status"] == "BLOCKED"
-    assert "queue status must be READY_FOR_QUEUE" in report["errors"][0]
+    assert "queue status must be READY" in report["errors"][0]
 
 
 def test_waiting_for_human_queue_blocks_plan() -> None:
-    queue = mark_item_waiting_for_human(queue_for(f"06.13.23.22 {TWO_THREE}50"), 1)
+    queue = mark_item_waiting_for_human(queue_for(f"06.13.23.22 {TWO_THREE}50"), 0)
 
     report = build_real_site_assisted_fill_plan(queue, full_selector_report())
 
     assert queue["status"] == WAITING_FOR_HUMAN_CONFIRM
     assert report["status"] == "BLOCKED"
-    assert "queue status must be READY_FOR_QUEUE" in report["errors"][0]
+    assert "queue status must be READY" in report["errors"][0]
 
 
 def test_missing_number_selector_blocks_plan() -> None:
@@ -169,4 +169,3 @@ def test_cli_real_site_fill_plan_reads_queue_and_selector_report(capsys, monkeyp
     assert output["status"] == "READY_FOR_HUMAN_REVIEW"
     assert output["final_decision"]["real_site_execute"] is False
     assert output["final_decision"]["real_site_auto_submit"] is False
-
