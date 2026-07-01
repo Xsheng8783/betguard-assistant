@@ -237,3 +237,74 @@ def test_long_suffix_clear_without_duplicates_is_ok() -> None:
     assert report["stars"] == [2, 3, 4]
     assert report["unit"] == 1
     assert report["money"] == 100
+
+
+def test_normal_spaces_star_multiplier() -> None:
+    report = report_for("11 05 23  23 * 1")
+
+    assert report["numbers"] == [11, 5, 23]
+    assert report["stars"] == [2, 3]
+    assert report["unit"] == 1
+    assert report["money"] == 100
+
+
+def test_normal_parenthesized_chinese_star_unit() -> None:
+    report = report_for("11 05 23 (二三星) 1支")
+
+    assert report["numbers"] == [11, 5, 23]
+    assert report["stars"] == [2, 3]
+    assert report["unit"] == 1
+    assert report["money"] == 100
+
+
+def test_normal_parenthesized_numeric_star_unit() -> None:
+    report = report_for("11 05 23 (23) 1支")
+
+    assert report["numbers"] == [11, 5, 23]
+    assert report["stars"] == [2, 3]
+    assert report["unit"] == 1
+    assert report["money"] == 100
+
+
+def test_normal_star_equals_money_with_spaces() -> None:
+    report = report_for("11 05 23 23=100")
+
+    assert report["numbers"] == [11, 5, 23]
+    assert report["stars"] == [2, 3]
+    assert report["unit"] == 1
+    assert report["money"] == 100
+
+
+def test_original_text_preserved() -> None:
+    text = "11 05 23 (23) 1支"
+    bet = parse_line(text)
+
+    assert bet.original_text == text
+    assert bet.normalized_text
+
+
+def test_multi_number_small_bare_amount_after_star_is_money() -> None:
+    report = report_for(f"19.39.22.12.35.23 {TWO_THREE_FOUR} 15")
+
+    assert report["numbers"] == [19, 39, 22, 12, 35, 23]
+    assert report["stars"] == [2, 3, 4]
+    assert report["unit"] == 0.15
+    assert report["money"] == 15
+
+
+def test_parenthesized_star_equals_money_regression() -> None:
+    report = report_for("04-11-18(23=300)")
+
+    assert report["numbers"] == [4, 11, 18]
+    assert report["stars"] == [2, 3]
+    assert report["unit"] == 3
+    assert report["money"] == 300
+
+
+def test_star_asterisk_unit_regression() -> None:
+    report = report_for("04-11-18 23*1")
+
+    assert report["numbers"] == [4, 11, 18]
+    assert report["stars"] == [2, 3]
+    assert report["unit"] == 1
+    assert report["money"] == 100

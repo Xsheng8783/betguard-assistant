@@ -35,6 +35,9 @@ class ParsedBet:
     number: int | None = None
     car_units: JsonNumber | None = None
     parse_errors: list[str] = field(default_factory=list)
+    original_text: str = ""
+    normalized_text: str = ""
+    parse_notes: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -58,7 +61,7 @@ class BetReport:
 
     def to_dict(self) -> dict[str, Any]:
         if self.bet.type == "car":
-            return {
+            data = {
                 "game": self.bet.game,
                 "type": self.bet.type,
                 "number": self.bet.number,
@@ -68,6 +71,8 @@ class BetReport:
                 "warnings": self.validation.warnings,
                 "errors": self.validation.errors,
             }
+            self._add_parser_metadata(data)
+            return data
 
         data: dict[str, Any] = {
             "game": self.bet.game,
@@ -92,4 +97,13 @@ class BetReport:
                 star: amount.to_dict()
                 for star, amount in self.bet.bets.items()
             }
+        self._add_parser_metadata(data)
         return data
+
+    def _add_parser_metadata(self, data: dict[str, Any]) -> None:
+        if self.bet.original_text:
+            data["original_text"] = self.bet.original_text
+        if self.bet.normalized_text:
+            data["normalized_text"] = self.bet.normalized_text
+        if self.bet.parse_notes:
+            data["parse_notes"] = self.bet.parse_notes

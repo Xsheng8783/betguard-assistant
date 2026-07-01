@@ -7,7 +7,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from betguard.expander import expand_tail
 from betguard.games import ACTIVE_GAMES
 from betguard.models import BetAmount, JsonNumber, ParsedBet
-from betguard.normalizer import normalize_input
+from betguard.normalizer import normalize_for_parser
 
 
 COMMON_MONEY_VALUES = {50, 100, 200, 500, 1000}
@@ -58,7 +58,8 @@ class ParseError(ValueError):
 
 
 def parse_line(text: str, *, default_game: str = "539") -> ParsedBet:
-    raw = normalize_input(text)
+    normalized = normalize_for_parser(text)
+    raw = normalized.normalized_text
     diagnostics = _input_diagnostics(raw)
     value = _remove_game_markers(raw)
     game = ACTIVE_GAMES.get(default_game)
@@ -76,9 +77,13 @@ def parse_line(text: str, *, default_game: str = "539") -> ParsedBet:
         except ParseError:
             raise ParseError(diagnostics[0], errors=diagnostics) from exc
 
-    if diagnostics:
-        bet = replace(bet, parse_errors=diagnostics)
-    return bet
+    return replace(
+        bet,
+        parse_errors=diagnostics if diagnostics else bet.parse_errors,
+        original_text=normalized.original_text,
+        normalized_text=normalized.normalized_text,
+        parse_notes=normalized.parse_notes,
+    )
 
 
 def _parse_line_without_diagnostics(value: str, *, game_name: str) -> ParsedBet:
@@ -269,7 +274,10 @@ def _parse_normal_line(value: str, *, game_name: str) -> ParsedBet:
                 stars = parsed_stars
             remainder = remainder.strip()
             if amount is None and remainder:
-                amount, remainder = _parse_amount_from_start(remainder)
+                amount, remainder = _parse_amount_from_start(
+                    remainder,
+                    bare_small_as_money=len(numbers) >= 3,
+                )
             if remainder.strip():
                 raise ParseError("unsupported or unclear betting format")
 
@@ -414,7 +422,7 @@ def _remove_game_markers(text: str) -> str:
 def _peel_star_amount_suffix(text: str) -> tuple[str, list[int], BetAmount | None]:
     pattern = re.compile(
         rf"^(?P<prefix>.+)(?P<before>\s+|[./]+)(?P<star>{_star_token_source(include_numeric=True)})"
-        rf"(?P<sep>[./]|\s+|[xX{MULTIPLY_SIGN}])?"
+        rf"(?P<sep>[./=]|\s+|[*xX{MULTIPLY_SIGN}])?"
         rf"(?P<value>\d+(?:\.\d+)?)(?P<kind>{AMOUNT_KIND_PATTERN})?\s*$"
     )
     match = pattern.match(text)
@@ -463,10 +471,14 @@ def _compact_star_token(token: str) -> str:
 
 
 def _amount_after_star(value: str, kind: str | None, sep: str | None) -> BetAmount:
-    if kind == UNIT_WORD or sep in {"x", "X", MULTIPLY_SIGN} or "." in value:
+    if kind == UNIT_WORD or sep in {"x", "X", MULTIPLY_SIGN, "*"} or "." in value:
         return _amount_from_parts(value, UNIT_WORD, source="star")
     if kind in {YUAN_WORD, BLOCK_WORD}:
         return _amount_from_parts(value, kind, source="star")
+    if sep == "=":
+        return _amount_from_parts(value, None, source="=")
+    if sep and sep.isspace() and Decimal(value) > Decimal("10"):
+        return _amount_from_parts(value, None, source="bare_money")
     if _is_common_money(Decimal(value)):
         return _amount_from_parts(value, None, source="/")
     return _amount_from_parts(value, UNIT_WORD, source="star")
@@ -545,6 +557,7 @@ def _star_token_source(*, include_numeric: bool) -> str:
         rf"{CHINESE_ALT_TWO}{CHINESE_THREE}{CHINESE_FOUR}|"
         rf"{CHINESE_TWO}{CHINESE_THREE}|"
         rf"{CHINESE_ALT_TWO}{CHINESE_THREE}|"
+        rf"{CHINESE_THREE}{CHINESE_FOUR}|"
         rf"{CHINESE_TWO}{STAR_WORD}|{CHINESE_ALT_TWO}{STAR_WORD}|"
         rf"{CHINESE_THREE}{STAR_WORD}|{CHINESE_FOUR}{STAR_WORD}|"
         rf"{CHINESE_TWO}|{CHINESE_ALT_TWO}|{CHINESE_THREE}|{CHINESE_FOUR}|[234]{STAR_WORD}"
@@ -556,7 +569,7 @@ def _star_token_source(*, include_numeric: bool) -> str:
         rf"[234]\s*[,{FULL_COMMA}{COMMA_WORD}]\s*[234]\s*[,{FULL_COMMA}{COMMA_WORD}]\s*[234]|"
         rf"[234]\s+[234]\s+[234]|"
         rf"[234]\s*[,{FULL_COMMA}{COMMA_WORD}]\s*[234]|"
-        rf"[234]\s+[234]|234|23|[234]"
+        rf"[234]\s+[234]|234|23|34|[234]"
     )
 
 
@@ -645,7 +658,11 @@ def _stars_from_token(token: str) -> list[int]:
     return _dedupe_preserve_order(stars)
 
 
-def _parse_amount_from_start(remainder: str) -> tuple[BetAmount, str]:
+def _parse_amount_from_start(
+    remainder: str,
+    *,
+    bare_small_as_money: bool = False,
+) -> tuple[BetAmount, str]:
     value = remainder.lstrip()
     x_match = re.match(rf"[xX]\s*(?P<value>\d+(?:\.\d+)?)(?:\s*{UNIT_WORD})?", value)
     if x_match:
@@ -654,8 +671,9 @@ def _parse_amount_from_start(remainder: str) -> tuple[BetAmount, str]:
     match = re.match(rf"(?P<value>\d+(?:\.\d+)?)(?P<kind>{AMOUNT_KIND_PATTERN})?", value)
     if not match:
         raise ParseError("missing or unclear amount")
+    source = "bare_money" if bare_small_as_money and match.group("kind") is None else "bare"
     return (
-        _amount_from_parts(match.group("value"), match.group("kind"), source="bare"),
+        _amount_from_parts(match.group("value"), match.group("kind"), source=source),
         value[match.end() :],
     )
 
@@ -684,6 +702,10 @@ def _amount_from_parts(
         return BetAmount(unit=unit, money=money)
 
     if source == "/":
+        money = _money_from_decimal(decimal_value)
+        return BetAmount(unit=_number_for_json(decimal_value / Decimal("100")), money=money)
+
+    if source == "bare_money":
         money = _money_from_decimal(decimal_value)
         return BetAmount(unit=_number_for_json(decimal_value / Decimal("100")), money=money)
 
