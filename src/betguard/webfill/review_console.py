@@ -37,9 +37,13 @@ def build_review_console_model(queue: dict[str, Any], *, queue_path: str | None 
             {
                 "index": item.get("index"),
                 "original_fragment": item.get("original_fragment") or item.get("raw"),
+                "parsed_summary": item.get("summary", ""),
+                "numbers": list(item.get("result", {}).get("numbers", [])),
+                "stars": list(item.get("result", {}).get("stars", [])),
                 "reason": _reason_text(item),
                 "warnings": list(item.get("warnings", [])),
                 "errors": list(item.get("errors", [])),
+                "is_missing_money": _is_missing_money_only(item),
             }
             for item in preprocessing.get("invalid_fragments", [])
         ],
@@ -68,7 +72,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     model = build_review_console_model(queue, queue_path=queue_path)
     status_class = _status_class(str(model.get("status") or ""))
     valid_rows = "".join(_candidate_row(item) for item in model["valid_candidates"]) or _empty_row(4, "No valid candidates")
-    invalid_rows = "".join(_invalid_row(item) for item in model["invalid_fragments"]) or _empty_row(3, "No invalid or review fragments")
+    invalid_rows = "".join(_invalid_row(item) for item in model["invalid_fragments"]) or _empty_row(4, "No invalid or review fragments")
     metadata_rows = "".join(
         f"<li>{_e(str(item.get('raw', item)))}</li>" for item in model["ignored_metadata_lines"][:8]
     ) or "<li>None</li>"
@@ -129,7 +133,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     </section>
     <section class="card">
       <h2>Needs Review / Invalid</h2>
-      <table><thead><tr><th>#</th><th>Original Fragment</th><th>Reason</th></tr></thead><tbody>{invalid_rows}</tbody></table>
+      <table><thead><tr><th>#</th><th>Original Fragment</th><th>Parsed Summary</th><th>Reason</th></tr></thead><tbody>{invalid_rows}</tbody></table>
     </section>
   </div>
 
@@ -248,6 +252,7 @@ def _invalid_row(item: dict[str, Any]) -> str:
         "<tr>"
         f"<td>{_e(str(item.get('index')))}</td>"
         f"<td>{_e(str(item.get('original_fragment')))}</td>"
+        f"<td>{_e(str(item.get('parsed_summary')))}</td>"
         f"<td>{_e(str(item.get('reason')))}</td>"
         "</tr>"
     )
@@ -336,8 +341,14 @@ def _safety_view(queue: dict[str, Any]) -> dict[str, Any]:
 
 
 def _reason_text(item: dict[str, Any]) -> str:
+    if _is_missing_money_only(item):
+        return "Needs Review: missing money (缺金額，需人工補)"
     reasons = list(item.get("errors", [])) + list(item.get("warnings", []))
     return "; ".join(str(reason) for reason in reasons) or "review required"
+
+
+def _is_missing_money_only(item: dict[str, Any]) -> bool:
+    return not item.get("errors") and list(item.get("warnings", [])) == ["missing money"]
 
 
 def _status_class(status: str) -> str:

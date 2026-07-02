@@ -135,6 +135,34 @@ def test_review_console_actions_include_accept_reject_mock_next_and_audit_export
     assert any("--batch-mock-next" in action for action in waiting["actions"])
 
 
+def test_review_console_model_shows_clear_missing_money_wording() -> None:
+    queue = build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}50\n10.25")
+
+    model = build_review_console_model(queue)
+
+    assert model["status"] == NEEDS_REVIEW
+    fragment = model["invalid_fragments"][0]
+    assert fragment["original_fragment"] == "10.25"
+    assert fragment["numbers"] == [10, 25]
+    assert fragment["stars"] == [2]
+    assert fragment["parsed_summary"]
+    assert fragment["is_missing_money"] is True
+    assert "missing money" in fragment["reason"]
+    assert "10.25" not in [item["original_fragment"] for item in model["valid_candidates"]]
+
+
+def test_review_console_html_shows_clear_missing_money_wording_not_as_valid() -> None:
+    queue = build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}50\n10.25")
+
+    html = render_review_console_html(queue, queue_path="queue_state.json")
+
+    assert "missing money" in html
+    assert "缺金額" in html
+    assert "Needs Review: missing money" in html
+    valid_section = html.split("Needs Review / Invalid")[0]
+    assert "10.25" not in valid_section
+
+
 def test_write_review_console_html_and_cli_command(tmp_path, monkeypatch) -> None:
     queue_path = tmp_path / "queue_state.json"
     html_path = tmp_path / "review.html"

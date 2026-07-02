@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from betguard.input_preprocessor import preprocess_batch_input
 from betguard.review import review_text
-from betguard.webfill.batch_mock_queue import NEEDS_REVIEW, READY_FOR_QUEUE, build_batch_mock_queue
+from betguard.webfill.batch_mock_queue import (
+    NEEDS_REVIEW,
+    READY_FOR_QUEUE,
+    accept_valid_candidates_for_mock_queue,
+    build_batch_mock_queue,
+)
 
 
 TWO = "\u4e8c"
@@ -846,3 +851,28 @@ def test_remaining_review_only_formats_still_need_review() -> None:
         queue = build_batch_mock_queue(text)
 
         assert queue["status"] != READY_FOR_QUEUE
+
+
+def test_missing_money_items_stay_needs_review_not_clean_valid() -> None:
+    cases = [
+        ("10.25", [10, 25], [2]),
+        ("16.19.28.33", [16, 19, 28, 33], [2, 3, 4]),
+        ("12.16.22", [12, 16, 22], [2, 3]),
+        ("10.11.22.28", [10, 11, 22, 28], [2, 3, 4]),
+    ]
+    for text, numbers, stars in cases:
+        queue = build_batch_mock_queue(f"06.13.23.22{TWO}{THREE}50\n{text}")
+        item = queue["items"][1]
+        result = item["review_result"]
+
+        assert queue["status"] == NEEDS_REVIEW
+        assert result["type"] == "normal"
+        assert result["numbers"] == numbers
+        assert result["stars"] == stars
+        assert result["money"] is None
+        assert "missing money" in result["warnings"]
+        assert text not in [c["raw"] for c in queue["preprocessing"]["valid_candidates"]]
+        assert text in [c["raw"] for c in queue["preprocessing"]["invalid_fragments"]]
+
+        accepted = accept_valid_candidates_for_mock_queue(queue)
+        assert text not in [i["original"] for i in accepted["items"]]
