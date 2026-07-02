@@ -15,6 +15,9 @@ UNIT = "\u652f"
 PING = "\u576a"
 ARM = "\u81c2"
 SUSPECT = "\u5acc"
+HALF = "\u534a"
+FULL = "\u5168"
+MULTIPLY = "\u00d7"
 
 
 def _result(text: str) -> dict:
@@ -83,6 +86,72 @@ def test_hyphen_car_unit_format_is_normalized_to_car_bet() -> None:
     assert queue["items"][0]["review_result"]["number"] == 12
     assert queue["items"][0]["review_result"]["car_units"] == 1
     assert queue["items"][0]["review_result"]["money"] == 100
+
+
+def test_confirmed_half_and_decimal_car_formats_are_valid() -> None:
+    for text, number, units, money in [
+        ("38-0.5", 38, 0.5, 50),
+        ("16-0.5", 16, 0.5, 50),
+        ("39-0.5", 39, 0.5, 50),
+        ("16-0.3", 16, 0.3, 30),
+        (f"06{MULTIPLY}0.5", 6, 0.5, 50),
+        (f"15{MULTIPLY}0.5", 15, 0.5, 50),
+    ]:
+        queue = build_batch_mock_queue(text)
+        result = queue["items"][0]["review_result"]
+
+        assert queue["status"] == READY_FOR_QUEUE
+        assert result["type"] == "car"
+        assert result["number"] == number
+        assert result["car_units"] == units
+        assert result["money"] == money
+
+
+def test_confirmed_car_text_metadata_formats_keep_original_fragment_and_note() -> None:
+    for text, number, units, money in [
+        (f"12{HALF}{CAR}{PING}", 12, 0.5, 50),
+        (f"07/1{CAR}{SUSPECT}", 7, 1, 100),
+    ]:
+        queue = build_batch_mock_queue(text)
+        item = queue["items"][0]
+        result = item["review_result"]
+
+        assert queue["status"] == READY_FOR_QUEUE
+        assert item["original_fragment"] == text
+        assert "car metadata ignored" in item["preprocessing_notes"]
+        assert result["type"] == "car"
+        assert result["number"] == number
+        assert result["car_units"] == units
+        assert result["money"] == money
+        assert queue["final_decision"]["real_site_operation"] is False
+        assert queue["final_decision"]["auto_submit"] is False
+
+
+def test_confirmed_car_unit_and_full_car_formats_are_valid() -> None:
+    for text, number, units, money in [
+        (f"01{MULTIPLY}5", 1, 5, 500),
+        (f"03{MULTIPLY}0.2", 3, 0.2, 20),
+        (f"30{FULL}{CAR}1", 30, 1, 100),
+    ]:
+        queue = build_batch_mock_queue(text)
+        result = queue["items"][0]["review_result"]
+
+        assert queue["status"] == READY_FOR_QUEUE
+        assert result["type"] == "car"
+        assert result["number"] == number
+        assert result["car_units"] == units
+        assert result["money"] == money
+
+
+def test_multi_full_car_each_amount_expands_to_car_candidates() -> None:
+    queue = build_batch_mock_queue(f"05.08{FULL}{CAR}各0.25{CAR}")
+
+    assert queue["status"] == READY_FOR_QUEUE
+    assert [item["original"] for item in queue["items"]] == [f"05{CAR}0.25{UNIT}", f"08{CAR}0.25{UNIT}"]
+    assert [item["review_result"]["number"] for item in queue["items"]] == [5, 8]
+    assert [item["review_result"]["car_units"] for item in queue["items"]] == [0.25, 0.25]
+    assert [item["review_result"]["money"] for item in queue["items"]] == [25, 25]
+    assert all("expanded multi-car line" in item["preprocessing_notes"] for item in queue["items"])
 
 
 def test_flat_slash_dunhao_column_group_with_numeric_stars() -> None:

@@ -18,6 +18,9 @@ MULTI_CAR_PATTERN = re.compile(
     r"^(?P<numbers>\d{1,2}(?:[\s、,，]+\d{1,2})+)\s*車\s*(?P<amount>\d+(?:\.\d+)?)(?P<kind>支|元|塊)?$"
 )
 HYPHEN_CAR_PATTERN = re.compile(r"^(?P<number>\d{1,2})-(?P<amount>\d+(?:\.\d+)?)\s*車$")
+MULTI_FULL_CAR_EACH_PATTERN = re.compile(
+    r"^(?P<numbers>\d{1,2}(?:[.\s、,，]+\d{1,2})+)\s*全車各(?P<amount>\d+(?:\.\d+)?)車$"
+)
 TIME_ONLY_PATTERN = re.compile(r"^(?:上午|下午)?\s*\d{1,2}:\d{2}$")
 LINE_PREFIX_PATTERN = re.compile(r"^(?P<time>(?:上午|下午)?\d{1,2}:\d{2})\s+(?P<sender>\S+)\s+(?P<body>.+)$")
 DATE_ONLY_PATTERN = re.compile(r"^\d{4}[/-]\d{1,2}[/-]\d{1,2}$")
@@ -237,17 +240,23 @@ def _suspicious_paste_notes(value: str) -> list[str]:
         after_dunhao = value.split("、", 1)[1]
         if "/" in after_dunhao:
             notes.append("ambiguous slash/dunhao column grouping requires manual review")
-    if any(token in value for token in ("半車", "坪", "改", "嫌")):
+    if "改" in value:
         notes.append("suspicious pasted token requires manual review")
+    if any(token in value for token in ("半車", "坪", "嫌")):
+        if _is_confirmed_car_metadata_format(value):
+            notes.append("car metadata ignored")
+        else:
+            notes.append("suspicious pasted token requires manual review")
     if value.lower().startswith("港"):
         notes.append("game prefix requires manual review")
     if (
         re.search(r"-\d+(?:\.\d+)?$", compact)
         and not re.search(r"/\d+$", compact)
         and not _is_confirmed_hyphen_amount(value)
+        and not _is_confirmed_car_shorthand(value)
     ):
         notes.append("hyphen amount requires manual review")
-    if re.fullmatch(r"\d{1,2}[xX×*]\d+(?:\.\d+)?", compact):
+    if re.fullmatch(r"\d{1,2}[xX×*]\d+(?:\.\d+)?", compact) and not _is_confirmed_car_shorthand(value):
         notes.append("single-number multiplier requires manual review")
     if (
         re.search(r"=\s*\d+", value)
@@ -277,10 +286,42 @@ def _is_confirmed_star_equals_amount(value: str) -> bool:
     )
 
 
+def _is_confirmed_car_shorthand(value: str) -> bool:
+    compact = value.replace(" ", "")
+    operator = re.fullmatch(r"\d{1,2}(?P<op>-|[xX×*])(?P<unit>\d+(?:\.\d+)?)", compact)
+    return bool(
+        (operator and _is_confirmed_single_number_car_operator(operator.group("op"), operator.group("unit")))
+        or re.fullmatch(r"\d{1,2}/\d+(?:\.\d+)?車嫌?", compact)
+        or re.fullmatch(r"\d{1,2}半車坪?", compact)
+        or re.fullmatch(r"\d{1,2}全車\d+(?:\.\d+)?", compact)
+    )
+
+
+def _is_confirmed_single_number_car_operator(op: str, unit_text: str) -> bool:
+    unit = float(unit_text)
+    if op == "-":
+        return unit < 1
+    return unit < 1 or unit == 5
+
+
+def _is_confirmed_car_metadata_format(value: str) -> bool:
+    compact = value.replace(" ", "")
+    return bool(
+        re.fullmatch(r"\d{1,2}半車坪?", compact)
+        or re.fullmatch(r"\d{1,2}/\d+(?:\.\d+)?車嫌?", compact)
+    )
+
+
 def _expand_multi_car_fragment(value: str) -> list[str]:
     hyphen_car = HYPHEN_CAR_PATTERN.fullmatch(value.strip())
     if hyphen_car:
         return [f"{hyphen_car.group('number')}車{hyphen_car.group('amount')}支"]
+
+    full_each = MULTI_FULL_CAR_EACH_PATTERN.fullmatch(value.strip())
+    if full_each:
+        amount = full_each.group("amount")
+        numbers = [number for number in re.split(r"[.\s、,，]+", full_each.group("numbers").strip()) if number]
+        return [f"{number}車{amount}支" for number in numbers]
 
     match = MULTI_CAR_PATTERN.fullmatch(value.strip())
     if not match:

@@ -7,6 +7,11 @@ CAR = "\u8eca"
 YUAN = "\u5143"
 FULL_OPEN = "\uff08"
 FULL_CLOSE = "\uff09"
+HALF = "\u534a"
+FULL = "\u5168"
+PING = "\u576a"
+SUSPECT = "\u5acc"
+MULTIPLY = "\u00d7"
 
 
 def report_for(text: str) -> dict:
@@ -144,6 +149,65 @@ def test_car_e_decimal_unit() -> None:
     assert report["car_units"] == 0.5
     assert report["money"] == 50
     assert report["status"] == "ok"
+
+
+def test_car_half_decimal_hyphen_formats() -> None:
+    for text, number, units, money in [
+        ("38-0.5", 38, 0.5, 50),
+        ("16-0.5", 16, 0.5, 50),
+        ("39-0.5", 39, 0.5, 50),
+        ("16-0.3", 16, 0.3, 30),
+    ]:
+        report = report_for(text)
+
+        assert report["type"] == "car"
+        assert report["number"] == number
+        assert report["car_units"] == units
+        assert report["money"] == money
+        assert report["status"] == "ok"
+
+
+def test_car_single_number_multiplier_formats() -> None:
+    for text, number, units, money in [
+        (f"06{MULTIPLY}0.5", 6, 0.5, 50),
+        (f"15{MULTIPLY}0.5", 15, 0.5, 50),
+        (f"01{MULTIPLY}5", 1, 5, 500),
+        (f"03{MULTIPLY}0.2", 3, 0.2, 20),
+    ]:
+        report = report_for(text)
+
+        assert report["type"] == "car"
+        assert report["number"] == number
+        assert report["car_units"] == units
+        assert report["money"] == money
+        assert report["status"] == "ok"
+
+
+def test_car_half_text_and_metadata_formats() -> None:
+    for text in [f"12{HALF}{CAR}", f"12{HALF}{CAR}{PING}"]:
+        report = report_for(text)
+
+        assert report["type"] == "car"
+        assert report["number"] == 12
+        assert report["car_units"] == 0.5
+        assert report["money"] == 50
+        assert report["status"] == "ok"
+
+
+def test_car_slash_and_full_car_formats() -> None:
+    slash = report_for(f"07/1{CAR}{SUSPECT}")
+    full = report_for(f"30{FULL}{CAR}1")
+
+    assert slash["type"] == "car"
+    assert slash["number"] == 7
+    assert slash["car_units"] == 1
+    assert slash["money"] == 100
+    assert slash["status"] == "ok"
+    assert full["type"] == "car"
+    assert full["number"] == 30
+    assert full["car_units"] == 1
+    assert full["money"] == 100
+    assert full["status"] == "ok"
 
 
 def test_car_f_out_of_range_number_is_error() -> None:

@@ -24,7 +24,6 @@ ARM = "\u81c2"
 
 
 REVIEW_POLICY_CASES = [
-    f"12半{CAR}",
     f"港23半{CAR}",
     f"10 -32{CAR}",
     "大",
@@ -126,6 +125,12 @@ VALID_POLICY_CASES = {
         "money": 10,
         "car_units": 0.1,
     },
+    f"12半{CAR}": {
+        "type": "car",
+        "number": 12,
+        "money": 50,
+        "car_units": 0.5,
+    },
     f"17.20/28/34 {TWO}{THREE}1": {
         "type": "column",
         "columns": [[17, 20], [28], [34]],
@@ -179,18 +184,19 @@ def test_real_sample_valid_policy_cases_keep_expected_semantics(text: str) -> No
 
 
 def test_mixed_real_sample_policy_queue_and_accept_valid_flow() -> None:
-    text = f"06.13.23.22 {TWO}{THREE}50..12半{CAR}..32{CAR}10{YUAN}..15.25.33=100..08 28 33 39 440"
+    text = f"06.13.23.22 {TWO}{THREE}50..港23半{CAR}..12半{CAR}..32{CAR}10{YUAN}..15.25.33=100..08 28 33 39 440"
 
     queue = build_batch_mock_queue(text)
 
     assert queue["status"] == NEEDS_REVIEW
     assert [item["raw"] for item in queue["preprocessing"]["valid_candidates"]] == [
         f"06.13.23.22 {TWO}{THREE}50",
+        f"12半{CAR}",
         f"32{CAR}10{YUAN}",
         "08 28 33 39 440",
     ]
     assert [item["raw"] for item in queue["preprocessing"]["invalid_fragments"]] == [
-        f"12半{CAR}",
+        f"港23半{CAR}",
         "15.25.33=100",
     ]
     assert all(item["selected_numbers"] == [] for item in queue["items"])
@@ -199,10 +205,11 @@ def test_mixed_real_sample_policy_queue_and_accept_valid_flow() -> None:
     assert accepted["status"] == WAITING_FOR_HUMAN_CONFIRM
     assert [item["original"] for item in accepted["items"]] == [
         f"06.13.23.22 {TWO}{THREE}50",
+        f"12半{CAR}",
         f"32{CAR}10{YUAN}",
         "08 28 33 39 440",
     ]
-    assert accepted["preprocessing"]["original_review_audit"]["invalid_fragments"][0]["raw"] == f"12半{CAR}"
+    assert accepted["preprocessing"]["original_review_audit"]["invalid_fragments"][0]["raw"] == f"港23半{CAR}"
     assert accepted["preprocessing"]["original_review_audit"]["invalid_fragments"][1]["raw"] == "15.25.33=100"
     assert accepted["items"][0]["status"] == WAITING_FOR_HUMAN_CONFIRM
     assert accepted["audit"]["safety"]["real_site_operation"] is False

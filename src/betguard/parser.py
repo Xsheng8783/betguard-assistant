@@ -24,6 +24,10 @@ FULL_COMMA = "\uff0c"
 TOUCH_WORD = "\u78b0"
 TAIL_WORD = "\u5c3e"
 CAR_WORD = "\u8eca"
+HALF_WORD = "\u534a"
+FULL_WORD = "\u5168"
+PING_WORD = "\u576a"
+SUSPECT_WORD = "\u5acc"
 FULL_OPEN_PAREN = "\uff08"
 FULL_CLOSE_PAREN = "\uff09"
 MULTIPLY_SIGN = "\u00d7"
@@ -89,6 +93,10 @@ def parse_line(text: str, *, default_game: str = "539") -> ParsedBet:
 
 
 def _parse_line_without_diagnostics(value: str, *, game_name: str) -> ParsedBet:
+    car_shorthand = _parse_confirmed_car_shorthand(value, game_name=game_name)
+    if car_shorthand is not None:
+        return car_shorthand
+
     if CAR_WORD in value:
         return _parse_car_line(value, game_name=game_name)
 
@@ -100,6 +108,9 @@ def _parse_line_without_diagnostics(value: str, *, game_name: str) -> ParsedBet:
 
 
 def _input_diagnostics(text: str) -> list[str]:
+    if _is_confirmed_car_shorthand_text(text):
+        return []
+
     errors: list[str] = []
     unsupported = _unsupported_chinese_characters(text)
     if unsupported:
@@ -247,6 +258,77 @@ def _car_money_to_amount(value: str) -> tuple[JsonNumber, int]:
 def _looks_like_bare_car_money(value: str) -> bool:
     decimal_value = Decimal(value)
     return decimal_value == decimal_value.to_integral_value() and decimal_value >= Decimal("10")
+
+
+def _parse_confirmed_car_shorthand(value: str, *, game_name: str) -> ParsedBet | None:
+    text = value.strip()
+
+    half_car = re.fullmatch(
+        rf"(?P<number>\d{{1,2}})\s*{HALF_WORD}\s*{CAR_WORD}\s*(?:{PING_WORD})?",
+        text,
+    )
+    if half_car:
+        return _car_bet_from_unit(game_name, half_car.group("number"), Decimal("0.5"))
+
+    full_car = re.fullmatch(
+        rf"(?P<number>\d{{1,2}})\s*{FULL_WORD}\s*{CAR_WORD}\s*(?P<unit>\d+(?:\.\d+)?)\s*",
+        text,
+    )
+    if full_car:
+        return _car_bet_from_unit(game_name, full_car.group("number"), Decimal(full_car.group("unit")))
+
+    slash_car = re.fullmatch(
+        rf"(?P<number>\d{{1,2}})\s*/\s*(?P<unit>\d+(?:\.\d+)?)\s*{CAR_WORD}\s*(?:{SUSPECT_WORD})?",
+        text,
+    )
+    if slash_car:
+        return _car_bet_from_unit(game_name, slash_car.group("number"), Decimal(slash_car.group("unit")))
+
+    operator_car = re.fullmatch(
+        rf"(?P<number>\d{{1,2}})\s*(?P<op>-|[xX{MULTIPLY_SIGN}*])\s*(?P<unit>\d+(?:\.\d+)?)\s*",
+        text,
+    )
+    if operator_car and _is_confirmed_single_number_car_operator(operator_car.group("op"), operator_car.group("unit")):
+        return _car_bet_from_unit(game_name, operator_car.group("number"), Decimal(operator_car.group("unit")))
+
+    return None
+
+
+def _is_confirmed_car_shorthand_text(text: str) -> bool:
+    value = text.strip()
+    if re.fullmatch(rf"\d{{1,2}}\s*{HALF_WORD}\s*{CAR_WORD}\s*(?:{PING_WORD})?", value):
+        return True
+    if re.fullmatch(rf"\d{{1,2}}\s*{FULL_WORD}\s*{CAR_WORD}\s*\d+(?:\.\d+)?\s*", value):
+        return True
+    if re.fullmatch(rf"\d{{1,2}}\s*/\s*\d+(?:\.\d+)?\s*{CAR_WORD}\s*(?:{SUSPECT_WORD})?", value):
+        return True
+    operator = re.fullmatch(
+        rf"\d{{1,2}}\s*(?P<op>-|[xX{MULTIPLY_SIGN}*])\s*(?P<unit>\d+(?:\.\d+)?)\s*",
+        value,
+    )
+    return bool(operator and _is_confirmed_single_number_car_operator(operator.group("op"), operator.group("unit")))
+
+
+def _is_confirmed_single_number_car_operator(op: str, unit_text: str) -> bool:
+    unit = Decimal(unit_text)
+    if op == "-":
+        return unit < Decimal("1")
+    return unit < Decimal("1") or unit == Decimal("5")
+
+
+def _car_bet_from_unit(game_name: str, number_text: str, unit: Decimal) -> ParsedBet:
+    car_units, money = _car_units_to_amount(str(unit))
+    number = int(number_text)
+    return ParsedBet(
+        game=game_name,
+        type="car",
+        numbers=[number],
+        number=number,
+        car_units=car_units,
+        stars=[],
+        unit=None,
+        money=money,
+    )
 
 
 def _parse_normal_line(value: str, *, game_name: str) -> ParsedBet:
