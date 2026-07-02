@@ -60,6 +60,8 @@ class ParseError(ValueError):
 def parse_line(text: str, *, default_game: str = "539") -> ParsedBet:
     normalized = normalize_for_parser(text)
     raw = normalized.normalized_text
+    if _is_standalone_star_amount_line(raw):
+        raise ParseError("standalone star amount line requires manual review")
     diagnostics = _input_diagnostics(raw)
     value = _remove_game_markers(raw)
     game = ACTIVE_GAMES.get(default_game)
@@ -248,6 +250,9 @@ def _looks_like_bare_car_money(value: str) -> bool:
 
 
 def _parse_normal_line(value: str, *, game_name: str) -> ParsedBet:
+    if _is_customer_specific_two_number_shorthand(value):
+        raise ParseError("customer-specific shorthand requires manual review")
+
     shorthand = _parse_confirmed_shorthand_line(value, game_name=game_name)
     if shorthand is not None:
         return shorthand
@@ -378,6 +383,25 @@ def _parse_confirmed_shorthand_line(value: str, *, game_name: str) -> ParsedBet 
             unit=amount.unit,
             money=amount.money,
         )
+
+    separator_shorthand = re.fullmatch(
+        rf"\s*(?P<numbers>\d{{1,2}}(?:[.\- {COMMA_WORD},{FULL_COMMA}]+\d{{1,2}}){{2,3}})"
+        rf"\s*:\s*(?P<code>440|880)\s*",
+        value,
+    )
+    if separator_shorthand:
+        number_tokens = re.findall(r"\d{1,2}", separator_shorthand.group("numbers"))
+        if len(number_tokens) == 4:
+            unit = Decimal("0.5") if separator_shorthand.group("code") == "440" else Decimal("1")
+            amount = BetAmount(unit=_number_for_json(unit), money=_money_from_unit(unit))
+            return ParsedBet(
+                game=game_name,
+                type="normal",
+                numbers=[int(token) for token in number_tokens],
+                stars=[2, 3, 4],
+                unit=amount.unit,
+                money=amount.money,
+            )
 
     tokens = [token for token in re.split(rf"[.\s,{FULL_COMMA}{COMMA_WORD}-]+", value.strip()) if token]
     if len(tokens) not in {4, 5} or not all(token.isdigit() for token in tokens):
@@ -563,6 +587,27 @@ def _remove_game_markers(text: str) -> str:
     return GAME_MARKER_PATTERN.sub(" ", text).strip()
 
 
+def _is_standalone_star_amount_line(text: str) -> bool:
+    return bool(
+        re.fullmatch(
+            rf"\s*(?:[234](?:\.[234]){{1,2}}|[234]{{2,3}}{STAR_WORD}?)"
+            rf"\.?\s*[xX{MULTIPLY_SIGN}*]\s*\d+(?:\.\d+)?(?:{AMOUNT_KIND_PATTERN})?"
+            rf"\s*(?:539)?\s*",
+            text,
+        )
+    )
+
+
+def _is_customer_specific_two_number_shorthand(text: str) -> bool:
+    return bool(
+        re.fullmatch(
+            rf"\s*\d{{1,2}}[.\- {COMMA_WORD},{FULL_COMMA}]+\d{{1,2}}"
+            rf"[.\- {COMMA_WORD},{FULL_COMMA}]+(?:1000|600|400)\s*",
+            text,
+        )
+    )
+
+
 def _peel_star_amount_suffix(text: str) -> tuple[str, list[int], BetAmount | None]:
     pattern = re.compile(
         rf"^(?P<prefix>.+)(?P<before>\s+|[./]+)(?P<star>{_star_token_source(include_numeric=True)})"
@@ -579,7 +624,12 @@ def _peel_star_amount_suffix(text: str) -> tuple[str, list[int], BetAmount | Non
     return (
         match.group("prefix").strip(),
         _stars_from_token(match.group("star")),
-        _amount_after_star(match.group("value"), match.group("kind"), match.group("sep")),
+        _amount_after_star(
+            match.group("value"),
+            match.group("kind"),
+            match.group("sep"),
+            prefix=match.group("prefix"),
+        ),
     )
 
 
@@ -616,7 +666,15 @@ def _compact_star_token(token: str) -> str:
     )
 
 
-def _amount_after_star(value: str, kind: str | None, sep: str | None) -> BetAmount:
+def _amount_after_star(value: str, kind: str | None, sep: str | None, *, prefix: str | None = None) -> BetAmount:
+    if (
+        kind is None
+        and sep in {"x", "X", MULTIPLY_SIGN, "*"}
+        and prefix is not None
+        and _count_prefix_numbers(prefix) >= 3
+        and Decimal(value) >= Decimal("10")
+    ):
+        return _amount_from_parts(value, None, source="bare_money")
     if kind == UNIT_WORD or sep in {"x", "X", MULTIPLY_SIGN, "*"} or "." in value:
         return _amount_from_parts(value, UNIT_WORD, source="star")
     if kind in {YUAN_WORD, BLOCK_WORD}:
@@ -628,6 +686,10 @@ def _amount_after_star(value: str, kind: str | None, sep: str | None) -> BetAmou
     if _is_common_money(Decimal(value)):
         return _amount_from_parts(value, None, source="/")
     return _amount_from_parts(value, UNIT_WORD, source="star")
+
+
+def _count_prefix_numbers(prefix: str) -> int:
+    return len(re.findall(r"\d{1,2}", prefix))
 
 
 def _peel_attached_column_star_amount_suffix(text: str) -> tuple[str, list[int], BetAmount | None]:

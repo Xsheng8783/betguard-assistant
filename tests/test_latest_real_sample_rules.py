@@ -175,6 +175,40 @@ def test_two_number_colon_x_five_is_unit() -> None:
     assert result["money"] == 500
 
 
+def test_two_number_bare_customer_specific_shorthand_requires_review() -> None:
+    valid_line = f"06.13.23 {TWO}{THREE}50"
+
+    for line in [
+        "11.37.1000",
+        "17.24.1000",
+        "15.29.1000",
+        "11.28.600",
+        "17.29.600",
+        "11.28.400",
+    ]:
+        queue = build_batch_mock_queue("\n".join([valid_line, line]))
+
+        assert queue["status"] == NEEDS_REVIEW
+        assert queue["items"][1]["review_result"]["status"] == "error"
+        assert queue["items"][1]["review_result"]["errors"] == [
+            "customer-specific shorthand requires manual review"
+        ]
+
+
+def test_two_number_x_stake_still_valid() -> None:
+    for line, unit, money in [
+        ("17.24x10", 10, 1000),
+        ("17.29x6", 6, 600),
+    ]:
+        result = _result(line)
+
+        assert result["status"] == "ok"
+        assert result["numbers"] == [int(line[:2]), int(line[3:5])]
+        assert result["stars"] == [2]
+        assert result["unit"] == unit
+        assert result["money"] == money
+
+
 def test_four_number_440_shorthand_is_half_unit_per_star() -> None:
     queue = build_batch_mock_queue("11 22 33 34 440")
     result = queue["items"][0]["review_result"]
@@ -196,6 +230,42 @@ def test_four_number_880_shorthand_is_one_unit_per_star() -> None:
     assert result["stars"] == [2, 3, 4]
     assert result["unit"] == 1
     assert result["money"] == 100
+
+
+def test_four_number_colon_440_and_880_shorthand_are_confirmed() -> None:
+    half_unit = _result("12-22-27-33:440")
+    one_unit = _result("12-22-27-33:880")
+
+    assert half_unit["status"] == "ok"
+    assert half_unit["numbers"] == [12, 22, 27, 33]
+    assert half_unit["stars"] == [2, 3, 4]
+    assert half_unit["unit"] == 0.5
+    assert half_unit["money"] == 50
+    assert one_unit["status"] == "ok"
+    assert one_unit["numbers"] == [12, 22, 27, 33]
+    assert one_unit["stars"] == [2, 3, 4]
+    assert one_unit["unit"] == 1
+    assert one_unit["money"] == 100
+
+
+def test_many_number_explicit_stars_x100_is_money_not_units() -> None:
+    result = _result("10,23,26,33,39 234 x 100")
+
+    assert result["status"] == "ok"
+    assert result["numbers"] == [10, 23, 26, 33, 39]
+    assert result["stars"] == [2, 3, 4]
+    assert result["unit"] == 1
+    assert result["money"] == 100
+
+
+def test_standalone_star_amount_line_with_539_requires_review() -> None:
+    queue = build_batch_mock_queue("\n".join([f"06.13.23 {TWO}{THREE}50", f"2.3x 3{UNIT}539"]))
+
+    assert queue["status"] == NEEDS_REVIEW
+    assert queue["items"][1]["review_result"]["status"] == "error"
+    assert queue["items"][1]["review_result"]["errors"] == [
+        "standalone star amount line requires manual review"
+    ]
 
 
 def test_three_number_320_shorthand_is_one_unit_per_star() -> None:

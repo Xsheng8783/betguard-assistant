@@ -319,6 +319,33 @@ def test_four_numbers_440_is_confirmed_half_unit_shorthand() -> None:
     assert report["money"] == 50
 
 
+def test_four_numbers_colon_440_is_confirmed_half_unit_shorthand() -> None:
+    report = report_for("12-22-27-33:440")
+
+    assert report["numbers"] == [12, 22, 27, 33]
+    assert report["stars"] == [2, 3, 4]
+    assert report["unit"] == 0.5
+    assert report["money"] == 50
+
+
+def test_four_numbers_colon_880_is_confirmed_one_unit_shorthand() -> None:
+    report = report_for("12-22-27-33:880")
+
+    assert report["numbers"] == [12, 22, 27, 33]
+    assert report["stars"] == [2, 3, 4]
+    assert report["unit"] == 1
+    assert report["money"] == 100
+
+
+def test_many_numbers_explicit_stars_x100_is_money_not_units() -> None:
+    report = report_for("10,23,26,33,39 234 x 100")
+
+    assert report["numbers"] == [10, 23, 26, 33, 39]
+    assert report["stars"] == [2, 3, 4]
+    assert report["unit"] == 1
+    assert report["money"] == 100
+
+
 def test_two_number_colon_x_unit_regression() -> None:
     report = report_for("22-33:x10")
 

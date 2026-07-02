@@ -46,6 +46,7 @@ REVIEW_POLICY_CASES = [
     f"11/17{DUN}21/33/36 234{STAR}X0.5",
     f"10/35/21.39/02.32{TWO}{THREE}{FOUR}x1",
     f"33.27.30.{ALT_TWO}600{THREE}200{ARM}",
+    "11.37.1000",
 ]
 
 
@@ -60,8 +61,8 @@ VALID_POLICY_CASES = {
         "type": "normal",
         "numbers": [10, 23, 26, 33, 39],
         "stars": [2, 3, 4],
-        "money": 10000,
-        "unit": 100,
+        "money": 100,
+        "unit": 1,
     },
     f"01.03.35{TWO}{THREE}5": {
         "type": "normal",
@@ -69,13 +70,6 @@ VALID_POLICY_CASES = {
         "stars": [2, 3],
         "money": 500,
         "unit": 5,
-    },
-    "11.37.1000": {
-        "type": "normal",
-        "numbers": [11, 37],
-        "stars": [2],
-        "money": 1000,
-        "unit": 10,
     },
     "11.28.37.640": {
         "type": "normal",
