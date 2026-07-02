@@ -109,8 +109,12 @@ def preprocess_batch_input(text_or_lines: str | Iterable[str]) -> dict[str, Any]
             fragment = _trim_fragment(fragment)
             if not fragment:
                 continue
+            fragment, name_marker_notes = _strip_trailing_name_marker(fragment)
             fragment_notes = _dedupe(
-                list(logical.get("preprocessing_notes", [])) + inline_notes + _suspicious_paste_notes(fragment)
+                list(logical.get("preprocessing_notes", []))
+                + inline_notes
+                + name_marker_notes
+                + _suspicious_paste_notes(fragment)
             )
             expanded_fragments = _expand_multi_car_fragment(fragment)
             for expanded_index, expanded in enumerate(expanded_fragments, start=1):
@@ -199,18 +203,85 @@ def _split_after_embedded_star_amount(fragment: str) -> list[str]:
 def _merge_inline_star_amount_fragments(fragments: list[str]) -> tuple[list[str], list[str]]:
     merged: list[str] = []
     notes: list[str] = []
+    pending_car_marker = False
     for fragment in fragments:
         value = fragment.strip()
+        if pending_car_marker:
+            pending_car_marker = False
+            car_next = re.fullmatch(r"(?P<car>\d{1,2}\.0\.\d+)臂?", value)
+            if car_next:
+                merged.append(f"{car_next.group('car')}車")
+                notes.append("attached standalone 車 to next car shorthand")
+                continue
+            merged.append("車")
+        if value == "車":
+            pending_car_marker = True
+            continue
         if (
             merged
             and _looks_like_number_fragment_without_amount(merged[-1])
             and _looks_like_inline_star_amount_fragment(value)
         ):
-            merged[-1] = _normalize_dotted_star_before_amount(f"{merged[-1].rstrip()} {value}")
+            merged[-1] = _normalize_dotted_star_before_amount(
+                f"{merged[-1].rstrip()} {_normalize_comma_star_amount_fragment(value)}"
+            )
+            notes.append("merged continuation star amount")
+            continue
+        if (
+            merged
+            and _looks_like_number_fragment_without_amount(merged[-1])
+            and value == "234"
+        ):
+            merged[-1] = f"{merged[-1].rstrip()} 234"
+            notes.append("merged continuation star amount")
+            continue
+        if merged and _looks_like_arm_amount_continuation(merged[-1], value):
+            merged[-1] = f"{merged[-1].rstrip()} {value}"
             notes.append("merged continuation star amount")
             continue
         merged.append(value)
+    if pending_car_marker:
+        merged.append("車")
     return merged, _dedupe(notes)
+
+
+def _normalize_comma_star_amount_fragment(value: str) -> str:
+    compact = value.replace(" ", "")
+    match = re.fullmatch(
+        r"(?P<stars>[234](?:[,，、][234]){1,2})\.(?P<amount>\d+(?:\.\d+)?(?:支|元|塊)?)",
+        compact,
+    )
+    if not match:
+        return value
+    stars = re.sub(r"[,，、]", ".", match.group("stars"))
+    return f"{stars} {match.group('amount')}"
+
+
+def _looks_like_arm_amount_continuation(pending_raw: str, value: str) -> bool:
+    if not re.fullmatch(r"\d+(?:\.\d+)?(?:支|元|塊)?臂?", value.strip()):
+        return False
+    return bool(re.search(r"(?:^|\s)234$", pending_raw.strip()))
+
+
+def _remove_star_typo_five(value: str, notes: list[str]) -> str:
+    updated = re.sub(
+        r"(?P<stars>二三四|234)五(?=\s*[xX×*]?\d+(?:\.\d+)?(?:支|元|塊)?\s*$)",
+        lambda match: match.group("stars"),
+        value,
+    )
+    if updated != value:
+        notes.append("ignored typo 五 after 二三四")
+    return updated
+
+
+def _strip_trailing_name_marker(fragment: str) -> tuple[str, list[str]]:
+    match = re.fullmatch(
+        r"(?P<bet>\d{1,2}(?:[.\s、,，-]+\d{1,2})+\s+234\s+\d+(?:\.\d+)?(?:支|元|塊)?)臂",
+        fragment.strip(),
+    )
+    if not match:
+        return fragment, []
+    return match.group("bet"), ["ignored trailing name marker 臂"]
 
 
 def _looks_like_number_fragment_without_amount(value: str) -> bool:
@@ -224,7 +295,7 @@ def _looks_like_inline_star_amount_fragment(value: str) -> bool:
     compact = value.replace(" ", "")
     return bool(
         re.fullmatch(
-            r"(?:234|2\.3\.4)(?:\.|[xX*×])\d+(?:\.\d+)?(?:支|元|塊)?(?:\u81c2)?",
+            r"(?:234|2\.3\.4|[234](?:[,，、][234]){1,2})(?:\.|[xX*×])\d+(?:\.\d+)?(?:支|元|塊)?(?:\u81c2)?",
             compact,
         )
     )
@@ -245,6 +316,9 @@ def _clean_line_content(line: str) -> tuple[str, list[str]]:
     value = updated
 
     updated = _normalize_confirmed_star_text(value, notes)
+    value = updated
+
+    updated = _remove_star_typo_five(value, notes)
     value = updated
 
     normalized_ellipsis = _normalize_ellipsis_separator(value)
