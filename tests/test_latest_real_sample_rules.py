@@ -222,6 +222,8 @@ def test_ellipsis_star_amount_continuations_are_valid() -> None:
     cases = [
         ("10.39.01.35\u20262.3.4\n50", [10, 39, 1, 35], [2, 3, 4], 50),
         ("01.39.35\u20262.3\n100", [1, 39, 35], [2, 3], 100),
+        ("10.39.01.35\u20262.3.4..50", [10, 39, 1, 35], [2, 3, 4], 50),
+        ("01.39.35\u20262.3..100", [1, 39, 35], [2, 3], 100),
         ("02.12.22.37.33\u20262.3.4\u2026.50", [2, 12, 22, 37, 33], [2, 3, 4], 50),
         ("12.22.37.02\u20262.3.4\u202650", [12, 22, 37, 2], [2, 3, 4], 50),
         ("12.22.37\u2026100", [12, 22, 37], [2, 3], 100),
@@ -236,6 +238,8 @@ def test_ellipsis_star_amount_continuations_are_valid() -> None:
         assert result["numbers"] == numbers
         assert result["stars"] == stars
         assert result["money"] == money
+        assert result["numbers"] != [10, 39, 1, 35, 2]
+        assert result["stars"] != [3]
 
 
 def test_multiline_numeric_star_amount_continuations_are_valid() -> None:
@@ -509,7 +513,7 @@ def test_column_groups_with_attached_chinese_stars_x_unit() -> None:
 
 def test_confirmed_column_formats_with_dunhao_and_attached_stars() -> None:
     cases = [
-        (f"05/08/18.33/25.35{TWO}{THREE}{FOUR}x0.5", [[5, 8], [18, 33], [25, 35]], [2, 3, 4], 0.5, 50),
+        (f"05/08/18.33/25.35{TWO}{THREE}{FOUR}x0.5", [[5], [8], [18, 33], [25, 35]], [2, 3, 4], 0.5, 50),
         (f"08/14{DUN}20/32/36 234{STAR}X0.5", [[8], [14, 20], [32], [36]], [2, 3, 4], 0.5, 50),
         (f"06/17{DUN}27/32 23{STAR}X1", [[6], [17, 27], [32]], [2, 3], 1, 100),
         (f"11/17{DUN}21/33/36 234{STAR}X0.5", [[11], [17, 21], [33], [36]], [2, 3, 4], 0.5, 50),
@@ -523,6 +527,7 @@ def test_confirmed_column_formats_with_dunhao_and_attached_stars() -> None:
         assert result["status"] == "ok"
         assert result["type"] == "column"
         assert result["columns"] == columns
+        assert result["columns"] != [[5, 8], [18, 33], [25, 35]]
         assert result["stars"] == stars
         assert result["unit"] == unit
         assert result["money"] == money

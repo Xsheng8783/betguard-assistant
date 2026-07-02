@@ -211,6 +211,11 @@ def _clean_line_content(line: str) -> tuple[str, list[str]]:
         notes.append("normalized ellipsis separator")
         value = normalized_ellipsis
 
+    normalized_inline_amount = _normalize_inline_star_amount_separator(value)
+    if normalized_inline_amount != value:
+        notes.append("normalized dotted star amount continuation")
+        value = normalized_inline_amount
+
     normalized_star_line = _normalize_star_amount_continuation(value)
     if normalized_star_line != value:
         notes.append("normalized dotted star amount continuation")
@@ -315,6 +320,15 @@ def _normalize_dotted_star_before_amount(value: str) -> str:
         lambda match: match.group(1).replace(".", ""),
         value,
     )
+
+
+def _normalize_inline_star_amount_separator(value: str) -> str:
+    updated = re.sub(
+        r"(?<=\s)([234](?:\.[234]){1,2})\.{2,}(\d+(?:\.\d+)?(?:支|元|塊)?)\s*$",
+        r"\1 \2",
+        value,
+    )
+    return _normalize_dotted_star_before_amount(updated)
 
 
 def _normalize_star_amount_continuation(value: str) -> str:

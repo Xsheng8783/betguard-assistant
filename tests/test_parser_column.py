@@ -41,7 +41,7 @@ def test_column_b_slash_columns_with_numeric_stars_and_amount() -> None:
 
 def test_confirmed_column_slash_dunhao_formats() -> None:
     cases = [
-        (f"05/08/18.33/25.35{TWO_THREE_FOUR}x0.5", [[5, 8], [18, 33], [25, 35]], [2, 3, 4], 0.5, 50),
+        (f"05/08/18.33/25.35{TWO_THREE_FOUR}x0.5", [[5], [8], [18, 33], [25, 35]], [2, 3, 4], 0.5, 50),
         (f"08/14{IDEOGRAPHIC_COMMA}20/32/36 234星X0.5", [[8], [14, 20], [32], [36]], [2, 3, 4], 0.5, 50),
         (f"06/17{IDEOGRAPHIC_COMMA}27/32 23星X1", [[6], [17, 27], [32]], [2, 3], 1, 100),
         (f"11/17{IDEOGRAPHIC_COMMA}21/33/36 234星X0.5", [[11], [17, 21], [33], [36]], [2, 3, 4], 0.5, 50),
@@ -54,6 +54,7 @@ def test_confirmed_column_slash_dunhao_formats() -> None:
 
         assert report["type"] == "column"
         assert report["columns"] == columns
+        assert report["columns"] != [[5, 8], [18, 33], [25, 35]]
         assert report["stars"] == stars
         assert report["unit"] == unit
         assert report["money"] == money

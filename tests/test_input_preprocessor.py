@@ -66,6 +66,19 @@ def test_repeated_dots_split_bet_groups_without_touching_single_dot_numbers() ->
     ]
 
 
+def test_repeated_dots_keep_inline_star_amount_continuation() -> None:
+    report = preprocess_batch_input("10.39.01.35\u20262.3.4..50\n01.39.35\u20262.3..100")
+
+    assert [item["raw"] for item in report["candidate_bet_lines"]] == [
+        "10.39.01.35 234 50",
+        "01.39.35 23 100",
+    ]
+    assert all(
+        "normalized dotted star amount continuation" in item["preprocessing_notes"]
+        for item in report["candidate_bet_lines"]
+    )
+
+
 def test_batch_queue_accepts_repeated_dot_candidates() -> None:
     queue = build_batch_mock_queue(f"06.13.23.22 {TWO}{THREE}50..32{CAR}10{YUAN}")
 

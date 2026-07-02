@@ -642,14 +642,6 @@ def _parse_column_parts(text: str) -> list[list[int]] | None:
         return None
 
     columns = [_parse_column_numbers(part) for part in raw_parts]
-    if (
-        len(columns) == 4
-        and columns[0] == [5]
-        and columns[1] == [8]
-        and len(columns[2]) > 1
-        and len(columns[3]) > 1
-    ):
-        return [columns[0] + columns[1], columns[2], columns[3]]
     return columns
 
 
