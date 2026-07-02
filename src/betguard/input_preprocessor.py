@@ -30,7 +30,7 @@ LINE_PREFIX_PATTERN = re.compile(r"^(?P<time>(?:上午|下午)?\d{1,2}:\d{2})\s+
 DATE_ONLY_PATTERN = re.compile(r"^\d{4}[/-]\d{1,2}[/-]\d{1,2}$")
 CHINESE_DATE_PATTERN = re.compile(r"^\d{1,2}月\d{1,2}日(?:\s+星期[一二三四五六日天])?$")
 LINE_EXPORT_PATTERN = re.compile(r"^\d{4}[/-]\d{1,2}[/-]\d{1,2}\s+\d{1,2}:\d{2}\s+.+$")
-STANDALONE_GAME_LABELS = {"天天樂", "天天", "539", "港", "hk", "HK"}
+STANDALONE_GAME_LABELS = {"天天樂", "天天", "539", "港", "hk", "HK", "大", "大樂"}
 STANDALONE_GAME_LABELS.update({"???", "??", "??", "?"})
 KNOWN_METADATA_LINES = {
     "已讀",
@@ -316,12 +316,13 @@ def _normalize_confirmed_star_text(value: str, notes: list[str]) -> str:
 def _remove_confirmed_equals_metadata(value: str, notes: list[str]) -> str:
     if "=" not in value:
         return value
-    updated = re.sub(r"\s*[、,，]\s*$", "", value).strip()
+    updated = re.sub(
+        r"\s*[、,，]?\s*(?:天天樂|天天|539|hk|HK)?\s*坪\s*$", "", value
+    ).strip()
     if updated != value:
         notes.append("removed trailing equals metadata")
         value = updated
-    updated = re.sub(r"\s*[、,，]\s*(?:539\s*)?(?:hk|HK)?坪\s*$", "", value).strip()
-    updated = re.sub(r"\s*(?:539\s*)?(?:hk|HK)?坪\s*$", "", updated).strip()
+    updated = re.sub(r"\s*[、,，]\s*$", "", value).strip()
     if updated != value:
         notes.append("removed trailing equals metadata")
     return updated

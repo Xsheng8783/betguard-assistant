@@ -636,6 +636,9 @@ def test_confirmed_equals_amount_formats_with_metadata() -> None:
         (f"28.23.11=15{PING}", [28, 23, 11], [2, 3], 0.15, 15, "removed trailing equals metadata"),
         ("01.02.25 34.36=100", [1, 2, 25, 34, 36], [2, 3, 4], 1, 100, None),
         ("34.36=1000，", [34, 36], [2], 10, 1000, "removed trailing equals metadata"),
+        ("34.36= 1000，天天坪", [34, 36], [2], 10, 1000, "removed trailing equals metadata"),
+        ("34.36= 1000，", [34, 36], [2], 10, 1000, "removed trailing equals metadata"),
+        ("36.38= 1000天天坪", [36, 38], [2], 10, 1000, "removed trailing equals metadata"),
     ]
 
     for text, numbers, stars, unit, money, note in cases:
@@ -804,7 +807,7 @@ def test_existing_car_formats_are_not_regressed_by_unit_syntax_rules() -> None:
 
 
 def test_customer_specific_bare_shorthand_still_needs_review() -> None:
-    for text in ["11.28.400", "15.29.1000", "11.37.600"]:
+    for text in ["11.28.400", "15.29.1000", "11.37.600", "17.29.600"]:
         queue = build_batch_mock_queue(text)
 
         assert queue["status"] != READY_FOR_QUEUE
@@ -812,6 +815,34 @@ def test_customer_specific_bare_shorthand_still_needs_review() -> None:
 
 def test_unsupported_tokens_still_need_review() -> None:
     for text in ["各10", "寫", "改", ARM]:
+        queue = build_batch_mock_queue(text)
+
+        assert queue["status"] != READY_FOR_QUEUE
+
+
+def test_standalone_game_labels_are_ignored_metadata_not_candidates() -> None:
+    for text in ["大", "大樂", "大樂.", "天天", "天天樂", "539", "539.", "hk"]:
+        report = preprocess_batch_input(text)
+
+        assert report["candidate_bet_lines"] == []
+        assert [item["raw"] for item in report["ignored_metadata_lines"]] == [text]
+
+        queue = build_batch_mock_queue(text)
+        assert queue["items"] == []
+        assert queue["audit"]["preprocessing"]["invalid_fragments"] == []
+
+
+def test_remaining_review_only_formats_still_need_review() -> None:
+    for text in [
+        "29 28 32二三100各10元，539坪",
+        "05 28 24 16二三100各10，539",
+        "2星寫2",
+        "3.4星寫1",
+        "01.39-500改",
+        "1000臂",
+        "港08-22-46-/100",
+        "02-03-05-16-20-0.1",
+    ]:
         queue = build_batch_mock_queue(text)
 
         assert queue["status"] != READY_FOR_QUEUE

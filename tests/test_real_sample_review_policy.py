@@ -26,7 +26,7 @@ PING = "\u576a"
 
 REVIEW_POLICY_CASES = [
     f"港23半{CAR}",
-    "大",
+    "大24",
     f"01{TIMES}3",
     f"03{TIMES}1.5",
     f"01{TIMES}1",
