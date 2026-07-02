@@ -90,7 +90,8 @@ def test_flat_slash_dunhao_column_group_with_numeric_stars() -> None:
 
     assert result["status"] == "ok"
     assert result["type"] == "column"
-    assert result["columns"] == [[17, 20, 28, 33, 35]]
+    assert result["columns"] == [[17], [20], [28], [33, 35]]
+    assert result["columns"] != [[17, 20, 28, 33, 35]]
     assert result["stars"] == [2, 3, 4]
     assert result["unit"] == 0.5
     assert result["money"] == 50

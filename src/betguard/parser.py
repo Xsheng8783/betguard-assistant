@@ -470,10 +470,6 @@ def _parse_column_parts(text: str) -> list[list[int]] | None:
     if shorthand is not None:
         return shorthand
 
-    flat_group = _parse_flat_slash_dunhao_column_group(value)
-    if flat_group is not None:
-        return [flat_group]
-
     paired_group = _parse_paired_slash_dunhao_column_group(value)
     if paired_group is not None:
         return paired_group

@@ -37,6 +37,18 @@ def test_column_b_slash_columns_with_numeric_stars_and_amount() -> None:
     assert report["status"] == "ok"
 
 
+def test_slash_dunhao_keeps_slash_columns_and_merges_dunhao_within_column() -> None:
+    report = report_for(f"17/20/28/33{IDEOGRAPHIC_COMMA}35 234\u661fX0.5")
+
+    assert report["type"] == "column"
+    assert report["columns"] == [[17], [20], [28], [33, 35]]
+    assert report["columns"] != [[17, 20, 28, 33, 35]]
+    assert report["stars"] == [2, 3, 4]
+    assert report["unit"] == 0.5
+    assert report["money"] == 50
+    assert report["status"] == "ok"
+
+
 def test_column_c_chinese_stars_with_attached_money() -> None:
     report = report_for(f"24.32/13.23/16.36 {TWO_THREE}100")
 
