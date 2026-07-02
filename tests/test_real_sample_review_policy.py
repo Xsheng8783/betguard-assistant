@@ -26,7 +26,6 @@ PING = "\u576a"
 
 REVIEW_POLICY_CASES = [
     f"港23半{CAR}",
-    f"10 -32{CAR}",
     "大",
     f"01{TIMES}3",
     f"03{TIMES}1.5",
@@ -155,6 +154,12 @@ VALID_POLICY_CASES = {
         "number": 12,
         "money": 50,
         "car_units": 0.5,
+    },
+    f"10 -60{CAR}": {
+        "type": "car",
+        "number": 10,
+        "money": 60,
+        "car_units": 0.6,
     },
     "15.25.33=100": {
         "type": "normal",

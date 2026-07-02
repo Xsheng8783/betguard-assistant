@@ -17,7 +17,8 @@ STAR_AMOUNT_CONTINUATION_PATTERN = re.compile(
 MULTI_CAR_PATTERN = re.compile(
     r"^(?P<numbers>\d{1,2}(?:[\s、,，]+\d{1,2})+)\s*車\s*(?P<amount>\d+(?:\.\d+)?)(?P<kind>支|元|塊)?$"
 )
-HYPHEN_CAR_PATTERN = re.compile(r"^(?P<number>\d{1,2})-(?P<amount>\d+(?:\.\d+)?)\s*車$")
+HYPHEN_CAR_PATTERN = re.compile(r"^(?P<number>\d{1,2})\s*-\s*(?P<amount>\d+(?:\.\d+)?)\s*車$")
+CONFIRMED_SLASH_GAME_METADATA_PATTERN = re.compile(r"-?/\s*539\s*(?=[:=])")
 MULTI_FULL_CAR_EACH_PATTERN = re.compile(
     r"^(?P<numbers>\d{1,2}(?:[.\s、,，]+\d{1,2})+)\s*全車各(?P<amount>\d+(?:\.\d+)?)車$"
 )
@@ -249,6 +250,7 @@ def _clean_line_content(line: str) -> tuple[str, list[str]]:
         value = normalized_ellipsis
 
     value = _remove_leading_game_label(value, notes)
+    value = _remove_slash_game_metadata(value, notes)
 
     normalized_inline_amount = _normalize_inline_star_amount_separator(value)
     if normalized_inline_amount != value:
@@ -282,6 +284,13 @@ def _remove_leading_game_label(value: str, notes: list[str]) -> str:
     updated = re.sub(r"^\s*(?:天天樂|天天)\s+", "", value).strip()
     if updated != value:
         notes.append("removed game label metadata")
+    return updated
+
+
+def _remove_slash_game_metadata(value: str, notes: list[str]) -> str:
+    updated = CONFIRMED_SLASH_GAME_METADATA_PATTERN.sub(" ", value)
+    if updated != value:
+        notes.append("removed game metadata 539")
     return updated
 
 

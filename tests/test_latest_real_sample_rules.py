@@ -690,3 +690,52 @@ def test_latest_real_sample_batch_keeps_valid_invalid_and_no_standalone_star_amo
     assert queue["final_decision"]["real_site_operation"] is False
     assert queue["final_decision"]["auto_submit"] is False
     assert all(item["danger_buttons_clicked"] == [] for item in queue["items"])
+
+
+def test_confirmed_slash_game_metadata_is_removed_not_treated_as_column() -> None:
+    queue = build_batch_mock_queue("38-13-04-/539:100")
+    item = queue["items"][0]
+    result = item["review_result"]
+
+    assert queue["status"] == READY_FOR_QUEUE
+    assert result["type"] == "normal"
+    assert result["numbers"] == [38, 13, 4]
+    assert result["stars"] == [2, 3]
+    assert result["unit"] == 1
+    assert result["money"] == 100
+    assert "removed game metadata 539" in item["preprocessing_notes"]
+
+
+def test_confirmed_slash_game_metadata_keeps_out_of_range_number_invalid() -> None:
+    queue = build_batch_mock_queue("38-13-46-/539:100")
+    result = queue["items"][0]["review_result"]
+
+    assert queue["status"] != READY_FOR_QUEUE
+    assert result["status"] == "error"
+    assert any("46" in error for error in result["errors"])
+
+
+def test_confirmed_car_hyphen_amount_with_space_is_valid() -> None:
+    for text in [f"10 -60{CAR}", f"10-60{CAR}", f"10 - 60{CAR}"]:
+        queue = build_batch_mock_queue(text)
+        result = queue["items"][0]["review_result"]
+
+        assert queue["status"] == READY_FOR_QUEUE
+        assert result["type"] == "car"
+        assert result["number"] == 10
+        assert result["car_units"] == 0.6
+        assert result["money"] == 60
+
+
+def test_customer_specific_bare_shorthand_still_needs_review() -> None:
+    for text in ["11.28.400", "15.29.1000", "11.37.600"]:
+        queue = build_batch_mock_queue(text)
+
+        assert queue["status"] != READY_FOR_QUEUE
+
+
+def test_unsupported_tokens_still_need_review() -> None:
+    for text in ["各10", "寫", "改", ARM]:
+        queue = build_batch_mock_queue(text)
+
+        assert queue["status"] != READY_FOR_QUEUE
