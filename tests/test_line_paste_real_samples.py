@@ -113,6 +113,27 @@ def test_multiline_continuation_with_dunhao() -> None:
     assert _raws(report) == [f"08{DUN}10{DUN}17{DUN}21 234{STAR}X0.5"]
 
 
+def test_multiline_continuation_with_comma_stars_multiplier() -> None:
+    report = preprocess_batch_input(f"01,10,22,39\n2,3{TIMES}1")
+
+    assert _raws(report) == [f"01,10,22,39 2,3{TIMES}1"]
+    assert "merged continuation line" in report["candidate_bet_lines"][0]["preprocessing_notes"]
+
+
+def test_ellipsis_star_amount_lines_are_normalized() -> None:
+    report = preprocess_batch_input("10.39.01.35\u20262.3.4\n50")
+
+    assert _raws(report) == ["10.39.01.35 234 50"]
+    assert "normalized ellipsis separator" in report["candidate_bet_lines"][0]["preprocessing_notes"]
+    assert "merged continuation line" in report["candidate_bet_lines"][0]["preprocessing_notes"]
+
+
+def test_embedded_star_amount_does_not_consume_next_number_group() -> None:
+    report = preprocess_batch_input("234.100.10.25")
+
+    assert _raws(report) == ["234.100", "10.25"]
+
+
 def test_repeated_dot_preservation_in_fixture_a_long_line() -> None:
     report = preprocess_batch_input(f"15:19 USER_A 15.29.1000..15.29.33.20.30.234.100...234.100")
 

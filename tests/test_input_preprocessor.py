@@ -110,8 +110,10 @@ def test_long_pasted_input_splits_and_keeps_long_number_auditable() -> None:
 
     queue = build_batch_mock_queue(text)
 
-    assert queue["summary"]["total"] == 7
+    assert queue["summary"]["total"] == 8
     assert queue["items"][0]["original"] == "15.29.1000"
+    assert queue["items"][3]["original"] == "234.100"
+    assert queue["items"][4]["original"] == f"11.09,10.{ALT_TWO}{THREE}200"
     assert 1000 not in queue["items"][0]["review_result"].get("numbers", [])
     assert queue["status"] == NEEDS_REVIEW
     assert queue["preprocessing"]["summary"]["invalid_unsupported_count"] >= 1

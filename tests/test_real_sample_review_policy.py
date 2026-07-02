@@ -46,6 +46,8 @@ REVIEW_POLICY_CASES = [
     f"10/35/21.39/02.32{TWO}{THREE}{FOUR}x1",
     f"33.27.30.{ALT_TWO}600{THREE}200{ARM}",
     "11.37.1000",
+    "234.100",
+    "234x100",
 ]
 
 

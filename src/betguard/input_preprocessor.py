@@ -76,8 +76,11 @@ def preprocess_batch_input(text_or_lines: str | Iterable[str]) -> dict[str, Any]
             "original_lines": [line],
             "preprocessing_notes": notes,
         }
-        if pending is not None and _looks_like_continuation(cleaned):
-            pending["raw"] = f"{pending['raw'].rstrip(' .')} {cleaned}"
+        if pending is not None and (
+            (_looks_like_continuation(cleaned) and not _pending_has_confirmed_amount(pending["raw"]))
+            or _looks_like_amount_continuation_for_pending(pending["raw"], cleaned)
+        ):
+            pending["raw"] = _normalize_dotted_star_before_amount(f"{pending['raw'].rstrip(' .')} {cleaned}")
             pending["original_lines"].append(line)
             pending["preprocessing_notes"].extend(notes)
             pending["preprocessing_notes"].append("merged continuation line")
@@ -92,7 +95,11 @@ def preprocess_batch_input(text_or_lines: str | Iterable[str]) -> dict[str, Any]
 
     candidate_bet_lines: list[dict[str, Any]] = []
     for logical_index, logical in enumerate(logical_lines, start=1):
-        fragments = [fragment.strip() for fragment in REPEATED_DOT_SPLIT_PATTERN.split(logical["raw"])]
+        fragments = [
+            split_fragment.strip()
+            for fragment in REPEATED_DOT_SPLIT_PATTERN.split(logical["raw"])
+            for split_fragment in _split_after_embedded_star_amount(fragment)
+        ]
         for fragment_index, fragment in enumerate(fragments, start=1):
             fragment = _trim_fragment(fragment)
             if not fragment:
@@ -171,6 +178,17 @@ def _trim_fragment(fragment: str) -> str:
     return fragment.strip(" \t\r\n.。;；")
 
 
+def _split_after_embedded_star_amount(fragment: str) -> list[str]:
+    value = fragment.strip()
+    match = re.fullmatch(
+        r"(?P<head>.*?(?:234|2\.3\.4)\.(?:50|100))\.(?P<tail>\d{1,2}(?:[.\s、,，-]+\d{1,2})+.*)",
+        value,
+    )
+    if not match:
+        return [fragment]
+    return [match.group("head"), match.group("tail")]
+
+
 def _clean_line_content(line: str) -> tuple[str, list[str]]:
     notes: list[str] = []
     value = line.strip()
@@ -186,6 +204,11 @@ def _clean_line_content(line: str) -> tuple[str, list[str]]:
         if "＊" in value or "Ｘ" in value or "ｘ" in value:
             notes.append("normalized multiplier symbol")
     value = updated
+
+    normalized_ellipsis = _normalize_ellipsis_separator(value)
+    if normalized_ellipsis != value:
+        notes.append("normalized ellipsis separator")
+        value = normalized_ellipsis
 
     normalized_star_line = _normalize_star_amount_continuation(value)
     if normalized_star_line != value:
@@ -211,6 +234,8 @@ def _remove_trailing_game_label(value: str, notes: list[str]) -> str:
 
 def _looks_like_continuation(value: str) -> bool:
     compact = value.replace(" ", "")
+    if _looks_like_star_amount_continuation(compact):
+        return True
     if STAR_AMOUNT_CONTINUATION_PATTERN.fullmatch(compact):
         return True
     star = r"(?:[2345]{1,3}星?|[二兩三四五]+星?|二三四|兩三四|二三|兩三|三四)"
@@ -219,6 +244,49 @@ def _looks_like_continuation(value: str) -> bool:
     if re.fullmatch(rf"{star}\d+(?:\.\d+)?(?:元|塊|支)?", compact):
         return True
     return False
+
+
+def _pending_has_confirmed_amount(value: str) -> bool:
+    return bool(
+        re.search(
+            r"\s(?:[234](?:[.,、，]?[234]){0,2}|[234]星)[xX×*]?\d+(?:\.\d+)?(?:支|元|塊)?$",
+            value,
+        )
+        or re.search(
+            r"(?:二三四|兩三四|二三|兩三|三四|二星|兩星|三星|四星)\d+(?:\.\d+)?(?:支|元|塊)?$",
+            value.replace(" ", ""),
+        )
+    )
+
+
+def _looks_like_star_amount_continuation(compact: str) -> bool:
+    return bool(
+        re.fullmatch(r"[234](?:[.,、，][234]){1,2}[xX×*]\d+(?:\.\d+)?(?:支|元|塊)?", compact)
+        or re.fullmatch(r"(?:[234](?:\.[234]){1,2}|[234]{2,3})\.\d+(?:支|元|塊)?", compact)
+        or re.fullmatch(r"(?:[234](?:\.[234]){1,2}|[234]{2,3})\.\d+(?:支|元|塊)?臂", compact)
+        or re.fullmatch(r"(?:[234](?:\.[234]){1,2}|[234]{2,3})[xX×*]\d+(?:\.\d+)?(?:支|元|塊)?", compact)
+    )
+
+
+def _looks_like_amount_continuation_for_pending(pending_raw: str, value: str) -> bool:
+    if not re.fullmatch(r"\d+(?:\.\d+)?(?:支|元|塊)?", value.strip()):
+        return False
+    compact = pending_raw.replace(" ", "")
+    return bool(re.search(r"(?:[234](?:[.,、，][234]){1,2}|[234]{2,3})$", compact))
+
+
+def _normalize_ellipsis_separator(value: str) -> str:
+    updated = re.sub(r"\s*…+\s*", " ", value).strip()
+    updated = re.sub(r"(?<=\s)\.(?=\d)", "", updated)
+    return _normalize_dotted_star_before_amount(updated)
+
+
+def _normalize_dotted_star_before_amount(value: str) -> str:
+    return re.sub(
+        r"(?<=\s)([234](?:\.[234]){1,2})(?=\s+\d)",
+        lambda match: match.group(1).replace(".", ""),
+        value,
+    )
 
 
 def _normalize_star_amount_continuation(value: str) -> str:

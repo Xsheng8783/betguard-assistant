@@ -205,6 +205,74 @@ def test_repeated_539_block_groups_merge_without_standalone_star_amount() -> Non
     assert [item["review_result"]["money"] for item in queue["items"]] == [50, 50, 50, 50]
 
 
+def test_continuation_comma_stars_multiplier_is_merged_and_valid() -> None:
+    queue = build_batch_mock_queue(f"01,10,22,39\n2,3{MULTIPLY}1")
+    result = queue["items"][0]["review_result"]
+
+    assert queue["status"] == READY_FOR_QUEUE
+    assert queue["items"][0]["original"] == f"01,10,22,39 2,3{MULTIPLY}1"
+    assert result["type"] == "normal"
+    assert result["numbers"] == [1, 10, 22, 39]
+    assert result["stars"] == [2, 3]
+    assert result["unit"] == 1
+    assert result["money"] == 100
+
+
+def test_ellipsis_star_amount_continuations_are_valid() -> None:
+    cases = [
+        ("10.39.01.35\u20262.3.4\n50", [10, 39, 1, 35], [2, 3, 4], 50),
+        ("01.39.35\u20262.3\n100", [1, 39, 35], [2, 3], 100),
+        ("02.12.22.37.33\u20262.3.4\u2026.50", [2, 12, 22, 37, 33], [2, 3, 4], 50),
+        ("12.22.37.02\u20262.3.4\u202650", [12, 22, 37, 2], [2, 3, 4], 50),
+        ("12.22.37\u2026100", [12, 22, 37], [2, 3], 100),
+    ]
+
+    for text, numbers, stars, money in cases:
+        queue = build_batch_mock_queue(text)
+        result = queue["items"][0]["review_result"]
+
+        assert queue["status"] == READY_FOR_QUEUE
+        assert result["type"] == "normal"
+        assert result["numbers"] == numbers
+        assert result["stars"] == stars
+        assert result["money"] == money
+
+
+def test_multiline_numeric_star_amount_continuations_are_valid() -> None:
+    for text, numbers in [
+        ("10.20.30.15.16.19\n234.100", [10, 20, 30, 15, 16, 19]),
+        ("05.28.10.25\n234.100", [5, 28, 10, 25]),
+    ]:
+        queue = build_batch_mock_queue(text)
+        result = queue["items"][0]["review_result"]
+
+        assert queue["status"] == READY_FOR_QUEUE
+        assert result["type"] == "normal"
+        assert result["numbers"] == numbers
+        assert result["stars"] == [2, 3, 4]
+        assert result["money"] == 100
+
+
+def test_continuation_with_arm_still_needs_review() -> None:
+    queue = build_batch_mock_queue(f"06.13.23 {TWO}{THREE}50\n30.31.32.33.19.39\n234.100{ARM}")
+    item = queue["items"][1]
+
+    assert queue["status"] == NEEDS_REVIEW
+    assert item["original"] == f"30.31.32.33.19.39 234.100{ARM}"
+    assert item["review_result"]["status"] == "error"
+    assert f"unsupported characters: {ARM}" in item["review_result"]["errors"]
+    assert queue["final_decision"]["real_site_operation"] is False
+    assert queue["final_decision"]["auto_submit"] is False
+
+
+def test_standalone_numeric_star_amount_still_needs_review_in_mixed_batch() -> None:
+    for line in ["234.100", "234x100"]:
+        queue = build_batch_mock_queue("\n".join([f"06.13.23 {TWO}{THREE}50", line]))
+
+        assert queue["status"] == NEEDS_REVIEW
+        assert queue["items"][1]["review_result"]["status"] == "error"
+
+
 def test_equals_200_without_domain_suffix_is_valid_money() -> None:
     result = _result("24-27-29=200")
 
