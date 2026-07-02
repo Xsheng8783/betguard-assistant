@@ -35,9 +35,9 @@ KNOWN_METADATA_LINES = {
     "投注如下",
     "下牌如下",
 }
-BET_KEYWORD_CHARS = set("二三四兩星元塊支車尾碰今彩天天樂港六合大")
+BET_KEYWORD_CHARS = set("二三四兩两星元塊支車尾碰今彩天天樂港六合大")
 BET_SYMBOLS = set("./-、,，xX*×=()（）")
-MULTIPLIER_TRANSLATION = str.maketrans({"＊": "*", "Ｘ": "X", "ｘ": "x", "ㄨ": "x"})
+MULTIPLIER_TRANSLATION = str.maketrans({"＊": "*", "Ｘ": "X", "ｘ": "x"})
 
 
 def preprocess_batch_input(text_or_lines: str | Iterable[str]) -> dict[str, Any]:
@@ -199,10 +199,11 @@ def _clean_line_content(line: str) -> tuple[str, list[str]]:
 
     updated = value.translate(MULTIPLIER_TRANSLATION)
     if updated != value:
-        if "ㄨ" in value:
-            notes.append("normalized ㄨ multiplier to x")
         if "＊" in value or "Ｘ" in value or "ｘ" in value:
             notes.append("normalized multiplier symbol")
+    value = updated
+
+    updated = _normalize_confirmed_star_text(value, notes)
     value = updated
 
     normalized_ellipsis = _normalize_ellipsis_separator(value)
@@ -215,6 +216,7 @@ def _clean_line_content(line: str) -> tuple[str, list[str]]:
         notes.append("normalized dotted star amount continuation")
         value = normalized_star_line
 
+    value = _remove_confirmed_equals_metadata(value, notes)
     value = _remove_trailing_game_label(value, notes)
     return re.sub(r"[ \t]+", " ", value).strip(), _dedupe(notes)
 
@@ -230,6 +232,32 @@ def _remove_trailing_game_label(value: str, notes: list[str]) -> str:
         notes.append("removed trailing game label")
         value = updated
     return value
+
+
+def _normalize_confirmed_star_text(value: str, notes: list[str]) -> str:
+    updated = re.sub(
+        r"(?P<star>(?:[234](?:[.,、，]?[234]){0,2}|[二兩两三四]+星?|二三四|兩三四|二三|兩三|三四))ㄨ(?=\d)",
+        lambda match: f"{match.group('star')}x",
+        value,
+    )
+    if updated != value:
+        notes.append("normalized ㄨ to x")
+        value = updated
+
+    updated = re.sub(r"(?<=\d)两(?=三(?:星)?[xX×*]?\d)", "兩", value)
+    if updated != value:
+        notes.append("normalized 两 star token")
+    return updated
+
+
+def _remove_confirmed_equals_metadata(value: str, notes: list[str]) -> str:
+    if "=" not in value:
+        return value
+    updated = re.sub(r"\s*[、,，]\s*(?:539\s*)?(?:hk|HK)?坪\s*$", "", value).strip()
+    updated = re.sub(r"\s*(?:539\s*)?(?:hk|HK)?坪\s*$", "", updated).strip()
+    if updated != value:
+        notes.append("removed trailing equals metadata")
+    return updated
 
 
 def _looks_like_continuation(value: str) -> bool:
@@ -302,9 +330,14 @@ def _suspicious_paste_notes(value: str) -> list[str]:
     compact = value.replace(" ", "")
     if STAR_AMOUNT_CONTINUATION_PATTERN.fullmatch(compact):
         notes.append("standalone star amount line requires manual review")
-    if "、" in value and "/" not in value and re.search(r"234\s*星\s*[xX]\s*\d", value):
+    if (
+        "、" in value
+        and "/" not in value
+        and re.search(r"234\s*星\s*[xX]\s*\d", value)
+        and not _is_confirmed_numeric_star_dunhao_amount(value)
+    ):
         notes.append("numeric star code with dunhao numbers requires manual review")
-    if "、" in value and "/" in value:
+    if "、" in value and "/" in value and not _is_confirmed_column_dunhao_amount(value):
         after_dunhao = value.split("、", 1)[1]
         if "/" in after_dunhao:
             notes.append("ambiguous slash/dunhao column grouping requires manual review")
@@ -348,10 +381,18 @@ def _is_confirmed_hyphen_amount(value: str) -> bool:
 def _is_confirmed_star_equals_amount(value: str) -> bool:
     return bool(
         re.fullmatch(
-            r"\s*\d{1,2}(?:[.\-\s、,，]+\d{1,2})+\.?\s*=\s*[234](?:[.、,，]\s*[234]){0,2}\s*=\s*\d+(?:\.\d+)?(?:支|元|塊)?\s*",
+            r"\s*\d{1,2}(?:[.\-\s、,，]+\d{1,2})+\.?\s*(?:=\s*[234](?:[.、,，]\s*[234]){0,2}\s*)?=\s*\d+(?:\.\d+)?(?:支|元|塊)?\s*",
             value,
         )
     )
+
+
+def _is_confirmed_column_dunhao_amount(value: str) -> bool:
+    return bool(re.fullmatch(r"\s*\d{1,2}(?:[./、,，-]+\d{1,2})+\s+[234]{2,3}星?[xX×*]\d+(?:\.\d+)?\s*", value))
+
+
+def _is_confirmed_numeric_star_dunhao_amount(value: str) -> bool:
+    return bool(re.fullmatch(r"\s*\d{1,2}(?:[、,，]\d{1,2})+\s+234星?[xX×*]\d+(?:\.\d+)?\s*", value))
 
 
 def _is_confirmed_car_shorthand(value: str) -> bool:

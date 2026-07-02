@@ -7,6 +7,8 @@ TWO_THREE = "\u4e8c\u4e09"
 TWO_THREE_FOUR = "\u4e8c\u4e09\u56db"
 TOUCH = "\u78b0"
 MULTIPLY = "\u00d7"
+IDEOGRAPHIC_COMMA = "\u3001"
+STAR = "\u661f"
 
 
 def report_for(text: str) -> dict:
@@ -35,6 +37,27 @@ def test_column_b_slash_columns_with_numeric_stars_and_amount() -> None:
     assert report["unit"] == 1
     assert report["money"] == 100
     assert report["status"] == "ok"
+
+
+def test_confirmed_column_slash_dunhao_formats() -> None:
+    cases = [
+        (f"05/08/18.33/25.35{TWO_THREE_FOUR}x0.5", [[5, 8], [18, 33], [25, 35]], [2, 3, 4], 0.5, 50),
+        (f"08/14{IDEOGRAPHIC_COMMA}20/32/36 234星X0.5", [[8], [14, 20], [32], [36]], [2, 3, 4], 0.5, 50),
+        (f"06/17{IDEOGRAPHIC_COMMA}27/32 23星X1", [[6], [17, 27], [32]], [2, 3], 1, 100),
+        (f"11/17{IDEOGRAPHIC_COMMA}21/33/36 234星X0.5", [[11], [17, 21], [33], [36]], [2, 3, 4], 0.5, 50),
+        (f"10/35/21.39/02.32{TWO_THREE_FOUR}x1", [[10], [35], [21, 39], [2, 32]], [2, 3, 4], 1, 100),
+        (f"12/17{IDEOGRAPHIC_COMMA}20/06 23星X1", [[12], [17, 20], [6]], [2, 3], 1, 100),
+    ]
+
+    for text, columns, stars, unit, money in cases:
+        report = report_for(text)
+
+        assert report["type"] == "column"
+        assert report["columns"] == columns
+        assert report["stars"] == stars
+        assert report["unit"] == unit
+        assert report["money"] == money
+        assert report["status"] == "ok"
 
 
 def test_slash_dunhao_keeps_slash_columns_and_merges_dunhao_within_column() -> None:
@@ -110,7 +133,6 @@ def test_column_h_missing_amount_and_stars_warns() -> None:
 
 TAIL = "\u5c3e"
 YUAN = "\u5143"
-IDEOGRAPHIC_COMMA = "\u3001"
 
 
 def test_tail_a_prefix_tail_shorthand() -> None:

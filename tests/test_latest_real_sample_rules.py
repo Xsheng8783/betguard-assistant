@@ -475,7 +475,7 @@ def test_paired_slash_dunhao_column_group_with_numeric_stars() -> None:
 
     assert result["status"] == "ok"
     assert result["type"] == "column"
-    assert result["columns"] == [[12, 17], [20, 6]]
+    assert result["columns"] == [[12], [17, 20], [6]]
     assert result["stars"] == [2, 3]
     assert result["unit"] == 1
     assert result["money"] == 100
@@ -507,6 +507,51 @@ def test_column_groups_with_attached_chinese_stars_x_unit() -> None:
     assert result["money"] == 50
 
 
+def test_confirmed_column_formats_with_dunhao_and_attached_stars() -> None:
+    cases = [
+        (f"05/08/18.33/25.35{TWO}{THREE}{FOUR}x0.5", [[5, 8], [18, 33], [25, 35]], [2, 3, 4], 0.5, 50),
+        (f"08/14{DUN}20/32/36 234{STAR}X0.5", [[8], [14, 20], [32], [36]], [2, 3, 4], 0.5, 50),
+        (f"06/17{DUN}27/32 23{STAR}X1", [[6], [17, 27], [32]], [2, 3], 1, 100),
+        (f"11/17{DUN}21/33/36 234{STAR}X0.5", [[11], [17, 21], [33], [36]], [2, 3, 4], 0.5, 50),
+        (f"10/35/21.39/02.32{TWO}{THREE}{FOUR}x1", [[10], [35], [21, 39], [2, 32]], [2, 3, 4], 1, 100),
+        (f"12/17{DUN}20/06 23{STAR}X1", [[12], [17, 20], [6]], [2, 3], 1, 100),
+    ]
+
+    for text, columns, stars, unit, money in cases:
+        result = _result(text)
+
+        assert result["status"] == "ok"
+        assert result["type"] == "column"
+        assert result["columns"] == columns
+        assert result["stars"] == stars
+        assert result["unit"] == unit
+        assert result["money"] == money
+
+
+def test_confirmed_normal_x_amount_formats_and_zhuyin_notes() -> None:
+    cases = [
+        (f"05.08.16.24.33{TWO}{THREE}{FOUR}x0.5", [5, 8, 16, 24, 33], [2, 3, 4], 0.5, 50, None),
+        (f"08{DUN}10{DUN}17{DUN}21 234{STAR}X0.5", [8, 10, 17, 21], [2, 3, 4], 0.5, 50, None),
+        ("23-33/x5", [23, 33], [2], 5, 500, None),
+        ("09.11.17两三星×1", [9, 11, 17], [2, 3], 1, 100, "normalized 两 star token"),
+        ("09.11.17兩三星ㄨ1", [9, 11, 17], [2, 3], 1, 100, "normalized ㄨ to x"),
+        (f"05.08.16.24.33{TWO}{THREE}{FOUR}ㄨ0.5", [5, 8, 16, 24, 33], [2, 3, 4], 0.5, 50, "normalized ㄨ to x"),
+    ]
+
+    for text, numbers, stars, unit, money, note in cases:
+        queue = build_batch_mock_queue(text)
+        result = queue["items"][0]["review_result"]
+
+        assert queue["status"] == READY_FOR_QUEUE
+        assert result["type"] == "normal"
+        assert result["numbers"] == numbers
+        assert result["stars"] == stars
+        assert result["unit"] == unit
+        assert result["money"] == money
+        if note:
+            assert note in queue["items"][0]["preprocessing_notes"]
+
+
 def test_explicit_equals_star_amount_is_confirmed_format() -> None:
     queue = build_batch_mock_queue("04.07.17.23.=2.3=500")
     result = queue["items"][0]["review_result"]
@@ -520,20 +565,30 @@ def test_explicit_equals_star_amount_is_confirmed_format() -> None:
     assert result["money"] == 500
 
 
-def test_equals_with_ping_still_needs_review_or_invalid() -> None:
-    queue = build_batch_mock_queue(f"15.25.16=100{PING}")
+def test_confirmed_equals_amount_formats_with_metadata() -> None:
+    cases = [
+        ("19.39.35.17.12.22=15", [19, 39, 35, 17, 12, 22], [2, 3, 4], 0.15, 15, None),
+        (f"28.29.30=100，539{PING}", [28, 29, 30], [2, 3], 1, 100, "removed trailing equals metadata"),
+        ("15.25.33=100", [15, 25, 33], [2, 3], 1, 100, None),
+        ("09.10.28.16=50", [9, 10, 28, 16], [2, 3, 4], 0.5, 50, None),
+        (f"10.16.28.09=50{DUN}hk{PING}", [10, 16, 28, 9], [2, 3, 4], 0.5, 50, "removed trailing equals metadata"),
+        (f"28.23.11=15{PING}", [28, 23, 11], [2, 3], 0.15, 15, "removed trailing equals metadata"),
+        ("01.02.25 34.36=100", [1, 2, 25, 34, 36], [2, 3, 4], 1, 100, None),
+    ]
 
-    assert queue["status"] == "BATCH_BLOCKED"
-    assert queue["items"][0]["review_result"]["status"] == "error"
-    assert PING in ";".join(queue["items"][0]["review_result"]["errors"])
+    for text, numbers, stars, unit, money, note in cases:
+        queue = build_batch_mock_queue(text)
+        result = queue["items"][0]["review_result"]
 
-
-def test_hk_ping_still_needs_review_or_invalid() -> None:
-    queue = build_batch_mock_queue(f"10.16.28.09=50{DUN}hk{PING}")
-
-    assert queue["status"] == "BATCH_BLOCKED"
-    assert queue["items"][0]["review_result"]["status"] == "error"
-    assert PING in ";".join(queue["items"][0]["review_result"]["errors"])
+        assert queue["status"] == READY_FOR_QUEUE
+        assert result["type"] == "normal"
+        assert result["numbers"] == numbers
+        assert result["stars"] == stars
+        assert result["unit"] == unit
+        assert result["money"] == money
+        assert 539 not in result["numbers"]
+        if note:
+            assert note in queue["items"][0]["preprocessing_notes"]
 
 
 def test_latest_real_sample_batch_keeps_valid_invalid_and_no_standalone_star_amount() -> None:

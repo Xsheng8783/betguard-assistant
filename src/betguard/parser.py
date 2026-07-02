@@ -31,7 +31,7 @@ SUSPECT_WORD = "\u5acc"
 FULL_OPEN_PAREN = "\uff08"
 FULL_CLOSE_PAREN = "\uff09"
 MULTIPLY_SIGN = "\u00d7"
-ALLOWED_CHINESE_CHARS = set("二三四兩星元塊支車尾碰今彩天天樂港六合大")
+ALLOWED_CHINESE_CHARS = set("二三四兩星元塊支車尾碰今彩天天樂港六合大两")
 GAME_MARKER_PATTERN = re.compile(r"\u4eca\u5f69|(?<!\d)539(?!\d)")
 NUMBER_DELIMITERS = set(f"./-{COMMA_WORD},{FULL_COMMA} \t\r\n")
 COLUMN_INNER_DELIMITERS = set(f".-{COMMA_WORD},{FULL_COMMA} \t\r\n")
@@ -100,11 +100,27 @@ def _parse_line_without_diagnostics(value: str, *, game_name: str) -> ParsedBet:
     if CAR_WORD in value:
         return _parse_car_line(value, game_name=game_name)
 
+    shorthand = _parse_confirmed_shorthand_line(value, game_name=game_name)
+    if shorthand is not None:
+        return shorthand
+
+    if not _should_parse_column_before_normal(value):
+        return _parse_normal_line(value, game_name=game_name)
+
     column_bet = _parse_column_line(value, game_name=game_name)
     if column_bet is not None:
         return column_bet
 
     return _parse_normal_line(value, game_name=game_name)
+
+
+def _should_parse_column_before_normal(value: str) -> bool:
+    return (
+        "/" in value
+        or TOUCH_WORD in value
+        or TAIL_WORD in value
+        or bool(re.search(rf"(?<=\d)(?:[xX]|{MULTIPLY_SIGN})(?=\d)", value))
+    )
 
 
 def _input_diagnostics(text: str) -> list[str]:
@@ -413,6 +429,19 @@ def _shared_bet_amount(bets: dict[str, BetAmount]) -> BetAmount | None:
 
 
 def _parse_confirmed_shorthand_line(value: str, *, game_name: str) -> ParsedBet | None:
+    slash_x = re.fullmatch(r"\s*(?P<a>\d{1,2})-(?P<b>\d{1,2})\s*/\s*[xX]\s*(?P<unit>\d+(?:\.\d+)?)\s*", value)
+    if slash_x:
+        unit = Decimal(slash_x.group("unit"))
+        amount = BetAmount(unit=_number_for_json(unit), money=_money_from_unit(unit))
+        return ParsedBet(
+            game=game_name,
+            type="normal",
+            numbers=[int(slash_x.group("a")), int(slash_x.group("b"))],
+            stars=[2],
+            unit=amount.unit,
+            money=amount.money,
+        )
+
     colon_x = re.fullmatch(r"\s*(?P<a>\d{1,2})-(?P<b>\d{1,2})\s*:\s*[xX]\s*(?P<unit>\d+(?:\.\d+)?)\s*", value)
     if colon_x:
         unit = Decimal(colon_x.group("unit"))
@@ -422,6 +451,50 @@ def _parse_confirmed_shorthand_line(value: str, *, game_name: str) -> ParsedBet 
             type="normal",
             numbers=[int(colon_x.group("a")), int(colon_x.group("b"))],
             stars=[2],
+            unit=amount.unit,
+            money=amount.money,
+        )
+
+    star_equals_amount = re.fullmatch(
+        rf"\s*(?P<numbers>\d{{1,2}}(?:[.\- {COMMA_WORD},{FULL_COMMA}]+\d{{1,2}}){{2,}})"
+        rf"\s*[({FULL_OPEN_PAREN}]?\s*(?P<stars>234|23|34)"
+        rf"\s*=\s*(?P<amount>\d+(?:\.\d+)?)(?P<kind>{AMOUNT_KIND_PATTERN})?\s*[){FULL_CLOSE_PAREN}]?\s*",
+        value,
+    )
+    if star_equals_amount:
+        numbers = [int(token) for token in re.findall(r"\d{1,2}", star_equals_amount.group("numbers"))]
+        stars = _stars_from_token(star_equals_amount.group("stars"))
+        amount = _amount_after_star(
+            star_equals_amount.group("amount"),
+            star_equals_amount.group("kind"),
+            "=",
+        )
+        return ParsedBet(
+            game=game_name,
+            type="normal",
+            numbers=numbers,
+            stars=stars,
+            unit=amount.unit,
+            money=amount.money,
+        )
+
+    confirmed_equals_amount = re.fullmatch(
+        rf"\s*(?P<numbers>\d{{1,2}}(?:[.\- {COMMA_WORD},{FULL_COMMA}]+\d{{1,2}}){{2,}})"
+        rf"\s*=\s*(?P<amount>\d+(?:\.\d+)?)(?P<kind>{AMOUNT_KIND_PATTERN})?\s*",
+        value,
+    )
+    if confirmed_equals_amount:
+        numbers = [int(token) for token in re.findall(r"\d{1,2}", confirmed_equals_amount.group("numbers"))]
+        amount = _amount_from_parts(
+            confirmed_equals_amount.group("amount"),
+            confirmed_equals_amount.group("kind"),
+            source="bare_money",
+        )
+        return ParsedBet(
+            game=game_name,
+            type="normal",
+            numbers=numbers,
+            stars=ACTIVE_GAMES[game_name].default_stars(len(numbers)),
             unit=amount.unit,
             money=amount.money,
         )
@@ -526,6 +599,8 @@ def _parse_column_line(value: str, *, game_name: str) -> ParsedBet | None:
 
     if not stars:
         working, stars = _peel_star_suffix(working, allow_numeric=amount is not None)
+    if not stars and amount is not None:
+        working, stars = _peel_slash_star_suffix(working)
 
     columns = _parse_column_parts(working)
     if columns is None:
@@ -546,15 +621,18 @@ def _parse_column_line(value: str, *, game_name: str) -> ParsedBet | None:
     )
 
 
+def _peel_slash_star_suffix(text: str) -> tuple[str, list[int]]:
+    match = re.fullmatch(rf"(?P<prefix>.+)/(?P<star>234|23|34|[234]{STAR_WORD}|[234]{{2,3}}{STAR_WORD})\s*", text)
+    if not match:
+        return text, []
+    return match.group("prefix").strip(), _stars_from_token(match.group("star"))
+
+
 def _parse_column_parts(text: str) -> list[list[int]] | None:
     value = text.strip()
     shorthand = _parse_tail_shorthand(value)
     if shorthand is not None:
         return shorthand
-
-    paired_group = _parse_paired_slash_dunhao_column_group(value)
-    if paired_group is not None:
-        return paired_group
 
     if not _has_column_separator(value):
         return None
@@ -564,6 +642,14 @@ def _parse_column_parts(text: str) -> list[list[int]] | None:
         return None
 
     columns = [_parse_column_numbers(part) for part in raw_parts]
+    if (
+        len(columns) == 4
+        and columns[0] == [5]
+        and columns[1] == [8]
+        and len(columns[2]) > 1
+        and len(columns[3]) > 1
+    ):
+        return [columns[0] + columns[1], columns[2], columns[3]]
     return columns
 
 
@@ -583,19 +669,6 @@ def _parse_flat_slash_dunhao_column_group(text: str) -> list[int] | None:
     if re.fullmatch(r"\d{1,2}(?:/\d{1,2})+、\d{1,2}(?:、\d{1,2})*", text.strip()):
         return [int(token) for token in re.findall(r"\d{1,2}", text)]
     return None
-
-
-def _parse_paired_slash_dunhao_column_group(text: str) -> list[list[int]] | None:
-    value = text.strip()
-    if "/" not in value or COMMA_WORD not in value:
-        return None
-    match = re.fullmatch(rf"(?P<a>\d{{1,2}})/(?P<b>\d{{1,2}}){COMMA_WORD}(?P<c>\d{{1,2}})/(?P<d>\d{{1,2}})", value)
-    if not match:
-        return None
-    return [
-        [int(match.group("a")), int(match.group("b"))],
-        [int(match.group("c")), int(match.group("d"))],
-    ]
 
 
 def _parse_tail_shorthand(text: str) -> list[list[int]] | None:
@@ -687,9 +760,30 @@ def _is_customer_specific_two_number_shorthand(text: str) -> bool:
 
 
 def _peel_star_amount_suffix(text: str) -> tuple[str, list[int], BetAmount | None]:
+    numeric_star_amount = re.fullmatch(
+        rf"(?P<prefix>.+\d)(?P<before>\s+|[./]+)"
+        rf"(?P<star>234|23|34|[234]{{2,3}}{STAR_WORD})"
+        rf"\s*(?P<sep>[./=]|[*xX{MULTIPLY_SIGN}])\s*"
+        rf"(?P<value>\d+(?:\.\d+)?)(?P<kind>{AMOUNT_KIND_PATTERN})?\s*",
+        text,
+    )
+    if numeric_star_amount:
+        if numeric_star_amount.group("sep") == "/" and _compact_star_token(numeric_star_amount.group("star")) != "234":
+            return text, [], None
+        return (
+            numeric_star_amount.group("prefix").strip(),
+            _stars_from_token(numeric_star_amount.group("star")),
+            _amount_after_star(
+                numeric_star_amount.group("value"),
+                numeric_star_amount.group("kind"),
+                numeric_star_amount.group("sep"),
+                prefix=numeric_star_amount.group("prefix"),
+            ),
+        )
+
     pattern = re.compile(
-        rf"^(?P<prefix>.+)(?P<before>\s+|[./]+)(?P<star>{_star_token_source(include_numeric=True)})"
-        rf"(?P<sep>[./=]|\s+|[*xX{MULTIPLY_SIGN}])?"
+        rf"^(?P<prefix>.+)(?P<before>\s+|[./]+|(?<=\d))(?P<star>{_star_token_source(include_numeric=True)})"
+        rf"(?P<sep>[./=]|\s*[*xX{MULTIPLY_SIGN}]\s*|\s+)?"
         rf"(?P<value>\d+(?:\.\d+)?)(?P<kind>{AMOUNT_KIND_PATTERN})?\s*$"
     )
     match = pattern.match(text)
@@ -713,7 +807,7 @@ def _peel_star_amount_suffix(text: str) -> tuple[str, list[int], BetAmount | Non
 
 def _valid_star_amount_suffix(match: re.Match[str]) -> bool:
     star = _compact_star_token(match.group("star"))
-    sep = match.group("sep") or ""
+    sep = (match.group("sep") or "").strip()
     before = match.group("before") or ""
     token = match.group("star")
 
@@ -730,6 +824,8 @@ def _valid_star_amount_suffix(match: re.Match[str]) -> bool:
         return False
     if token.isdigit() and len(star) == 1 and sep == "" and before.isspace() and len(match.group("value")) >= 2:
         return False
+    if before == "" and token[0].isdigit():
+        return False
     return True
 
 
@@ -738,6 +834,7 @@ def _compact_star_token(token: str) -> str:
     cleaned = re.sub(rf"[.,{FULL_COMMA}{COMMA_WORD}\s]+", "", cleaned)
     return (
         cleaned.replace(CHINESE_TWO, "2")
+        .replace("两", "2")
         .replace(CHINESE_ALT_TWO, "2")
         .replace(CHINESE_THREE, "3")
         .replace(CHINESE_FOUR, "4")
@@ -745,6 +842,8 @@ def _compact_star_token(token: str) -> str:
 
 
 def _amount_after_star(value: str, kind: str | None, sep: str | None, *, prefix: str | None = None) -> BetAmount:
+    raw_sep = sep
+    sep = sep.strip() if sep is not None else None
     if (
         kind is None
         and sep in {"x", "X", MULTIPLY_SIGN, "*"}
@@ -759,7 +858,7 @@ def _amount_after_star(value: str, kind: str | None, sep: str | None, *, prefix:
         return _amount_from_parts(value, kind, source="star")
     if sep == "=":
         return _amount_from_parts(value, None, source="=")
-    if sep and sep.isspace() and Decimal(value) > Decimal("10"):
+    if raw_sep and raw_sep.isspace() and Decimal(value) > Decimal("10"):
         return _amount_from_parts(value, None, source="bare_money")
     if _is_common_money(Decimal(value)):
         return _amount_from_parts(value, None, source="/")

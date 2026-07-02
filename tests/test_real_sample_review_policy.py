@@ -21,15 +21,13 @@ CAR = "\u8eca"
 TIMES = "\u00d7"
 DUN = "\u3001"
 ARM = "\u81c2"
+PING = "\u576a"
 
 
 REVIEW_POLICY_CASES = [
     f"港23半{CAR}",
     f"10 -32{CAR}",
     "大",
-    "15.25.33=100",
-    "09.10.28.16=50",
-    "15.25.16= 100坪",
     f"01{TIMES}3",
     f"03{TIMES}1.5",
     f"01{TIMES}1",
@@ -39,11 +37,7 @@ REVIEW_POLICY_CASES = [
     "11.39-1000改",
     "02-03-05-16-20 -0.25",
     "港06-13-23-22/50",
-    f"10.16.28.09=50{DUN}hk坪",
     "05-23-12-29-38/234/200嫌",
-    f"08{DUN}10{DUN}17{DUN}21 234{STAR}X0.5",
-    f"11/17{DUN}21/33/36 234{STAR}X0.5",
-    f"10/35/21.39/02.32{TWO}{THREE}{FOUR}x1",
     f"33.27.30.{ALT_TWO}600{THREE}200{ARM}",
     "11.37.1000",
     "234.100",
@@ -107,6 +101,27 @@ VALID_POLICY_CASES = {
         "money": 500,
         "unit": 5,
     },
+    f"08{DUN}10{DUN}17{DUN}21 234{STAR}X0.5": {
+        "type": "normal",
+        "numbers": [8, 10, 17, 21],
+        "stars": [2, 3, 4],
+        "money": 50,
+        "unit": 0.5,
+    },
+    f"11/17{DUN}21/33/36 234{STAR}X0.5": {
+        "type": "column",
+        "columns": [[11], [17, 21], [33], [36]],
+        "stars": [2, 3, 4],
+        "money": 50,
+        "unit": 0.5,
+    },
+    f"10/35/21.39/02.32{TWO}{THREE}{FOUR}x1": {
+        "type": "column",
+        "columns": [[10], [35], [21, 39], [2, 32]],
+        "stars": [2, 3, 4],
+        "money": 100,
+        "unit": 1,
+    },
     "02-11x2": {
         "type": "normal",
         "numbers": [2, 11],
@@ -132,6 +147,34 @@ VALID_POLICY_CASES = {
         "number": 12,
         "money": 50,
         "car_units": 0.5,
+    },
+    "15.25.33=100": {
+        "type": "normal",
+        "numbers": [15, 25, 33],
+        "stars": [2, 3],
+        "money": 100,
+        "unit": 1,
+    },
+    "09.10.28.16=50": {
+        "type": "normal",
+        "numbers": [9, 10, 28, 16],
+        "stars": [2, 3, 4],
+        "money": 50,
+        "unit": 0.5,
+    },
+    f"15.25.16= 100{PING}": {
+        "type": "normal",
+        "numbers": [15, 25, 16],
+        "stars": [2, 3],
+        "money": 100,
+        "unit": 1,
+    },
+    f"10.16.28.09=50{DUN}hk{PING}": {
+        "type": "normal",
+        "numbers": [10, 16, 28, 9],
+        "stars": [2, 3, 4],
+        "money": 50,
+        "unit": 0.5,
     },
     f"17.20/28/34 {TWO}{THREE}1": {
         "type": "column",
@@ -186,7 +229,7 @@ def test_real_sample_valid_policy_cases_keep_expected_semantics(text: str) -> No
 
 
 def test_mixed_real_sample_policy_queue_and_accept_valid_flow() -> None:
-    text = f"06.13.23.22 {TWO}{THREE}50..港23半{CAR}..12半{CAR}..32{CAR}10{YUAN}..15.25.33=100..08 28 33 39 440"
+    text = f"06.13.23.22 {TWO}{THREE}50..港23半{CAR}..12半{CAR}..32{CAR}10{YUAN}..2星寫2..15.25.33=100..08 28 33 39 440"
 
     queue = build_batch_mock_queue(text)
 
@@ -195,11 +238,12 @@ def test_mixed_real_sample_policy_queue_and_accept_valid_flow() -> None:
         f"06.13.23.22 {TWO}{THREE}50",
         f"12半{CAR}",
         f"32{CAR}10{YUAN}",
+        "15.25.33=100",
         "08 28 33 39 440",
     ]
     assert [item["raw"] for item in queue["preprocessing"]["invalid_fragments"]] == [
         f"港23半{CAR}",
-        "15.25.33=100",
+        "2星寫2",
     ]
     assert all(item["selected_numbers"] == [] for item in queue["items"])
 
@@ -209,10 +253,11 @@ def test_mixed_real_sample_policy_queue_and_accept_valid_flow() -> None:
         f"06.13.23.22 {TWO}{THREE}50",
         f"12半{CAR}",
         f"32{CAR}10{YUAN}",
+        "15.25.33=100",
         "08 28 33 39 440",
     ]
     assert accepted["preprocessing"]["original_review_audit"]["invalid_fragments"][0]["raw"] == f"港23半{CAR}"
-    assert accepted["preprocessing"]["original_review_audit"]["invalid_fragments"][1]["raw"] == "15.25.33=100"
+    assert accepted["preprocessing"]["original_review_audit"]["invalid_fragments"][1]["raw"] == "2星寫2"
     assert accepted["items"][0]["status"] == WAITING_FOR_HUMAN_CONFIRM
     assert accepted["audit"]["safety"]["real_site_operation"] is False
     assert accepted["audit"]["safety"]["auto_submit"] is False

@@ -172,7 +172,7 @@ def test_suspicious_candidates_are_preserved_with_reasons_and_safety_flags() -> 
 
     suspicious = [
         item for item in queue["items"]
-        if item["original"] in {"15.25.33=100", "01×3", f"港23半{CAR}", "01.39-1500"}
+        if item["original"] in {"01×3", f"港23半{CAR}", "01.39-1500"}
     ]
     assert suspicious
     assert all(item["review_result"]["status"] != "ok" for item in suspicious)
