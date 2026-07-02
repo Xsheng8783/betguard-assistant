@@ -110,6 +110,49 @@ def test_advance_after_human_confirm_processes_second_item_without_skipping() ->
     assert queue["summary"]["current_index"] == 2
 
 
+def test_all_valid_ready_queue_can_start_first_mock_next_directly() -> None:
+    queue = build_batch_mock_queue(OK_TEXT)
+    assert queue["status"] == READY_FOR_QUEUE
+    assert all(item["status"] == PENDING for item in queue["items"])
+
+    queue = advance_queue_after_human_confirm(queue)
+
+    assert queue["status"] == WAITING_FOR_HUMAN_CONFIRM
+    assert queue["items"][0]["status"] == WAITING_FOR_HUMAN_CONFIRM
+    assert [item["status"] for item in queue["items"][1:]] == [PENDING, PENDING]
+    assert queue["items"][0]["danger_buttons_clicked"] == []
+    assert queue["final_decision"]["real_site_operation"] is False
+    assert queue["final_decision"]["auto_submit"] is False
+    assert queue["final_decision"]["human_required_each_item"] is True
+
+
+def test_needs_review_batch_still_cannot_mock_before_accept_valid() -> None:
+    queue = build_batch_mock_queue("06.13.23.22 二三50..2星寫2")
+    assert queue["status"] == NEEDS_REVIEW
+
+    with pytest.raises(ValueError):
+        advance_queue_after_human_confirm(queue)
+    with pytest.raises(ValueError):
+        run_current_mock_queue_item(queue)
+
+
+def test_first_mock_next_on_ready_queue_processes_only_one_item() -> None:
+    queue = build_batch_mock_queue(OK_TEXT)
+    queue = advance_queue_after_human_confirm(queue)
+
+    waiting = [item for item in queue["items"] if item["status"] == WAITING_FOR_HUMAN_CONFIRM]
+    done = [item for item in queue["items"] if item["status"] == DONE]
+    assert len(waiting) == 1
+    assert len(done) == 0
+
+    queue = advance_queue_after_human_confirm(queue)
+    waiting = [item for item in queue["items"] if item["status"] == WAITING_FOR_HUMAN_CONFIRM]
+    done = [item for item in queue["items"] if item["status"] == DONE]
+    assert len(waiting) == 1
+    assert len(done) == 1
+    assert queue["items"][2]["status"] == PENDING
+
+
 def test_car_bet_succeeds_after_column_without_becoming_batch_blocked() -> None:
     queue = run_current_mock_queue_item(build_batch_mock_queue(OK_TEXT))
     queue = advance_queue_after_human_confirm(queue)

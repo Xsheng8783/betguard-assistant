@@ -178,6 +178,10 @@ def mark_current_item_done_by_human(queue: dict[str, Any]) -> dict[str, Any]:
 def advance_queue_after_human_confirm(queue: dict[str, Any]) -> dict[str, Any]:
     if queue.get("status") == MOCK_FILL_FAILED:
         raise ValueError("queue is stopped at MOCK_FILL_FAILED; fix or skip is not implemented yet")
+    if queue.get("status") == READY_FOR_QUEUE and not any(
+        item.get("status") == WAITING_FOR_HUMAN_CONFIRM for item in queue.get("items", [])
+    ):
+        return run_current_mock_queue_item(queue)
     updated = mark_current_item_done_by_human(queue)
     if updated.get("status") == READY_FOR_QUEUE:
         return run_current_mock_queue_item(updated)
