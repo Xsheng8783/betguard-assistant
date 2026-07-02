@@ -257,6 +257,61 @@ def test_multiline_numeric_star_amount_continuations_are_valid() -> None:
         assert result["money"] == 100
 
 
+def test_inline_numeric_star_amount_continuation_is_merged() -> None:
+    queue = build_batch_mock_queue("10.20.30.15.16.19..234.100")
+    result = queue["items"][0]["review_result"]
+
+    assert queue["status"] == READY_FOR_QUEUE
+    assert queue["items"][0]["original"] == "10.20.30.15.16.19 234.100"
+    assert result["type"] == "normal"
+    assert result["numbers"] == [10, 20, 30, 15, 16, 19]
+    assert result["stars"] == [2, 3, 4]
+    assert result["unit"] == 1
+    assert result["money"] == 100
+
+
+def test_inline_numeric_star_amount_with_arm_still_needs_review() -> None:
+    queue = build_batch_mock_queue(f"30.31.32.33.19.39..234.100{ARM}")
+    item = queue["items"][0]
+
+    assert queue["status"] != READY_FOR_QUEUE
+    assert item["original"] == f"30.31.32.33.19.39 234.100{ARM}"
+    assert item["review_result"]["status"] == "error"
+    assert f"unsupported characters: {ARM}" in item["review_result"]["errors"]
+
+
+def test_embedded_star_amount_keeps_next_number_fragment_separate() -> None:
+    queue = build_batch_mock_queue(f"05.28.10.25..234.100.10.25..1000{ARM}")
+
+    assert queue["items"][0]["review_result"]["status"] == "ok"
+    assert queue["items"][0]["original"] == "05.28.10.25 234.100"
+    assert queue["items"][0]["review_result"]["numbers"] == [5, 28, 10, 25]
+    assert queue["items"][0]["review_result"]["stars"] == [2, 3, 4]
+    assert queue["items"][0]["review_result"]["unit"] == 1
+    assert queue["items"][0]["review_result"]["money"] == 100
+    assert queue["items"][1]["original"] == "10.25"
+    assert queue["items"][1]["review_result"]["status"] == "warning"
+    assert queue["items"][2]["original"] == f"1000{ARM}"
+    assert queue["items"][2]["review_result"]["status"] == "error"
+    assert queue["status"] == NEEDS_REVIEW
+
+
+def test_leading_game_label_with_inline_star_amount_continuation_is_valid() -> None:
+    queue = build_batch_mock_queue("天天樂\u202604.20.26.28.30\u2026\u2026..234x100")
+    item = queue["items"][0]
+    result = item["review_result"]
+
+    assert queue["status"] == READY_FOR_QUEUE
+    assert item["original"] == "04.20.26.28.30 234x100"
+    assert "removed game label metadata" in item["preprocessing_notes"]
+    assert "merged continuation star amount" in item["preprocessing_notes"]
+    assert result["type"] == "normal"
+    assert result["numbers"] == [4, 20, 26, 28, 30]
+    assert result["stars"] == [2, 3, 4]
+    assert result["unit"] == 1
+    assert result["money"] == 100
+
+
 def test_continuation_with_arm_still_needs_review() -> None:
     queue = build_batch_mock_queue(f"06.13.23 {TWO}{THREE}50\n30.31.32.33.19.39\n234.100{ARM}")
     item = queue["items"][1]
@@ -579,6 +634,7 @@ def test_confirmed_equals_amount_formats_with_metadata() -> None:
         (f"10.16.28.09=50{DUN}hk{PING}", [10, 16, 28, 9], [2, 3, 4], 0.5, 50, "removed trailing equals metadata"),
         (f"28.23.11=15{PING}", [28, 23, 11], [2, 3], 0.15, 15, "removed trailing equals metadata"),
         ("01.02.25 34.36=100", [1, 2, 25, 34, 36], [2, 3, 4], 1, 100, None),
+        ("34.36=1000，", [34, 36], [2], 10, 1000, "removed trailing equals metadata"),
     ]
 
     for text, numbers, stars, unit, money, note in cases:

@@ -95,16 +95,19 @@ def preprocess_batch_input(text_or_lines: str | Iterable[str]) -> dict[str, Any]
 
     candidate_bet_lines: list[dict[str, Any]] = []
     for logical_index, logical in enumerate(logical_lines, start=1):
-        fragments = [
+        raw_fragments = [
             split_fragment.strip()
             for fragment in REPEATED_DOT_SPLIT_PATTERN.split(logical["raw"])
             for split_fragment in _split_after_embedded_star_amount(fragment)
         ]
+        fragments, inline_notes = _merge_inline_star_amount_fragments(raw_fragments)
         for fragment_index, fragment in enumerate(fragments, start=1):
             fragment = _trim_fragment(fragment)
             if not fragment:
                 continue
-            fragment_notes = _dedupe(list(logical.get("preprocessing_notes", [])) + _suspicious_paste_notes(fragment))
+            fragment_notes = _dedupe(
+                list(logical.get("preprocessing_notes", [])) + inline_notes + _suspicious_paste_notes(fragment)
+            )
             expanded_fragments = _expand_multi_car_fragment(fragment)
             for expanded_index, expanded in enumerate(expanded_fragments, start=1):
                 expanded_notes = fragment_notes
@@ -189,6 +192,40 @@ def _split_after_embedded_star_amount(fragment: str) -> list[str]:
     return [match.group("head"), match.group("tail")]
 
 
+def _merge_inline_star_amount_fragments(fragments: list[str]) -> tuple[list[str], list[str]]:
+    merged: list[str] = []
+    notes: list[str] = []
+    for fragment in fragments:
+        value = fragment.strip()
+        if (
+            merged
+            and _looks_like_number_fragment_without_amount(merged[-1])
+            and _looks_like_inline_star_amount_fragment(value)
+        ):
+            merged[-1] = _normalize_dotted_star_before_amount(f"{merged[-1].rstrip()} {value}")
+            notes.append("merged continuation star amount")
+            continue
+        merged.append(value)
+    return merged, _dedupe(notes)
+
+
+def _looks_like_number_fragment_without_amount(value: str) -> bool:
+    stripped = value.strip()
+    if _pending_has_confirmed_amount(stripped):
+        return False
+    return bool(re.fullmatch(r"\d{1,2}(?:[.\s、,，-]+\d{1,2}){2,}", stripped))
+
+
+def _looks_like_inline_star_amount_fragment(value: str) -> bool:
+    compact = value.replace(" ", "")
+    return bool(
+        re.fullmatch(
+            r"(?:234|2\.3\.4)(?:\.|[xX*×])\d+(?:\.\d+)?(?:支|元|塊)?(?:\u81c2)?",
+            compact,
+        )
+    )
+
+
 def _clean_line_content(line: str) -> tuple[str, list[str]]:
     notes: list[str] = []
     value = line.strip()
@@ -210,6 +247,8 @@ def _clean_line_content(line: str) -> tuple[str, list[str]]:
     if normalized_ellipsis != value:
         notes.append("normalized ellipsis separator")
         value = normalized_ellipsis
+
+    value = _remove_leading_game_label(value, notes)
 
     normalized_inline_amount = _normalize_inline_star_amount_separator(value)
     if normalized_inline_amount != value:
@@ -239,6 +278,13 @@ def _remove_trailing_game_label(value: str, notes: list[str]) -> str:
     return value
 
 
+def _remove_leading_game_label(value: str, notes: list[str]) -> str:
+    updated = re.sub(r"^\s*(?:天天樂|天天)\s+", "", value).strip()
+    if updated != value:
+        notes.append("removed game label metadata")
+    return updated
+
+
 def _normalize_confirmed_star_text(value: str, notes: list[str]) -> str:
     updated = re.sub(
         r"(?P<star>(?:[234](?:[.,、，]?[234]){0,2}|[二兩两三四]+星?|二三四|兩三四|二三|兩三|三四))ㄨ(?=\d)",
@@ -258,6 +304,10 @@ def _normalize_confirmed_star_text(value: str, notes: list[str]) -> str:
 def _remove_confirmed_equals_metadata(value: str, notes: list[str]) -> str:
     if "=" not in value:
         return value
+    updated = re.sub(r"\s*[、,，]\s*$", "", value).strip()
+    if updated != value:
+        notes.append("removed trailing equals metadata")
+        value = updated
     updated = re.sub(r"\s*[、,，]\s*(?:539\s*)?(?:hk|HK)?坪\s*$", "", value).strip()
     updated = re.sub(r"\s*(?:539\s*)?(?:hk|HK)?坪\s*$", "", updated).strip()
     if updated != value:

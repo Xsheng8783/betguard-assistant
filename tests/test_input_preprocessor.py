@@ -79,6 +79,35 @@ def test_repeated_dots_keep_inline_star_amount_continuation() -> None:
     )
 
 
+def test_repeated_dots_merge_inline_numeric_star_amount_fragment() -> None:
+    report = preprocess_batch_input(f"10.20.30.15.16.19..234.100..30.31.32.33.19.39..234.100{ARM}")
+
+    assert [item["raw"] for item in report["candidate_bet_lines"]] == [
+        "10.20.30.15.16.19 234.100",
+        f"30.31.32.33.19.39 234.100{ARM}",
+    ]
+    assert "merged continuation star amount" in report["candidate_bet_lines"][0]["preprocessing_notes"]
+
+
+def test_embedded_star_amount_does_not_consume_next_number_fragment() -> None:
+    report = preprocess_batch_input(f"05.28.10.25..234.100.10.25..1000{ARM}")
+
+    assert [item["raw"] for item in report["candidate_bet_lines"]] == [
+        "05.28.10.25 234.100",
+        "10.25",
+        f"1000{ARM}",
+    ]
+
+
+def test_leading_game_label_merges_inline_star_amount() -> None:
+    report = preprocess_batch_input("天天樂\u202604.20.26.28.30\u2026\u2026..234x100")
+
+    assert [item["raw"] for item in report["candidate_bet_lines"]] == ["04.20.26.28.30 234x100"]
+    notes = report["candidate_bet_lines"][0]["preprocessing_notes"]
+    assert "removed game label metadata" in notes
+    assert "merged continuation star amount" in notes
+
+
 def test_batch_queue_accepts_repeated_dot_candidates() -> None:
     queue = build_batch_mock_queue(f"06.13.23.22 {TWO}{THREE}50..32{CAR}10{YUAN}")
 
@@ -123,10 +152,12 @@ def test_long_pasted_input_splits_and_keeps_long_number_auditable() -> None:
 
     queue = build_batch_mock_queue(text)
 
-    assert queue["summary"]["total"] == 8
+    assert queue["summary"]["total"] == 6
     assert queue["items"][0]["original"] == "15.29.1000"
-    assert queue["items"][3]["original"] == "234.100"
-    assert queue["items"][4]["original"] == f"11.09,10.{ALT_TWO}{THREE}200"
+    assert queue["items"][2]["original"] == "32.23.15.20.14 234.100"
+    assert queue["items"][3]["original"] == f"11.09,10.{ALT_TWO}{THREE}200"
+    assert queue["items"][4]["original"] == "21.20.23.32.05.06 234.100"
+    assert queue["items"][5]["original"] == f"33.27.30.{ALT_TWO}600{THREE}200{ARM}"
     assert 1000 not in queue["items"][0]["review_result"].get("numbers", [])
     assert queue["status"] == NEEDS_REVIEW
     assert queue["preprocessing"]["summary"]["invalid_unsupported_count"] >= 1
