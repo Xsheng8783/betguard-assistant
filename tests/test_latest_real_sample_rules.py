@@ -535,6 +535,48 @@ def test_confirmed_four_number_spaced_hyphen_50_is_tail_amount() -> None:
     assert result["money"] == 50
 
 
+def test_confirmed_two_number_hyphen_1500_is_tail_amount() -> None:
+    queue = build_batch_mock_queue("01.39-1500")
+    result = queue["items"][0]["review_result"]
+
+    assert queue["status"] == READY_FOR_QUEUE
+    assert result["status"] == "ok"
+    assert result["type"] == "normal"
+    assert result["numbers"] == [1, 39]
+    assert result["stars"] == [2]
+    assert result["unit"] == 15
+    assert result["money"] == 1500
+    assert "hyphen amount requires manual review" not in result["warnings"]
+
+
+def test_confirmed_three_number_hyphen_200_is_tail_amount() -> None:
+    queue = build_batch_mock_queue("01.11.39-200")
+    result = queue["items"][0]["review_result"]
+
+    assert queue["status"] == READY_FOR_QUEUE
+    assert result["status"] == "ok"
+    assert result["type"] == "normal"
+    assert result["numbers"] == [1, 11, 39]
+    assert result["stars"] == [2, 3]
+    assert result["unit"] == 2
+    assert result["money"] == 200
+    assert "hyphen amount requires manual review" not in result["warnings"]
+
+
+def test_decimal_hyphen_amounts_still_need_review() -> None:
+    for text in [
+        "02-03-05-16-20 -0.25",
+        "02-03-05-16-20-0.1",
+        "01 15 27 39 07 -0.3",
+    ]:
+        queue = build_batch_mock_queue(text)
+        result = queue["items"][0]["review_result"]
+
+        assert queue["status"] != READY_FOR_QUEUE
+        assert result["status"] in {"warning", "error"}
+        assert "hyphen amount requires manual review" in result["warnings"]
+
+
 def test_paired_slash_dunhao_column_group_with_numeric_stars() -> None:
     result = _result(f"12/17{DUN}20/06 23{STAR}X1")
 
@@ -844,6 +886,7 @@ def test_remaining_review_only_formats_still_need_review() -> None:
         "2星寫2",
         "3.4星寫1",
         "01.39-500改",
+        "11.39-1000改",
         "1000臂",
         "港08-22-46-/100",
         "02-03-05-16-20-0.1",

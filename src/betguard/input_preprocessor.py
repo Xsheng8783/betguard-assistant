@@ -449,7 +449,7 @@ def _suspicious_paste_notes(value: str) -> list[str]:
 def _is_confirmed_hyphen_amount(value: str) -> bool:
     return bool(
         re.fullmatch(
-            r"\s*\d{1,2}(?:[.\-\s、,，]+\d{1,2}){2,}\s*-\s*(?:50|100)\s*",
+            r"\s*\d{1,2}(?:[.\-\s、,，]+\d{1,2})+\s*-\s*(?:50|100|200|500|1000|1500)\s*",
             value,
         )
     )

@@ -525,8 +525,8 @@ def _parse_confirmed_shorthand_line(value: str, *, game_name: str) -> ParsedBet 
         )
 
     confirmed_hyphen_amount = re.fullmatch(
-        rf"\s*(?P<numbers>\d{{1,2}}(?:[.\- {COMMA_WORD},{FULL_COMMA}]+\d{{1,2}}){{2,}})"
-        rf"\s*-\s*(?P<amount>50|100)\s*",
+        rf"\s*(?P<numbers>\d{{1,2}}(?:[.\- {COMMA_WORD},{FULL_COMMA}]+\d{{1,2}})+)"
+        rf"\s*-\s*(?P<amount>50|100|200|500|1000|1500)\s*",
         value,
     )
     if confirmed_hyphen_amount:
