@@ -84,7 +84,7 @@ def test_reject_updates_audit_without_mock_fill() -> None:
 def test_cli_batch_audit_export_writes_readable_json(tmp_path, monkeypatch) -> None:
     queue_path = tmp_path / "queue_state.json"
     audit_path = tmp_path / "audit.json"
-    queue = run_current_mock_queue_item(build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}50"))
+    queue = run_current_mock_queue_item(accept_valid_candidates_for_mock_queue(build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}50")))
     queue_path.write_text(json.dumps(queue, ensure_ascii=False), encoding="utf-8")
 
     monkeypatch.setattr(
@@ -117,7 +117,7 @@ def test_cli_batch_audit_export_writes_readable_json(tmp_path, monkeypatch) -> N
 
 
 def test_completed_queue_updates_audit_completed_status() -> None:
-    queue = run_current_mock_queue_item(build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}50\n32{CAR}10{YUAN}"))
+    queue = run_current_mock_queue_item(accept_valid_candidates_for_mock_queue(build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}50\n32{CAR}10{YUAN}")))
     queue = advance_queue_after_human_confirm(queue)
     queue = advance_queue_after_human_confirm(queue)
 

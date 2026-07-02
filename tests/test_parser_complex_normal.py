@@ -6,6 +6,7 @@ from betguard.formatter import format_bet_summary
 from betguard.review import build_report
 from betguard.webfill.batch_mock_queue import (
     WAITING_FOR_HUMAN_CONFIRM,
+    accept_valid_candidates_for_mock_queue,
     build_batch_mock_queue,
     run_current_mock_queue_item,
 )
@@ -101,6 +102,7 @@ def test_complex_normal_invalid_cases_are_errors(text: str, expected_error: str)
 
 def test_complex_normal_can_enter_queue_and_mock_fill_waits_for_human() -> None:
     queue = build_batch_mock_queue(f"02.10.11.23.39 {TWO}{STAR}100{YUAN}.{THREE}.{FOUR}{STAR}50{YUAN}")
+    queue = accept_valid_candidates_for_mock_queue(queue)
     queue = run_current_mock_queue_item(queue)
 
     assert queue["status"] == WAITING_FOR_HUMAN_CONFIRM

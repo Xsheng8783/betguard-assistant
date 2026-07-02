@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -123,6 +124,10 @@ def run_current_mock_queue_item(queue: dict[str, Any]) -> dict[str, Any]:
     updated = copy.deepcopy(queue)
     if updated.get("status") not in {READY_FOR_QUEUE}:
         raise ValueError("queue is not ready for current mock fill")
+    if not _has_human_approved_items(updated):
+        raise ValueError(
+            "approved fill queue is empty; run --batch-review-accept-valid to approve valid candidates first"
+        )
 
     item = _first_item_with_status(updated, PENDING)
     if item is None:
@@ -178,6 +183,10 @@ def mark_current_item_done_by_human(queue: dict[str, Any]) -> dict[str, Any]:
 def advance_queue_after_human_confirm(queue: dict[str, Any]) -> dict[str, Any]:
     if queue.get("status") == MOCK_FILL_FAILED:
         raise ValueError("queue is stopped at MOCK_FILL_FAILED; fix or skip is not implemented yet")
+    if not _has_human_approved_items(queue):
+        raise ValueError(
+            "approved fill queue is empty; run --batch-review-accept-valid to approve valid candidates first"
+        )
     if queue.get("status") == READY_FOR_QUEUE and not any(
         item.get("status") == WAITING_FOR_HUMAN_CONFIRM for item in queue.get("items", [])
     ):
@@ -190,16 +199,80 @@ def advance_queue_after_human_confirm(queue: dict[str, Any]) -> dict[str, Any]:
     return updated
 
 
+def _has_human_approved_items(queue: dict[str, Any]) -> bool:
+    approved = queue.get("approved_fill_queue")
+    if not isinstance(approved, list) or not approved:
+        return False
+    return any(entry.get("accepted_by_human") is True for entry in approved)
+
+
+def _build_approved_fill_queue(queue: dict[str, Any]) -> list[dict[str, Any]]:
+    accepted_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    audit = queue.get("audit", {})
+    audit_snapshot = {
+        "batch_id": audit.get("batch_id"),
+        "queue_status": queue.get("status"),
+        "preprocessing_status": queue.get("preprocessing_status"),
+        "review_action": "accept_valid",
+    }
+    entries: list[dict[str, Any]] = []
+    for item in queue.get("items", []):
+        result = item.get("review_result", {})
+        if result.get("status") != "ok":
+            continue
+        entries.append(
+            {
+                "index": item.get("index"),
+                "original_fragment": item.get("original_fragment") or item.get("original"),
+                "original_line": item.get("original_line"),
+                "original_lines": list(item.get("original_lines", [])),
+                "review_result": copy.deepcopy(result),
+                "bet_type": result.get("type"),
+                "numbers": list(result.get("numbers") or []),
+                "columns": copy.deepcopy(result.get("columns")),
+                "stars": list(result.get("stars") or []),
+                "number": result.get("number"),
+                "car_units": result.get("car_units"),
+                "money": result.get("money"),
+                "unit": result.get("unit"),
+                "star_amounts": _approved_star_amounts(result),
+                "accepted_at": accepted_at,
+                "accepted_by_human": True,
+                "audit_snapshot": dict(audit_snapshot),
+            }
+        )
+    return entries
+
+
+def _approved_star_amounts(result: dict[str, Any]) -> dict[str, Any]:
+    bets = result.get("bets")
+    if isinstance(bets, dict) and bets:
+        return {
+            str(star): {"unit": amount.get("unit"), "money": amount.get("money")}
+            for star, amount in bets.items()
+            if isinstance(amount, dict)
+        }
+    stars = result.get("stars") or []
+    if result.get("money") is None or not stars:
+        return {}
+    return {
+        str(star): {"unit": result.get("unit"), "money": result.get("money")}
+        for star in stars
+    }
+
+
 def accept_valid_candidates_for_mock_queue(queue: dict[str, Any], *, run_first: bool = False) -> dict[str, Any]:
-    if queue.get("status") != NEEDS_REVIEW:
-        raise ValueError("batch review accept is only allowed when status is NEEDS_REVIEW")
+    source_status = queue.get("status")
+    if source_status not in {NEEDS_REVIEW, READY_FOR_QUEUE}:
+        raise ValueError("batch review accept is only allowed when status is NEEDS_REVIEW or READY_FOR_QUEUE")
     valid_candidates = list(queue.get("preprocessing", {}).get("valid_candidates", []))
     if not valid_candidates:
         raise ValueError("no valid candidates available to accept")
 
     accepted = build_batch_mock_queue([str(candidate.get("raw", "")) for candidate in valid_candidates])
     accepted["review_action"] = "accept_valid"
-    accepted["accepted_from_queue_status"] = NEEDS_REVIEW
+    accepted["accepted_from_queue_status"] = source_status
+    accepted["approved_fill_queue"] = _build_approved_fill_queue(accepted)
     accepted["preprocessing"]["original_review_audit"] = {
         "status": queue.get("status"),
         "preprocessing_status": queue.get("preprocessing_status"),

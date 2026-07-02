@@ -66,7 +66,7 @@ def test_review_console_after_accept_valid_has_waiting_queue_view() -> None:
 
 
 def test_review_console_after_mock_next_shows_last_mock_result_waiting() -> None:
-    queue = run_current_mock_queue_item(build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}50"))
+    queue = run_current_mock_queue_item(accept_valid_candidates_for_mock_queue(build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}50")))
 
     model = build_review_console_model(queue)
 
@@ -125,7 +125,7 @@ def test_review_console_actions_include_accept_reject_mock_next_and_audit_export
         queue_path="queue_state.json",
     )
     waiting = build_review_console_model(
-        run_current_mock_queue_item(build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}50")),
+        run_current_mock_queue_item(accept_valid_candidates_for_mock_queue(build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}50"))),
         queue_path="queue_state.json",
     )
 

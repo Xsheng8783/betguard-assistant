@@ -32,6 +32,7 @@ def sync_batch_audit(queue: dict[str, Any]) -> dict[str, Any]:
     audit["preprocessing"] = _preprocessing_audit(queue)
     audit["review"] = _review_audit(queue, audit)
     audit["items"] = [_item_audit(item) for item in queue.get("items", [])]
+    audit["approved_fill_queue"] = _approved_fill_audit(queue, audit)
     audit["safety"] = _safety_audit(queue)
     audit["queue_status"] = queue.get("status")
     return audit
@@ -78,6 +79,7 @@ def format_pretty_audit_summary(queue_or_audit: dict[str, Any]) -> str:
         f"- item count: {len(audit.get('items', []))}",
         f"- invalid fragments: {preprocessing.get('invalid_count', 0)}",
         f"- current queue status: {audit.get('queue_status') or review.get('status')}",
+        f"- approved_fill_queue_count: {audit.get('approved_fill_queue', {}).get('approved_fill_queue_count', 0)}",
         f"- real_site_operation: {str(safety.get('real_site_operation')).lower()}",
         f"- auto_submit: {str(safety.get('auto_submit')).lower()}",
         f"- danger_buttons_clicked: {safety.get('danger_buttons_clicked', [])}",
@@ -130,6 +132,23 @@ def _review_audit(queue: dict[str, Any], audit: dict[str, Any]) -> dict[str, Any
     existing.setdefault("accepted_valid_count", 0)
     existing.setdefault("rejected_reason", None)
     return existing
+
+
+def _approved_fill_audit(queue: dict[str, Any], audit: dict[str, Any]) -> dict[str, Any]:
+    entries = queue.get("approved_fill_queue")
+    entries = entries if isinstance(entries, list) else []
+    human_accepted = [entry for entry in entries if entry.get("accepted_by_human") is True]
+    review = audit.get("review", {})
+    preprocessing = audit.get("preprocessing", {})
+    return {
+        "approved_fill_queue_count": len(entries),
+        "human_accepted_count": len(human_accepted),
+        "accepted_valid_count": int(review.get("accepted_valid_count", 0) or 0),
+        "excluded_invalid_count": int(preprocessing.get("invalid_count", 0) or 0),
+        "human_accepted_only": len(human_accepted) == len(entries),
+        "real_site_operation": False,
+        "auto_submit": False,
+    }
 
 
 def _item_audit(item: dict[str, Any]) -> dict[str, Any]:

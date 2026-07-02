@@ -12,6 +12,7 @@ from betguard.webfill.batch_mock_queue import (
     PENDING,
     READY_FOR_QUEUE,
     WAITING_FOR_HUMAN_CONFIRM,
+    accept_valid_candidates_for_mock_queue,
     advance_queue_after_human_confirm,
     build_batch_mock_queue,
     format_pretty_batch_mock_queue,
@@ -57,7 +58,7 @@ def test_build_queue_blocked_when_warning() -> None:
 
 
 def test_run_current_mock_queue_item_only_processes_first_pending() -> None:
-    queue = run_current_mock_queue_item(build_batch_mock_queue(OK_TEXT))
+    queue = run_current_mock_queue_item(accept_valid_candidates_for_mock_queue(build_batch_mock_queue(OK_TEXT)))
 
     assert queue["status"] == WAITING_FOR_HUMAN_CONFIRM
     assert queue["items"][0]["status"] == WAITING_FOR_HUMAN_CONFIRM
@@ -68,7 +69,7 @@ def test_run_current_mock_queue_item_only_processes_first_pending() -> None:
 
 
 def test_first_item_waits_for_human_confirm() -> None:
-    queue = run_current_mock_queue_item(build_batch_mock_queue(OK_TEXT))
+    queue = run_current_mock_queue_item(accept_valid_candidates_for_mock_queue(build_batch_mock_queue(OK_TEXT)))
 
     assert queue["items"][0]["status"] == WAITING_FOR_HUMAN_CONFIRM
     assert queue["summary"]["current_index"] == 1
@@ -82,7 +83,7 @@ def test_cannot_mark_done_without_waiting() -> None:
 
 
 def test_mark_done_moves_to_next_ready_state() -> None:
-    queue = run_current_mock_queue_item(build_batch_mock_queue(OK_TEXT))
+    queue = run_current_mock_queue_item(accept_valid_candidates_for_mock_queue(build_batch_mock_queue(OK_TEXT)))
     queue = mark_current_item_done_by_human(queue)
 
     assert queue["items"][0]["status"] == DONE
@@ -91,7 +92,7 @@ def test_mark_done_moves_to_next_ready_state() -> None:
 
 
 def test_advance_after_human_confirm_processes_second_item_without_skipping() -> None:
-    queue = run_current_mock_queue_item(build_batch_mock_queue(OK_TEXT))
+    queue = run_current_mock_queue_item(accept_valid_candidates_for_mock_queue(build_batch_mock_queue(OK_TEXT)))
     queue = advance_queue_after_human_confirm(queue)
 
     assert queue["items"][0]["status"] == DONE
@@ -110,20 +111,25 @@ def test_advance_after_human_confirm_processes_second_item_without_skipping() ->
     assert queue["summary"]["current_index"] == 2
 
 
-def test_all_valid_ready_queue_can_start_first_mock_next_directly() -> None:
+def test_all_valid_ready_queue_requires_accept_before_first_mock_next() -> None:
     queue = build_batch_mock_queue(OK_TEXT)
     assert queue["status"] == READY_FOR_QUEUE
     assert all(item["status"] == PENDING for item in queue["items"])
+    assert "approved_fill_queue" not in queue
 
-    queue = advance_queue_after_human_confirm(queue)
+    with pytest.raises(ValueError, match="approved fill queue is empty"):
+        advance_queue_after_human_confirm(queue)
 
-    assert queue["status"] == WAITING_FOR_HUMAN_CONFIRM
-    assert queue["items"][0]["status"] == WAITING_FOR_HUMAN_CONFIRM
-    assert [item["status"] for item in queue["items"][1:]] == [PENDING, PENDING]
-    assert queue["items"][0]["danger_buttons_clicked"] == []
-    assert queue["final_decision"]["real_site_operation"] is False
-    assert queue["final_decision"]["auto_submit"] is False
-    assert queue["final_decision"]["human_required_each_item"] is True
+    accepted = accept_valid_candidates_for_mock_queue(queue)
+    accepted = advance_queue_after_human_confirm(accepted)
+
+    assert accepted["status"] == WAITING_FOR_HUMAN_CONFIRM
+    assert accepted["items"][0]["status"] == WAITING_FOR_HUMAN_CONFIRM
+    assert [item["status"] for item in accepted["items"][1:]] == [PENDING, PENDING]
+    assert accepted["items"][0]["danger_buttons_clicked"] == []
+    assert accepted["final_decision"]["real_site_operation"] is False
+    assert accepted["final_decision"]["auto_submit"] is False
+    assert accepted["final_decision"]["human_required_each_item"] is True
 
 
 def test_needs_review_batch_still_cannot_mock_before_accept_valid() -> None:
@@ -137,7 +143,7 @@ def test_needs_review_batch_still_cannot_mock_before_accept_valid() -> None:
 
 
 def test_first_mock_next_on_ready_queue_processes_only_one_item() -> None:
-    queue = build_batch_mock_queue(OK_TEXT)
+    queue = accept_valid_candidates_for_mock_queue(build_batch_mock_queue(OK_TEXT))
     queue = advance_queue_after_human_confirm(queue)
 
     waiting = [item for item in queue["items"] if item["status"] == WAITING_FOR_HUMAN_CONFIRM]
@@ -154,7 +160,7 @@ def test_first_mock_next_on_ready_queue_processes_only_one_item() -> None:
 
 
 def test_car_bet_succeeds_after_column_without_becoming_batch_blocked() -> None:
-    queue = run_current_mock_queue_item(build_batch_mock_queue(OK_TEXT))
+    queue = run_current_mock_queue_item(accept_valid_candidates_for_mock_queue(build_batch_mock_queue(OK_TEXT)))
     queue = advance_queue_after_human_confirm(queue)
     queue = advance_queue_after_human_confirm(queue)
 
@@ -172,7 +178,7 @@ def test_car_bet_succeeds_after_column_without_becoming_batch_blocked() -> None:
 
 
 def test_failed_queue_next_does_not_traceback_at_state_layer() -> None:
-    queue = run_current_mock_queue_item(build_batch_mock_queue("06.13.23.22 二三50"))
+    queue = run_current_mock_queue_item(accept_valid_candidates_for_mock_queue(build_batch_mock_queue("06.13.23.22 二三50")))
     queue["status"] = MOCK_FILL_FAILED
 
     with pytest.raises(ValueError, match="queue is stopped at MOCK_FILL_FAILED; fix or skip is not implemented yet"):
@@ -180,14 +186,14 @@ def test_failed_queue_next_does_not_traceback_at_state_layer() -> None:
 
 
 def test_pending_items_are_not_counted_as_blocked() -> None:
-    queue = run_current_mock_queue_item(build_batch_mock_queue(OK_TEXT))
+    queue = run_current_mock_queue_item(accept_valid_candidates_for_mock_queue(build_batch_mock_queue(OK_TEXT)))
 
     assert queue["summary"]["pending"] == 2
     assert queue["summary"]["blocked"] == 0
 
 
 def test_current_item_display_shows_car_when_waiting() -> None:
-    queue = run_current_mock_queue_item(build_batch_mock_queue(OK_TEXT))
+    queue = run_current_mock_queue_item(accept_valid_candidates_for_mock_queue(build_batch_mock_queue(OK_TEXT)))
     queue = advance_queue_after_human_confirm(queue)
     queue = advance_queue_after_human_confirm(queue)
     pretty = format_pretty_batch_mock_queue(queue)
@@ -200,7 +206,7 @@ def test_current_item_display_shows_car_when_waiting() -> None:
 
 
 def test_car_can_be_first_item_in_queue() -> None:
-    queue = run_current_mock_queue_item(build_batch_mock_queue("08車20元\n06.13.23.22 二三50"))
+    queue = run_current_mock_queue_item(accept_valid_candidates_for_mock_queue(build_batch_mock_queue("08車20元\n06.13.23.22 二三50")))
 
     assert queue["status"] == WAITING_FOR_HUMAN_CONFIRM
     assert queue["items"][0]["bet_type"] == "car"
@@ -212,7 +218,7 @@ def test_car_can_be_first_item_in_queue() -> None:
 
 
 def test_car_can_be_middle_item_and_queue_continues() -> None:
-    queue = run_current_mock_queue_item(build_batch_mock_queue("06.13.23.22 二三50\n08車20元\n07.08.09 二三50"))
+    queue = run_current_mock_queue_item(accept_valid_candidates_for_mock_queue(build_batch_mock_queue("06.13.23.22 二三50\n08車20元\n07.08.09 二三50")))
     queue = advance_queue_after_human_confirm(queue)
 
     assert queue["items"][1]["status"] == WAITING_FOR_HUMAN_CONFIRM
@@ -235,7 +241,7 @@ def test_invalid_car_input_blocks_review_without_normal_or_column_routing() -> N
 
 
 def test_mark_done_requires_exactly_one_waiting_item() -> None:
-    queue = run_current_mock_queue_item(build_batch_mock_queue("06.13.23.22 二三50\n07.08.09 二三50"))
+    queue = run_current_mock_queue_item(accept_valid_candidates_for_mock_queue(build_batch_mock_queue("06.13.23.22 二三50\n07.08.09 二三50")))
     queue["items"][1]["status"] = WAITING_FOR_HUMAN_CONFIRM
 
     with pytest.raises(ValueError, match="queue has multiple waiting items"):
@@ -243,7 +249,7 @@ def test_mark_done_requires_exactly_one_waiting_item() -> None:
 
 
 def test_queue_completed_after_last_done() -> None:
-    queue = run_current_mock_queue_item(build_batch_mock_queue("06.13.23.22 二三50"))
+    queue = run_current_mock_queue_item(accept_valid_candidates_for_mock_queue(build_batch_mock_queue("06.13.23.22 二三50")))
     queue = mark_current_item_done_by_human(queue)
 
     assert queue["items"][0]["status"] == DONE
@@ -252,7 +258,7 @@ def test_queue_completed_after_last_done() -> None:
 
 
 def test_advance_queue_completes_all_normal_items() -> None:
-    queue = run_current_mock_queue_item(build_batch_mock_queue("06.13.23.22 二三50\n07.08.09 二三50"))
+    queue = run_current_mock_queue_item(accept_valid_candidates_for_mock_queue(build_batch_mock_queue("06.13.23.22 二三50\n07.08.09 二三50")))
     queue = advance_queue_after_human_confirm(queue)
     assert queue["items"][0]["status"] == DONE
     assert queue["items"][1]["status"] == WAITING_FOR_HUMAN_CONFIRM
@@ -263,7 +269,7 @@ def test_advance_queue_completes_all_normal_items() -> None:
 
 
 def test_advance_queue_completes_normal_column_car_flow() -> None:
-    queue = run_current_mock_queue_item(build_batch_mock_queue(OK_TEXT))
+    queue = run_current_mock_queue_item(accept_valid_candidates_for_mock_queue(build_batch_mock_queue(OK_TEXT)))
     queue = advance_queue_after_human_confirm(queue)
     queue = advance_queue_after_human_confirm(queue)
     queue = advance_queue_after_human_confirm(queue)
@@ -274,14 +280,14 @@ def test_advance_queue_completes_normal_column_car_flow() -> None:
 
 
 def test_danger_buttons_clicked_is_always_empty() -> None:
-    queue = run_current_mock_queue_item(build_batch_mock_queue(OK_TEXT))
+    queue = run_current_mock_queue_item(accept_valid_candidates_for_mock_queue(build_batch_mock_queue(OK_TEXT)))
 
     assert queue["items"][0]["danger_buttons_detected"]
     assert queue["items"][0]["danger_buttons_clicked"] == []
 
 
 def test_final_decision_never_allows_real_site_or_auto_submit() -> None:
-    queue = run_current_mock_queue_item(build_batch_mock_queue(OK_TEXT))
+    queue = run_current_mock_queue_item(accept_valid_candidates_for_mock_queue(build_batch_mock_queue(OK_TEXT)))
 
     assert queue["final_decision"]["real_site_operation"] is False
     assert queue["final_decision"]["auto_submit"] is False
@@ -289,7 +295,7 @@ def test_final_decision_never_allows_real_site_or_auto_submit() -> None:
 
 
 def test_queue_state_can_save_and_load(tmp_path) -> None:
-    queue = run_current_mock_queue_item(build_batch_mock_queue(OK_TEXT))
+    queue = run_current_mock_queue_item(accept_valid_candidates_for_mock_queue(build_batch_mock_queue(OK_TEXT)))
     path = tmp_path / "queue_state.json"
 
     save_queue_state(queue, path)

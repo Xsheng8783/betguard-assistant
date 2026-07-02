@@ -168,7 +168,11 @@ def main() -> None:
             return
         queue = build_batch_mock_queue(raw_text)
         if queue.get("status") == "READY_FOR_QUEUE":
-            queue = run_current_mock_queue_item(queue)
+            try:
+                queue = run_current_mock_queue_item(queue)
+            except ValueError as exc:
+                queue = dict(queue)
+                queue["errors"] = [str(exc)]
         queue_path = Path(args.queue_path or "queue_state.json")
         save_queue_state(queue, queue_path)
         queue["queue_state_path"] = str(queue_path)
