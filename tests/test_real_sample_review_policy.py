@@ -158,8 +158,8 @@ VALID_POLICY_CASES = {
     f"10 -60{CAR}": {
         "type": "car",
         "number": 10,
-        "money": 60,
-        "car_units": 0.6,
+        "money": 6000,
+        "car_units": 60,
     },
     "15.25.33=100": {
         "type": "normal",

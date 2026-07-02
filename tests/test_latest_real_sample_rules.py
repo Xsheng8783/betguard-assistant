@@ -18,6 +18,7 @@ SUSPECT = "\u5acc"
 HALF = "\u534a"
 FULL = "\u5168"
 MULTIPLY = "\u00d7"
+YUAN = "\u5143"
 
 
 def _result(text: str) -> dict:
@@ -723,8 +724,83 @@ def test_confirmed_car_hyphen_amount_with_space_is_valid() -> None:
         assert queue["status"] == READY_FOR_QUEUE
         assert result["type"] == "car"
         assert result["number"] == 10
-        assert result["car_units"] == 0.6
-        assert result["money"] == 60
+        assert result["car_units"] == 60
+        assert result["money"] == 6000
+
+
+def test_confirmed_car_unit_hyphen_number_variants() -> None:
+    for text, number in [(f"1 - 60{CAR}", 1), (f"01-60{CAR}", 1)]:
+        queue = build_batch_mock_queue(text)
+        result = queue["items"][0]["review_result"]
+
+        assert queue["status"] == READY_FOR_QUEUE
+        assert result["type"] == "car"
+        assert result["number"] == number
+        assert result["car_units"] == 60
+        assert result["money"] == 6000
+
+
+def test_multi_car_each_amount_expands_without_full_car_prefix() -> None:
+    for text in [f"01 02 各20{CAR}", f"01.02各20{CAR}", f"01{DUN}02各20{CAR}", f"01 02 各 20 {CAR}"]:
+        queue = build_batch_mock_queue(text)
+
+        assert queue["status"] == READY_FOR_QUEUE
+        assert [item["review_result"]["number"] for item in queue["items"]] == [1, 2]
+        assert all(item["review_result"]["car_units"] == 20 for item in queue["items"])
+        assert all(item["review_result"]["money"] == 2000 for item in queue["items"])
+
+    queue = build_batch_mock_queue(f"01 02 10 各20{CAR}")
+    assert queue["status"] == READY_FOR_QUEUE
+    assert [item["review_result"]["number"] for item in queue["items"]] == [1, 2, 10]
+    assert all(item["review_result"]["car_units"] == 20 for item in queue["items"])
+
+
+def test_bare_car_number_without_amount_stays_car_type_needs_review() -> None:
+    for text, number in [(f"1{CAR}", 1), (f"10{CAR}", 10)]:
+        queue = build_batch_mock_queue(text)
+        result = queue["items"][0]["review_result"]
+
+        assert queue["status"] != READY_FOR_QUEUE
+        assert result["type"] == "car"
+        assert result["number"] == number
+        assert "missing car amount" in result["errors"]
+
+
+def test_car_amount_after_car_word_repeated_suffix_is_units() -> None:
+    for text in [f"1{CAR}2", f"1{CAR}2{UNIT}", f"1{CAR}2{CAR}"]:
+        queue = build_batch_mock_queue(text)
+        result = queue["items"][0]["review_result"]
+
+        assert queue["status"] == READY_FOR_QUEUE
+        assert result["type"] == "car"
+        assert result["number"] == 1
+        assert result["car_units"] == 2
+        assert result["money"] == 200
+
+
+def test_existing_car_formats_are_not_regressed_by_unit_syntax_rules() -> None:
+    cases = [
+        ("38-0.5", 38, 0.5, 50),
+        ("16-0.3", 16, 0.3, 30),
+        (f"06{MULTIPLY}0.5", 6, 0.5, 50),
+        (f"12{HALF}{CAR}", 12, 0.5, 50),
+        (f"32{CAR}10{YUAN}", 32, 0.1, 10),
+    ]
+    for text, number, units, money in cases:
+        queue = build_batch_mock_queue(text)
+        result = queue["items"][0]["review_result"]
+
+        assert queue["status"] == READY_FOR_QUEUE
+        assert result["type"] == "car"
+        assert result["number"] == number
+        assert result["car_units"] == units
+        assert result["money"] == money
+
+    queue = build_batch_mock_queue(f"05.08{FULL}{CAR}各0.25{CAR}")
+    assert queue["status"] == READY_FOR_QUEUE
+    assert [item["review_result"]["number"] for item in queue["items"]] == [5, 8]
+    assert all(item["review_result"]["car_units"] == 0.25 for item in queue["items"])
+    assert all(item["review_result"]["money"] == 25 for item in queue["items"])
 
 
 def test_customer_specific_bare_shorthand_still_needs_review() -> None:

@@ -236,7 +236,7 @@ def _parse_car_line(value: str, *, game_name: str) -> ParsedBet:
     number = before_numbers[0] if len(before_numbers) == 1 and re.fullmatch(r"\s*\d+\s*", before) else None
 
     amount_match = re.fullmatch(
-        rf"\s*(?P<value>\d+(?:\.\d+)?)?\s*(?P<kind>{AMOUNT_KIND_PATTERN})?\s*",
+        rf"\s*(?P<value>\d+(?:\.\d+)?)?\s*(?P<kind>{AMOUNT_KIND_PATTERN}|{CAR_WORD})?\s*",
         after,
     )
     car_units: JsonNumber | None = None
@@ -244,6 +244,8 @@ def _parse_car_line(value: str, *, game_name: str) -> ParsedBet:
     if amount_match and amount_match.group("value") is not None:
         if amount_match.group("kind") in {YUAN_WORD, BLOCK_WORD}:
             car_units, money = _car_money_to_amount(amount_match.group("value"))
+        elif amount_match.group("kind") in {UNIT_WORD, CAR_WORD}:
+            car_units, money = _car_units_to_amount(amount_match.group("value"))
         elif _looks_like_bare_car_money(amount_match.group("value")):
             car_units, money = _car_money_to_amount(amount_match.group("value"))
         else:

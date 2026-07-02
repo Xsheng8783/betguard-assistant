@@ -22,6 +22,9 @@ CONFIRMED_SLASH_GAME_METADATA_PATTERN = re.compile(r"-?/\s*539\s*(?=[:=])")
 MULTI_FULL_CAR_EACH_PATTERN = re.compile(
     r"^(?P<numbers>\d{1,2}(?:[.\s、,，]+\d{1,2})+)\s*全車各(?P<amount>\d+(?:\.\d+)?)車$"
 )
+MULTI_CAR_EACH_PATTERN = re.compile(
+    r"^(?P<numbers>\d{1,2}(?:[.\s、,，]+\d{1,2})+)\s*各\s*(?P<amount>\d+(?:\.\d+)?)\s*車$"
+)
 TIME_ONLY_PATTERN = re.compile(r"^(?:上午|下午)?\s*\d{1,2}:\d{2}$")
 LINE_PREFIX_PATTERN = re.compile(r"^(?P<time>(?:上午|下午)?\d{1,2}:\d{2})\s+(?P<sender>\S+)\s+(?P<body>.+)$")
 DATE_ONLY_PATTERN = re.compile(r"^\d{4}[/-]\d{1,2}[/-]\d{1,2}$")
@@ -503,6 +506,12 @@ def _expand_multi_car_fragment(value: str) -> list[str]:
     if full_each:
         amount = full_each.group("amount")
         numbers = [number for number in re.split(r"[.\s、,，]+", full_each.group("numbers").strip()) if number]
+        return [f"{number}車{amount}支" for number in numbers]
+
+    each = MULTI_CAR_EACH_PATTERN.fullmatch(value.strip())
+    if each:
+        amount = each.group("amount")
+        numbers = [number for number in re.split(r"[.\s、,，]+", each.group("numbers").strip()) if number]
         return [f"{number}車{amount}支" for number in numbers]
 
     match = MULTI_CAR_PATTERN.fullmatch(value.strip())
