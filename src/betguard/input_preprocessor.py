@@ -60,11 +60,14 @@ def preprocess_batch_input(text_or_lines: str | Iterable[str]) -> dict[str, Any]
     logical_lines: list[dict[str, Any]] = []
     pending: dict[str, Any] | None = None
 
+    hk_context = False
     for line_no, raw_line in enumerate(original_text.splitlines(), start=1):
         line = raw_line.strip()
         if not line:
             continue
         if is_metadata_line(line):
+            if _mentions_539_game_label(line):
+                hk_context = False
             ignored_metadata_lines.append({"line_no": line_no, "raw": line})
             continue
 
@@ -73,8 +76,17 @@ def preprocess_batch_input(text_or_lines: str | Iterable[str]) -> dict[str, Any]
             ignored_metadata_lines.append({"line_no": line_no, "raw": line, "reason": "empty after cleanup"})
             continue
         if is_metadata_line(cleaned):
+            if _mentions_539_game_label(cleaned):
+                hk_context = False
             ignored_metadata_lines.append({"line_no": line_no, "raw": line, "cleaned": cleaned})
             continue
+
+        if "removed LINE time/sender prefix" in notes:
+            hk_context = False
+        if cleaned.startswith("港") or cleaned.lower().startswith("hk"):
+            hk_context = True
+        elif hk_context and re.match(r"\d{1,2}[.\-/\s]", cleaned):
+            notes.append("game prefix requires manual review")
 
         entry = {
             "line_no": line_no,
@@ -192,10 +204,16 @@ def is_metadata_line(line: str) -> bool:
         return True
     if re.fullmatch(r"539\s*[-－]\s*[一二三四五六日]", value):
         return True
+    if re.fullmatch(r"(?:320|440|640|880)[二兩三四]{2,3}星\d+(?:\.\d+)?(?:支|元|塊)?", value):
+        return True
     label_tokens = [token for token in re.split(r"[，,、\s]+", value) if token]
     if label_tokens and all(token in GAME_LABEL_TOKENS for token in label_tokens):
         return True
     return _looks_like_speaker_name(value)
+
+
+def _mentions_539_game_label(value: str) -> bool:
+    return bool(re.search(r"539|天天|今彩", value))
 
 
 def _looks_like_speaker_name(value: str) -> bool:
@@ -456,18 +474,20 @@ def _remove_star_typo_five(value: str, notes: list[str]) -> str:
 
 def _strip_trailing_name_marker(fragment: str) -> tuple[str, list[str]]:
     stripped = fragment.strip()
-    if not stripped.endswith("臂"):
+    marker = stripped[-1:] if stripped[-1:] in {"臂", "嫌"} else None
+    if marker is None:
         return fragment, []
     rest = stripped[:-1].strip()
     numbers = r"\d{1,2}(?:[.\s、,，-]+\d{1,2})+"
     complete_bet_patterns = [
         rf"{numbers}\s+234\s+\d+(?:\.\d+)?(?:支|元|塊)?",
         rf"{numbers}[.\s](?:234|23|34)[.xX×*]\d+(?:\.\d+)?(?:支|元|塊)?",
+        rf"{numbers}/234/\d+(?:\.\d+)?(?:支|元|塊)?",
         rf"{numbers}\.?(?:[兩二三四]{{1,3}}星?[xX×*]?\d+(?:\.\d+)?(?:支|元|塊)?){{1,3}}",
     ]
     for pattern in complete_bet_patterns:
         if re.fullmatch(pattern, rest):
-            return rest, ["ignored trailing name marker 臂"]
+            return rest, [f"ignored trailing name marker {marker}"]
     return fragment, []
 
 
@@ -809,7 +829,7 @@ def _is_confirmed_single_number_car_operator(op: str, unit_text: str) -> bool:
     unit = float(unit_text)
     if op == "-":
         return unit < 1
-    return unit < 1 or unit == 5
+    return unit > 0
 
 
 def _is_confirmed_car_metadata_format(value: str) -> bool:

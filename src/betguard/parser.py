@@ -343,7 +343,7 @@ def _is_confirmed_single_number_car_operator(op: str, unit_text: str) -> bool:
     unit = Decimal(unit_text)
     if op == "-":
         return unit < Decimal("1")
-    return unit < Decimal("1") or unit == Decimal("5")
+    return unit > Decimal("0")
 
 
 def _car_bet_from_unit(game_name: str, number_text: str, unit: Decimal) -> ParsedBet:

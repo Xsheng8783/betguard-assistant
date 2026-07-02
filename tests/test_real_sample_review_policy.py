@@ -22,17 +22,14 @@ TIMES = "\u00d7"
 DUN = "\u3001"
 ARM = "\u81c2"
 PING = "\u576a"
+SUSPECT_MARK = "\u5acc"
 
 
 REVIEW_POLICY_CASES = [
     f"港23半{CAR}",
     "大24",
-    f"01{TIMES}3",
-    f"03{TIMES}1.5",
-    f"01{TIMES}1",
     "02-03-05-16-20-0.1",
     "港06-13-23-22/50",
-    "05-23-12-29-38/234/200嫌",
     "11.37.1000",
     "15.29.1000",
     "11.37.600",
@@ -198,6 +195,31 @@ VALID_POLICY_CASES = {
         "number": 32,
         "money": 10,
         "car_units": 0.1,
+    },
+    f"01{TIMES}3": {
+        "type": "car",
+        "number": 1,
+        "money": 300,
+        "car_units": 3,
+    },
+    f"03{TIMES}1.5": {
+        "type": "car",
+        "number": 3,
+        "money": 150,
+        "car_units": 1.5,
+    },
+    f"01{TIMES}1": {
+        "type": "car",
+        "number": 1,
+        "money": 100,
+        "car_units": 1,
+    },
+    f"05-23-12-29-38/234/200{SUSPECT_MARK}": {
+        "type": "normal",
+        "numbers": [5, 23, 12, 29, 38],
+        "stars": [2, 3, 4],
+        "money": 200,
+        "unit": 2,
     },
     f"12半{CAR}": {
         "type": "car",

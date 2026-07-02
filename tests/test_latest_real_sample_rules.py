@@ -871,6 +871,107 @@ def test_out_of_range_46_fragment_stays_review() -> None:
     assert second["numbers"] == [28, 23, 11]
 
 
+def test_single_number_multiplier_is_confirmed_car_bet() -> None:
+    cases = [
+        ("01×3", 1, 3, 300),
+        ("03×1.5", 3, 1.5, 150),
+        ("01×1", 1, 1, 100),
+    ]
+    for text, number, units, money in cases:
+        queue = build_batch_mock_queue(text)
+        result = queue["items"][0]["review_result"]
+
+        assert queue["status"] == READY_FOR_QUEUE, text
+        assert result["status"] == "ok"
+        assert result["type"] == "car"
+        assert result["number"] == number
+        assert result["car_units"] == units
+        assert result["money"] == money
+
+
+def test_two_number_x_unit_is_still_normal_not_car() -> None:
+    for text, numbers, unit, money in [("02-11x2", [2, 11], 2, 200), ("18-24x6", [18, 24], 6, 600)]:
+        result = _result(text)
+
+        assert result["status"] == "ok", text
+        assert result["type"] == "normal"
+        assert result["numbers"] == numbers
+        assert result["stars"] == [2]
+        assert result["unit"] == unit
+        assert result["money"] == money
+
+
+def test_trailing_suspect_marker_after_slash_star_amount_is_ignored() -> None:
+    queue = build_batch_mock_queue("05-23-12-29-38/234/200嫌")
+    item = queue["items"][0]
+    result = item["review_result"]
+
+    assert queue["status"] == READY_FOR_QUEUE
+    assert item["original"] == "05-23-12-29-38/234/200"
+    assert result["status"] == "ok"
+    assert result["numbers"] == [5, 23, 12, 29, 38]
+    assert result["stars"] == [2, 3, 4]
+    assert result["unit"] == 2
+    assert result["money"] == 200
+    assert "ignored trailing name marker 嫌" in item["preprocessing_notes"]
+
+
+def test_incomplete_suspect_marker_still_needs_review() -> None:
+    for text in ["嫌", "1000嫌"]:
+        queue = build_batch_mock_queue(text)
+
+        assert queue["status"] != READY_FOR_QUEUE
+
+
+def test_hk_prefix_line_and_continuation_stay_review() -> None:
+    queue = build_batch_mock_queue("港06-13-23-22/50\n20-30-22-23/50")
+
+    assert queue["status"] != READY_FOR_QUEUE
+    first = queue["items"][0]["review_result"]
+    assert first["status"] != "ok"
+    assert "game prefix requires manual review" in first["warnings"]
+    second = queue["items"][1]["review_result"]
+    assert second["status"] != "ok"
+    assert "game prefix requires manual review" in second["warnings"]
+
+
+def test_hk_context_resets_after_539_label() -> None:
+    queue = build_batch_mock_queue("港06-13-23-22/50\n20-30-22-23/50\n539\n18-22-24-27:50")
+
+    assert queue["items"][1]["review_result"]["status"] != "ok"
+    assert queue["items"][2]["review_result"]["status"] == "ok"
+    assert queue["items"][2]["original"] == "18-22-24-27:50"
+
+
+def test_hk_half_car_stays_review() -> None:
+    queue = build_batch_mock_queue("港23半車")
+    result = queue["items"][0]["review_result"]
+
+    assert queue["status"] != READY_FOR_QUEUE
+    assert result["status"] != "ok"
+    assert "game prefix requires manual review" in result["warnings"]
+
+
+def test_standalone_hk_style_line_without_prefix_is_still_valid() -> None:
+    result = _result("20-30-22-23/50")
+
+    assert result["status"] == "ok"
+    assert result["numbers"] == [20, 30, 22, 23]
+    assert result["stars"] == [2, 3, 4]
+    assert result["unit"] == 0.5
+    assert result["money"] == 50
+
+
+def test_shorthand_explanation_lines_are_ignored_metadata() -> None:
+    queue = build_batch_mock_queue("640二三星200\n440二三四星0.5")
+
+    assert queue["items"] == []
+    assert queue["audit"]["preprocessing"]["invalid_fragments"] == []
+    ignored = [item["raw"] for item in queue["preprocessing"]["ignored_metadata_lines"]]
+    assert "640二三星200" in ignored
+    assert "440二三四星0.5" in ignored
+
+
 def test_confirmed_existing_formats_do_not_regress() -> None:
     cases = [
         ("05 10 20 22 440", [5, 10, 20, 22], [2, 3, 4], 0.5, 50),
@@ -1302,17 +1403,19 @@ def test_latest_real_sample_batch_keeps_valid_invalid_and_no_standalone_star_amo
     queue = build_batch_mock_queue(text)
     raws = [item["original"] for item in queue["items"]]
 
-    assert queue["status"] == NEEDS_REVIEW
+    assert queue["status"] == READY_FOR_QUEUE
     assert any(f"13{DUN}25{DUN}28{DUN}29{DUN}37" in raw for raw in raws)
     assert f"09{CAR}2{UNIT}" in raws
     assert f"29{CAR}2{UNIT}" in raws
     assert f"25{CAR}1{UNIT}" in raws
     assert f"36{CAR}1{UNIT}" in raws
     assert f"12{CAR}1{UNIT}" in raws
+    assert f"33.27.30.兩600三200" in raws
+    assert f"05-23-12-29-38/234/200" in raws
     assert "2.3.4.x0.5" not in raws
     assert "539" not in raws
     assert queue["preprocessing"]["summary"]["valid_count"] > 0
-    assert queue["preprocessing"]["summary"]["invalid_unsupported_count"] > 0
+    assert queue["preprocessing"]["summary"]["invalid_unsupported_count"] == 0
     assert queue["final_decision"]["real_site_operation"] is False
     assert queue["final_decision"]["auto_submit"] is False
     assert all(item["danger_buttons_clicked"] == [] for item in queue["items"])
