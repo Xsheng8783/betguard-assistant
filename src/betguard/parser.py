@@ -302,6 +302,13 @@ def _parse_confirmed_car_shorthand(value: str, *, game_name: str) -> ParsedBet |
     if slash_car:
         return _car_bet_from_unit(game_name, slash_car.group("number"), Decimal(slash_car.group("unit")))
 
+    dot_car = re.fullmatch(
+        rf"(?P<number>\d{{1,2}})\.(?P<unit>0\.\d+|\d+)\s*{CAR_WORD}\s*",
+        text,
+    )
+    if dot_car:
+        return _car_bet_from_unit(game_name, dot_car.group("number"), Decimal(dot_car.group("unit")))
+
     operator_car = re.fullmatch(
         rf"(?P<number>\d{{1,2}})\s*(?P<op>-|[xX{MULTIPLY_SIGN}*])\s*(?P<unit>\d+(?:\.\d+)?)\s*",
         text,

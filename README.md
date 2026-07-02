@@ -11,10 +11,13 @@ betguard-assistant 是一個**本地安全審核 / mock assisted fill 工具**�
 
 所有解析、審核、mock 填單流程都在本地執行，每一筆都需要人工確認。
 
-## 安全限制
+## 安全限制（Safety Guarantees）
 
 - `real_site_operation=false`
 - `auto_submit=false`
+- `danger_buttons_clicked=[]`
+- No submit（不送出注單）
+- No click（不點擊送出 / 確認 / 清除 / 刪除 / 危險按鈕）
 - No live-site operation（完全不接觸真實網站）
 - No auto accept valid（valid 項目不會自動接受，需人工執行 accept）
 - No auto mock next（不會自動處理下一筆，需人工逐筆執行）
