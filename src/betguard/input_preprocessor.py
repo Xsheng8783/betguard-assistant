@@ -41,7 +41,9 @@ KNOWN_METADATA_LINES = {
 }
 BET_KEYWORD_CHARS = set("二三四兩两星元塊支車尾碰今彩天天樂港六合大")
 BET_SYMBOLS = set("./-、,，xX*×=()（）")
-MULTIPLIER_TRANSLATION = str.maketrans({"＊": "*", "Ｘ": "X", "ｘ": "x"})
+MULTIPLIER_TRANSLATION = str.maketrans({"＊": "*", "Ｘ": "X", "ｘ": "x", "乘": "x", "✖": "x", "️": None})
+NUMERIC_STAR_WORDS = {"2": "二", "3": "三", "4": "四"}
+GAME_LABEL_TOKENS = {"今彩", "六和", "六合", "539", "天天樂", "天天", "港", "hk", "HK", "大", "大樂"}
 
 
 def preprocess_batch_input(text_or_lines: str | Iterable[str]) -> dict[str, Any]:
@@ -80,9 +82,18 @@ def preprocess_batch_input(text_or_lines: str | Iterable[str]) -> dict[str, Any]
             "original_lines": [line],
             "preprocessing_notes": notes,
         }
+        if pending is not None:
+            car_merge = _merge_car_number_lines(pending["raw"], cleaned)
+            if car_merge is not None:
+                pending["raw"] = car_merge
+                pending["original_lines"].append(line)
+                pending["preprocessing_notes"].extend(notes)
+                pending["preprocessing_notes"].append("merged car number line")
+                continue
         if pending is not None and (
             (_looks_like_continuation(cleaned) and not _pending_has_confirmed_amount(pending["raw"]))
             or _looks_like_amount_continuation_for_pending(pending["raw"], cleaned)
+            or _looks_like_per_star_continuation_for_numbers(pending["raw"], cleaned)
         ):
             pending["raw"] = _normalize_dotted_star_before_amount(f"{pending['raw'].rstrip(' .')} {cleaned}")
             pending["original_lines"].append(line)
@@ -160,10 +171,20 @@ def is_metadata_line(line: str) -> bool:
         return True
     if LINE_EXPORT_PATTERN.match(value):
         return True
+    if re.fullmatch(r"539\s*[-－]\s*[一二三四五六日]", value):
+        return True
+    label_tokens = [token for token in re.split(r"[，,、\s]+", value) if token]
+    if label_tokens and all(token in GAME_LABEL_TOKENS for token in label_tokens):
+        return True
     return _looks_like_speaker_name(value)
 
 
 def _looks_like_speaker_name(value: str) -> bool:
+    value = re.sub(
+        r"[←-⇿☀-➿⬀-⯿️\U0001F000-\U0001FAFF]+$", "", value
+    ).strip()
+    if not value:
+        return False
     if any(char.isdigit() for char in value):
         return False
     if any(char in BET_SYMBOLS for char in value):
@@ -251,16 +272,104 @@ def _normalize_comma_star_amount_fragment(value: str) -> str:
         r"(?P<stars>[234](?:[,，、][234]){1,2})\.(?P<amount>\d+(?:\.\d+)?(?:支|元|塊)?)",
         compact,
     )
-    if not match:
-        return value
-    stars = re.sub(r"[,，、]", ".", match.group("stars"))
-    return f"{stars} {match.group('amount')}"
+    if match:
+        stars = re.sub(r"[,，、]", ".", match.group("stars"))
+        return f"{stars} {match.group('amount')}"
+
+    dotted_x = re.fullmatch(
+        r"(?P<stars>[234](?:\.[234]){1,2})[xX×*](?P<amount>\d+(?:\.\d+)?)(?P<kind>支|元|塊)?",
+        compact,
+    )
+    if dotted_x:
+        stars = dotted_x.group("stars").replace(".", "")
+        return f"{stars}星X{dotted_x.group('amount')}{dotted_x.group('kind') or ''}"
+    return value
 
 
 def _looks_like_arm_amount_continuation(pending_raw: str, value: str) -> bool:
     if not re.fullmatch(r"\d+(?:\.\d+)?(?:支|元|塊)?臂?", value.strip()):
         return False
     return bool(re.search(r"(?:^|\s)234$", pending_raw.strip()))
+
+
+def _strip_decorative_star_parens(value: str, notes: list[str]) -> str:
+    pattern = re.compile(
+        r"[（(]\s*((?:[234]星[xX×*]?\d+(?:\.\d+)?(?:支|元|塊)?\s*)+)[）)]?\s*$"
+    )
+    match = pattern.search(value)
+    if not match:
+        return value
+    notes.append("removed decorative parentheses")
+    return (value[: match.start()].strip() + " " + match.group(1).strip()).strip()
+
+
+def _normalize_numeric_per_star_groups(value: str, notes: list[str]) -> str:
+    pattern = re.compile(r"(?:(?<=\s)|^)([234])星([xX×*])?(\d+(?:\.\d+)?)(支|元|塊)?(?=\s|$)")
+    if len(pattern.findall(value)) < 2:
+        return value
+
+    def _replace(match: re.Match[str]) -> str:
+        star = NUMERIC_STAR_WORDS[match.group(1)]
+        amount = match.group(3)
+        kind = match.group(4)
+        if not kind:
+            kind = "支" if (match.group(2) or "." in amount) else "元"
+        return f"{star}星{amount}{kind}"
+
+    updated = pattern.sub(_replace, value)
+    if updated != value:
+        notes.append("normalized numeric per-star amounts")
+    return updated
+
+
+def _normalize_hyphen_star_amount(value: str, notes: list[str]) -> str:
+    match = re.fullmatch(
+        r"(?P<numbers>\d{1,2}(?:-\d{1,2})+)--(?P<stars>[234](?:-[234]){1,2})[xX](?P<amount>\d+(?:\.\d+)?)",
+        value.strip(),
+    )
+    if not match:
+        return value
+    stars = match.group("stars").replace("-", "")
+    notes.append("normalized double-hyphen star amount")
+    return f"{match.group('numbers')} {stars}星X{match.group('amount')}"
+
+
+def _normalize_x_decimal_amount(value: str, notes: list[str]) -> str:
+    updated = re.sub(r"(?<=[xX×*])\.(?=\d)", "0.", value)
+    if updated != value:
+        notes.append("normalized decimal amount after multiplier")
+    return updated
+
+
+def _normalize_comma_decimal_after_star(value: str, notes: list[str]) -> str:
+    updated = re.sub(r"(?<=星)(\d+),(\d+)\s*$", r"\1.\2", value)
+    if updated != value:
+        notes.append("normalized comma decimal amount")
+    return updated
+
+
+def _normalize_one_unit_word(value: str, notes: list[str]) -> str:
+    updated = re.sub(r"(?<=星)一支\s*$", "1支", value)
+    if updated != value:
+        notes.append("normalized 一支 unit")
+    return updated
+
+
+def _remove_trailing_unit_game_metadata(value: str, notes: list[str]) -> str:
+    updated = re.sub(r"(?<=[支元塊])\s*539\s*$", "", value)
+    if updated != value:
+        notes.append("removed game metadata 539")
+    return updated
+
+
+def _remove_trailing_gai_after_confirmed_amount(value: str, notes: list[str]) -> str:
+    if not value.endswith("改"):
+        return value
+    rest = value[:-1].strip()
+    if re.fullmatch(r"\d{1,2}(?:\s+\d{1,2})+\s+-\s*(?:50|100|200|500|1000|1500)", rest):
+        notes.append("ignored trailing 改 after confirmed amount")
+        return rest
+    return value
 
 
 def _remove_star_typo_five(value: str, notes: list[str]) -> str:
@@ -311,8 +420,7 @@ def _clean_line_content(line: str) -> tuple[str, list[str]]:
 
     updated = value.translate(MULTIPLIER_TRANSLATION)
     if updated != value:
-        if "＊" in value or "Ｘ" in value or "ｘ" in value:
-            notes.append("normalized multiplier symbol")
+        notes.append("normalized multiplier symbol")
     value = updated
 
     updated = _normalize_confirmed_star_text(value, notes)
@@ -320,6 +428,15 @@ def _clean_line_content(line: str) -> tuple[str, list[str]]:
 
     updated = _remove_star_typo_five(value, notes)
     value = updated
+
+    value = _strip_decorative_star_parens(value, notes)
+    value = _normalize_numeric_per_star_groups(value, notes)
+    value = _normalize_hyphen_star_amount(value, notes)
+    value = _normalize_x_decimal_amount(value, notes)
+    value = _normalize_comma_decimal_after_star(value, notes)
+    value = _normalize_one_unit_word(value, notes)
+    value = _remove_trailing_unit_game_metadata(value, notes)
+    value = _remove_trailing_gai_after_confirmed_amount(value, notes)
 
     normalized_ellipsis = _normalize_ellipsis_separator(value)
     if normalized_ellipsis != value:
@@ -345,7 +462,7 @@ def _clean_line_content(line: str) -> tuple[str, list[str]]:
 
 
 def _remove_trailing_game_label(value: str, notes: list[str]) -> str:
-    updated = re.sub(r"\s*[（(]\s*(?:天天樂|天天|539|hk|HK|港)\s*[）)]\s*$", "", value).strip()
+    updated = re.sub(r"\s*[（(]\s*(?:天天樂|天天|539|hk|HK|港)\s*[）)]?\s*$", "", value).strip()
     if updated != value:
         notes.append("removed trailing game label")
         value = updated
@@ -402,8 +519,25 @@ def _remove_confirmed_equals_metadata(value: str, notes: list[str]) -> str:
     return updated
 
 
+def _looks_like_per_star_continuation_for_numbers(pending_raw: str, value: str) -> bool:
+    compact = value.replace(" ", "")
+    if not re.fullmatch(r"(?:[二兩三四]{1,3}星[xX×*]?\d+(?:\.\d+)?(?:支|元|塊)?){2,}", compact):
+        return False
+    return bool(re.fullmatch(r"\d{1,2}(?:[\s.、,，-]+\d{1,2})+", pending_raw.strip()))
+
+
+def _merge_car_number_lines(pending_raw: str, value: str) -> str | None:
+    number = re.fullmatch(r"(\d{1,2})號", pending_raw.strip())
+    units = re.fullmatch(r"專車(\d+(?:\.\d+)?)", value.strip())
+    if number and units:
+        return f"{number.group(1)}車{units.group(1)}支"
+    return None
+
+
 def _looks_like_continuation(value: str) -> bool:
     compact = value.replace(" ", "")
+    if re.fullmatch(r"(?:[二兩三四]{1,3}星[xX×*]?\d+(?:\.\d+)?(?:支|元|塊)?){2,}", compact):
+        return True
     if _looks_like_star_amount_continuation(compact):
         return True
     if STAR_AMOUNT_CONTINUATION_PATTERN.fullmatch(compact):
@@ -422,6 +556,7 @@ def _pending_has_confirmed_amount(value: str) -> bool:
             r"\s(?:[234](?:[.,、，]?[234]){0,2}|[234]星)[xX×*]?\d+(?:\.\d+)?(?:支|元|塊)?$",
             value,
         )
+        or re.search(r"\s(?:234|23|34)\s+\d+(?:\.\d+)?(?:支|元|塊)?$", value)
         or re.search(
             r"(?:二三四|兩三四|二三|兩三|三四|二星|兩星|三星|四星)\d+(?:\.\d+)?(?:支|元|塊)?$",
             value.replace(" ", ""),
@@ -506,6 +641,7 @@ def _suspicious_paste_notes(value: str) -> list[str]:
         and not re.search(r"/\d+$", compact)
         and not _is_confirmed_hyphen_amount(value)
         and not _is_confirmed_car_shorthand(value)
+        and not _is_confirmed_spaced_decimal_hyphen(value)
     ):
         notes.append("hyphen amount requires manual review")
     if re.fullmatch(r"\d{1,2}[xX×*]\d+(?:\.\d+)?", compact) and not _is_confirmed_car_shorthand(value):
@@ -524,6 +660,15 @@ def _is_confirmed_hyphen_amount(value: str) -> bool:
     return bool(
         re.fullmatch(
             r"\s*\d{1,2}(?:[.\-\s、,，]+\d{1,2})+\s*-\s*(?:50|100|200|500|1000|1500)\s*",
+            value,
+        )
+    )
+
+
+def _is_confirmed_spaced_decimal_hyphen(value: str) -> bool:
+    return bool(
+        re.fullmatch(
+            r"\s*\d{1,2}(?:[.\-\s、,，]+\d{1,2})+\s+-\s*0?\.\d+\s*",
             value,
         )
     )
@@ -576,6 +721,21 @@ def _expand_multi_car_fragment(value: str) -> list[str]:
     hyphen_car = HYPHEN_CAR_PATTERN.fullmatch(value.strip())
     if hyphen_car:
         return [f"{hyphen_car.group('number')}車{hyphen_car.group('amount')}支"]
+
+    star_each_car = re.fullmatch(
+        r"(?P<numbers>\d{1,2}(?:[\s.、,，]+\d{1,2})+)\s*"
+        r"(?P<stars>二三四|兩三四|二三|兩三|三四)(?P<amount>\d+(?:\.\d+)?)"
+        r"各(?P<each>\d+(?:\.\d+)?)元",
+        value.strip(),
+    )
+    if star_each_car:
+        numbers = [
+            number
+            for number in re.split(r"[\s.、,，]+", star_each_car.group("numbers").strip())
+            if number
+        ]
+        normal_bet = f"{star_each_car.group('numbers')}{star_each_car.group('stars')}{star_each_car.group('amount')}"
+        return [normal_bet] + [f"{number}車{star_each_car.group('each')}元" for number in numbers]
 
     full_each = MULTI_FULL_CAR_EACH_PATTERN.fullmatch(value.strip())
     if full_each:

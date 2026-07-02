@@ -489,6 +489,230 @@ def test_standalone_car_marker_without_next_car_shorthand_stays_review() -> None
         assert "missing car number" in car_item["review_result"]["errors"]
 
 
+def test_chinese_one_unit_word_is_normalized() -> None:
+    result = build_batch_mock_queue("06.16.07.19二三星一支")["items"][0]["review_result"]
+
+    assert result["status"] == "ok"
+    assert result["numbers"] == [6, 16, 7, 19]
+    assert result["stars"] == [2, 3]
+    assert result["unit"] == 1
+    assert result["money"] == 100
+
+
+def test_multiply_word_and_double_hyphen_star_amount() -> None:
+    result = build_batch_mock_queue("05-15-25-35--2-3-4乘5")["items"][0]["review_result"]
+
+    assert result["status"] == "ok"
+    assert result["numbers"] == [5, 15, 25, 35]
+    assert result["stars"] == [2, 3, 4]
+    assert result["unit"] == 5
+    assert result["money"] == 500
+
+
+def test_heavy_multiplication_emoji_is_normalized() -> None:
+    result = build_batch_mock_queue("01.13.05二三✖️0.5")["items"][0]["review_result"]
+
+    assert result["status"] == "ok"
+    assert result["numbers"] == [1, 13, 5]
+    assert result["stars"] == [2, 3]
+    assert result["unit"] == 0.5
+    assert result["money"] == 50
+
+
+def test_parenthesized_numeric_per_star_amounts_inline() -> None:
+    result = build_batch_mock_queue("12 20 21 22（2星X2 3星X1 4星0.5）")["items"][0]["review_result"]
+
+    assert result["status"] == "ok"
+    assert result["numbers"] == [12, 20, 21, 22]
+    assert result["stars"] == [2, 3, 4]
+    assert result["bets"]["2"]["unit"] == 2
+    assert result["bets"]["2"]["money"] == 200
+    assert result["bets"]["3"]["unit"] == 1
+    assert result["bets"]["3"]["money"] == 100
+    assert result["bets"]["4"]["unit"] == 0.5
+    assert result["bets"]["4"]["money"] == 50
+
+
+def test_parenthesized_per_star_line_merges_with_numbers_line() -> None:
+    queue = build_batch_mock_queue("07 13 17 27\n（2星X2 3星X1）")
+    result = queue["items"][0]["review_result"]
+
+    assert queue["status"] == READY_FOR_QUEUE
+    assert len(queue["items"]) == 1
+    assert result["status"] == "ok"
+    assert result["numbers"] == [7, 13, 17, 27]
+    assert result["bets"]["2"]["money"] == 200
+    assert result["bets"]["3"]["money"] == 100
+
+
+def test_unclosed_paren_per_star_line_merges_with_numbers_line() -> None:
+    queue = build_batch_mock_queue("02 12 20 21 22 32 33\n（3星10 4星10")
+    result = queue["items"][0]["review_result"]
+
+    assert queue["status"] == READY_FOR_QUEUE
+    assert len(queue["items"]) == 1
+    assert result["status"] == "ok"
+    assert result["numbers"] == [2, 12, 20, 21, 22, 32, 33]
+    assert result["bets"]["3"]["money"] == 10
+    assert result["bets"]["4"]["money"] == 10
+
+
+def test_person_name_with_emoji_is_ignored_metadata() -> None:
+    queue = build_batch_mock_queue("博仁⬆️")
+
+    assert queue["items"] == []
+    assert queue["audit"]["preprocessing"]["invalid_fragments"] == []
+
+
+def test_car_number_line_merges_with_special_car_line() -> None:
+    queue = build_batch_mock_queue("28號\n專車0.2")
+    result = queue["items"][0]["review_result"]
+
+    assert queue["status"] == READY_FOR_QUEUE
+    assert len(queue["items"]) == 1
+    assert result["status"] == "ok"
+    assert result["type"] == "car"
+    assert result["number"] == 28
+    assert result["car_units"] == 0.2
+    assert result["money"] == 20
+
+
+def test_dot_continuation_with_trailing_539_metadata() -> None:
+    queue = build_batch_mock_queue("16.22.36.05..2.3.4x.1支539")
+    result = queue["items"][0]["review_result"]
+
+    assert queue["status"] == READY_FOR_QUEUE
+    assert len(queue["items"]) == 1
+    assert result["status"] == "ok"
+    assert result["numbers"] == [16, 22, 36, 5]
+    assert result["stars"] == [2, 3, 4]
+    assert result["unit"] == 0.1
+    assert result["money"] == 10
+
+
+def test_game_metadata_lines_are_ignored() -> None:
+    for text in ["539-六", "今彩，六和"]:
+        queue = build_batch_mock_queue(text)
+
+        assert queue["items"] == []
+        assert queue["audit"]["preprocessing"]["invalid_fragments"] == []
+
+
+def test_trailing_gai_after_confirmed_spaced_amount_is_ignored() -> None:
+    queue = build_batch_mock_queue("01 39 -500改")
+    item = queue["items"][0]
+    result = item["review_result"]
+
+    assert queue["status"] == READY_FOR_QUEUE
+    assert item["original"] == "01 39 -500"
+    assert result["status"] == "ok"
+    assert result["numbers"] == [1, 39]
+    assert result["stars"] == [2]
+    assert result["unit"] == 5
+    assert result["money"] == 500
+    assert "ignored trailing 改 after confirmed amount" in item["preprocessing_notes"]
+
+
+def test_ellipsis_star_amount_line_does_not_swallow_next_line() -> None:
+    queue = build_batch_mock_queue("38.39.10.08…2.3.4…50\n22 07 19 39  880")
+    raws = [item["original"] for item in queue["items"]]
+
+    assert queue["status"] == READY_FOR_QUEUE
+    assert raws == ["38.39.10.08 234 50", "22 07 19 39 880"]
+
+    first = queue["items"][0]["review_result"]
+    assert first["numbers"] == [38, 39, 10, 8]
+    assert first["stars"] == [2, 3, 4]
+    assert first["money"] == 50
+
+    second = queue["items"][1]["review_result"]
+    assert second["numbers"] == [22, 7, 19, 39]
+    assert second["stars"] == [2, 3, 4]
+    assert second["unit"] == 1
+    assert second["money"] == 100
+
+
+def test_x_shorthand_codes_are_units_not_money() -> None:
+    result = _result("25.22.39x640")
+
+    assert result["status"] == "ok"
+    assert result["numbers"] == [25, 22, 39]
+    assert result["stars"] == [2, 3]
+    assert result["unit"] == 2
+    assert result["money"] == 200
+
+
+def test_star_amount_with_each_car_money_expands() -> None:
+    queue = build_batch_mock_queue("02 05 07 18二三100各10元")
+    raws = [item["original"] for item in queue["items"]]
+
+    assert queue["status"] == READY_FOR_QUEUE
+    assert raws == ["02 05 07 18二三100", "02車10元", "05車10元", "07車10元", "18車10元"]
+
+    normal = queue["items"][0]["review_result"]
+    assert normal["numbers"] == [2, 5, 7, 18]
+    assert normal["stars"] == [2, 3]
+    assert normal["unit"] == 1
+    assert normal["money"] == 100
+
+    for item in queue["items"][1:]:
+        car = item["review_result"]
+        assert car["type"] == "car"
+        assert car["car_units"] == 0.1
+        assert car["money"] == 10
+
+
+def test_hyphen_car_with_unclosed_game_label_paren() -> None:
+    result = build_batch_mock_queue("10-31車（天天樂")["items"][0]["review_result"]
+
+    assert result["status"] == "ok"
+    assert result["type"] == "car"
+    assert result["number"] == 10
+    assert result["car_units"] == 31
+    assert result["money"] == 3100
+
+
+def test_comma_decimal_amount_after_star_word() -> None:
+    result = build_batch_mock_queue("08,16,23,18,38兩星0,25")["items"][0]["review_result"]
+
+    assert result["status"] == "ok"
+    assert result["numbers"] == [8, 16, 23, 18, 38]
+    assert result["stars"] == [2]
+    assert result["unit"] == 0.25
+    assert result["money"] == 25
+
+
+def test_equals_amount_with_trailing_ping_metadata() -> None:
+    result = build_batch_mock_queue("22.17.27.35.19.39=15坪")["items"][0]["review_result"]
+
+    assert result["status"] == "ok"
+    assert result["numbers"] == [22, 17, 27, 35, 19, 39]
+    assert result["stars"] == [2, 3, 4]
+    assert result["unit"] == 0.15
+    assert result["money"] == 15
+
+
+def test_confirmed_existing_formats_do_not_regress() -> None:
+    cases = [
+        ("05 10 20 22 440", [5, 10, 20, 22], [2, 3, 4], 0.5, 50),
+        ("22 07 19 39  880", [22, 7, 19, 39], [2, 3, 4], 1, 100),
+        ("18-24-29/200", [18, 24, 29], [2, 3], 2, 200),
+        ("12-22-27-33:50", [12, 22, 27, 33], [2, 3, 4], 0.5, 50),
+        ("18-22-24-27:50", [18, 22, 24, 27], [2, 3, 4], 0.5, 50),
+        ("18-24x6", [18, 24], [2], 6, 600),
+        ("11.22.39-100", [11, 22, 39], [2, 3], 1, 100),
+        ("07.08.19.2,3.1000", [7, 8, 19], [2, 3], 10, 1000),
+    ]
+    for text, numbers, stars, unit, money in cases:
+        result = _result(text)
+
+        assert result["status"] == "ok", text
+        assert result["numbers"] == numbers, text
+        assert result["stars"] == stars, text
+        assert result["unit"] == unit, text
+        assert result["money"] == money, text
+
+
 def test_standalone_numeric_star_amount_still_needs_review_in_mixed_batch() -> None:
     for line in ["234.100", "234x100"]:
         queue = build_batch_mock_queue("\n".join([f"06.13.23 {TWO}{THREE}50", line]))
@@ -722,18 +946,31 @@ def test_confirmed_three_number_hyphen_200_is_tail_amount() -> None:
     assert "hyphen amount requires manual review" not in result["warnings"]
 
 
-def test_decimal_hyphen_amounts_still_need_review() -> None:
-    for text in [
-        "02-03-05-16-20 -0.25",
-        "02-03-05-16-20-0.1",
-        "01 15 27 39 07 -0.3",
-    ]:
+def test_attached_decimal_hyphen_amount_still_needs_review() -> None:
+    queue = build_batch_mock_queue("02-03-05-16-20-0.1")
+    result = queue["items"][0]["review_result"]
+
+    assert queue["status"] != READY_FOR_QUEUE
+    assert result["status"] in {"warning", "error"}
+    assert "hyphen amount requires manual review" in result["warnings"]
+
+
+def test_confirmed_spaced_decimal_hyphen_amount_is_unit() -> None:
+    cases = [
+        ("02-07-26-27-28 -0.25", [2, 7, 26, 27, 28], 0.25, 25),
+        ("02-03-05-16-20 -0.25", [2, 3, 5, 16, 20], 0.25, 25),
+        ("01 15 27 39 07 -0.3", [1, 15, 27, 39, 7], 0.3, 30),
+    ]
+    for text, numbers, unit, money in cases:
         queue = build_batch_mock_queue(text)
         result = queue["items"][0]["review_result"]
 
-        assert queue["status"] != READY_FOR_QUEUE
-        assert result["status"] in {"warning", "error"}
-        assert "hyphen amount requires manual review" in result["warnings"]
+        assert queue["status"] == READY_FOR_QUEUE
+        assert result["status"] == "ok"
+        assert result["numbers"] == numbers
+        assert result["stars"] == [2, 3, 4]
+        assert result["unit"] == unit
+        assert result["money"] == money
 
 
 def test_paired_slash_dunhao_column_group_with_numeric_stars() -> None:

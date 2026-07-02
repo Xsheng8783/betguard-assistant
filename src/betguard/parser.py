@@ -548,6 +548,49 @@ def _parse_confirmed_shorthand_line(value: str, *, game_name: str) -> ParsedBet 
             money=amount.money,
         )
 
+    confirmed_spaced_decimal_hyphen = re.fullmatch(
+        rf"\s*(?P<numbers>\d{{1,2}}(?:[.\- {COMMA_WORD},{FULL_COMMA}]+\d{{1,2}})+)"
+        rf"\s+-\s*(?P<amount>0?\.\d+)\s*",
+        value,
+    )
+    if confirmed_spaced_decimal_hyphen:
+        numbers = [int(token) for token in re.findall(r"\d{1,2}", confirmed_spaced_decimal_hyphen.group("numbers"))]
+        amount = _amount_from_parts(confirmed_spaced_decimal_hyphen.group("amount"), UNIT_WORD, source="star")
+        return ParsedBet(
+            game=game_name,
+            type="normal",
+            numbers=numbers,
+            stars=ACTIVE_GAMES[game_name].default_stars(len(numbers)),
+            unit=amount.unit,
+            money=amount.money,
+        )
+
+    x_code_shorthand = re.fullmatch(
+        rf"\s*(?P<numbers>\d{{1,2}}(?:[.\- {COMMA_WORD},{FULL_COMMA}]+\d{{1,2}})+)"
+        rf"\s*[xX]\s*(?P<code>320|640|440|880)\s*",
+        value,
+    )
+    if x_code_shorthand:
+        number_tokens = re.findall(r"\d{1,2}", x_code_shorthand.group("numbers"))
+        code_map = {
+            (3, "320"): ([2, 3], Decimal("1")),
+            (3, "640"): ([2, 3], Decimal("2")),
+            (4, "440"): ([2, 3, 4], Decimal("0.5")),
+            (4, "880"): ([2, 3, 4], Decimal("1")),
+        }
+        code_match = code_map.get((len(number_tokens), x_code_shorthand.group("code")))
+        if code_match is not None:
+            stars, unit = code_match
+            amount = BetAmount(unit=_number_for_json(unit), money=_money_from_unit(unit))
+            return ParsedBet(
+                game=game_name,
+                type="normal",
+                numbers=[int(token) for token in number_tokens],
+                stars=stars,
+                unit=amount.unit,
+                money=amount.money,
+            )
+
     separator_shorthand = re.fullmatch(
         rf"\s*(?P<numbers>\d{{1,2}}(?:[.\- {COMMA_WORD},{FULL_COMMA}]+\d{{1,2}}){{2,3}})"
         rf"\s*:\s*(?P<code>440|880)\s*",
