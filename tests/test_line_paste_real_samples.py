@@ -149,7 +149,7 @@ def test_fixture_a_whole_sample_no_traceback_and_needs_review() -> None:
     assert f"01.03.35{TWO}{THREE}5" in raws
     assert "10,23,26,33,39 234 x 100" in raws
     assert f"08{DUN}10{DUN}17{DUN}21 234{STAR}X0.5" in raws
-    assert any(f"{ARM}" in item["original"] for item in queue["items"])
+    assert any(item["original"] == f"33.27.30.{ALT_TWO}600{THREE}200" for item in queue["items"])
     assert queue["preprocessing"]["summary"]["valid_count"] > 0
     assert queue["preprocessing"]["summary"]["invalid_unsupported_count"] > 0
 

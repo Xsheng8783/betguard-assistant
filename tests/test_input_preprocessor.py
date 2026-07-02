@@ -84,7 +84,7 @@ def test_repeated_dots_merge_inline_numeric_star_amount_fragment() -> None:
 
     assert [item["raw"] for item in report["candidate_bet_lines"]] == [
         "10.20.30.15.16.19 234.100",
-        f"30.31.32.33.19.39 234.100{ARM}",
+        "30.31.32.33.19.39 234.100",
     ]
     assert "merged continuation star amount" in report["candidate_bet_lines"][0]["preprocessing_notes"]
 
@@ -133,12 +133,12 @@ def test_mixed_valid_and_invalid_fragments_do_not_traceback() -> None:
     assert queue["preprocessing_status"] == "NEEDS_REVIEW"
     assert queue["summary"]["total"] == 4
     assert queue["preprocessing"]["summary"]["candidate_count"] == 4
-    assert queue["preprocessing"]["summary"]["invalid_unsupported_count"] == 2
-    assert queue["preprocessing"]["summary"]["valid_count"] == 2
+    assert queue["preprocessing"]["summary"]["invalid_unsupported_count"] == 1
+    assert queue["preprocessing"]["summary"]["valid_count"] == 3
     assert queue["items"][0]["review_result"]["status"] == "ok"
     assert queue["items"][1]["review_result"]["status"] == "ok"
     assert queue["items"][2]["review_result"]["status"] == "error"
-    assert queue["items"][3]["review_result"]["status"] == "error"
+    assert queue["items"][3]["review_result"]["status"] == "ok"
     assert queue["items"][0]["original"] == f"06.13.23.22 {TWO}{THREE}50"
     assert queue["items"][1]["original"] == f"32{CAR}10{YUAN}"
 
@@ -157,7 +157,7 @@ def test_long_pasted_input_splits_and_keeps_long_number_auditable() -> None:
     assert queue["items"][2]["original"] == "32.23.15.20.14 234.100"
     assert queue["items"][3]["original"] == f"11.09,10.{ALT_TWO}{THREE}200"
     assert queue["items"][4]["original"] == "21.20.23.32.05.06 234.100"
-    assert queue["items"][5]["original"] == f"33.27.30.{ALT_TWO}600{THREE}200{ARM}"
+    assert queue["items"][5]["original"] == f"33.27.30.{ALT_TWO}600{THREE}200"
     assert 1000 not in queue["items"][0]["review_result"].get("numbers", [])
     assert queue["status"] == NEEDS_REVIEW
     assert queue["preprocessing"]["summary"]["invalid_unsupported_count"] >= 1

@@ -30,12 +30,9 @@ REVIEW_POLICY_CASES = [
     f"01{TIMES}3",
     f"03{TIMES}1.5",
     f"01{TIMES}1",
-    "01.39-500改",
-    "11.39-1000改",
     "02-03-05-16-20-0.1",
     "港06-13-23-22/50",
     "05-23-12-29-38/234/200嫌",
-    f"33.27.30.{ALT_TWO}600{THREE}200{ARM}",
     "11.37.1000",
     "15.29.1000",
     "11.37.600",
@@ -154,6 +151,33 @@ VALID_POLICY_CASES = {
         "stars": [2, 3, 4],
         "money": 25,
         "unit": 0.25,
+    },
+    "01.39-500改": {
+        "type": "normal",
+        "numbers": [1, 39],
+        "stars": [2],
+        "money": 500,
+        "unit": 5,
+    },
+    "11.39-1000改": {
+        "type": "normal",
+        "numbers": [11, 39],
+        "stars": [2],
+        "money": 1000,
+        "unit": 10,
+    },
+    "02-10 -200改": {
+        "type": "normal",
+        "numbers": [2, 10],
+        "stars": [2],
+        "money": 200,
+        "unit": 2,
+    },
+    f"33.27.30.{ALT_TWO}600{THREE}200{ARM}": {
+        "type": "normal",
+        "numbers": [33, 27, 30],
+        "stars": [2, 3],
+        "bets": {"2": 600, "3": 200},
     },
     "01 15 27 39 07 -0.3": {
         "type": "normal",
@@ -282,7 +306,7 @@ def test_mixed_real_sample_policy_queue_and_accept_valid_flow() -> None:
     ]
     assert [item["raw"] for item in queue["preprocessing"]["invalid_fragments"]] == [
         f"港23半{CAR}",
-        "2星寫2",
+        "2星X2",
     ]
     assert all(item["selected_numbers"] == [] for item in queue["items"])
 
@@ -296,7 +320,7 @@ def test_mixed_real_sample_policy_queue_and_accept_valid_flow() -> None:
         "08 28 33 39 440",
     ]
     assert accepted["preprocessing"]["original_review_audit"]["invalid_fragments"][0]["raw"] == f"港23半{CAR}"
-    assert accepted["preprocessing"]["original_review_audit"]["invalid_fragments"][1]["raw"] == "2星寫2"
+    assert accepted["preprocessing"]["original_review_audit"]["invalid_fragments"][1]["raw"] == "2星X2"
     assert accepted["items"][0]["status"] == WAITING_FOR_HUMAN_CONFIRM
     assert accepted["audit"]["safety"]["real_site_operation"] is False
     assert accepted["audit"]["safety"]["auto_submit"] is False

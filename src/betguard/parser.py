@@ -93,6 +93,9 @@ def parse_line(text: str, *, default_game: str = "539") -> ParsedBet:
 
 
 def _parse_line_without_diagnostics(value: str, *, game_name: str) -> ParsedBet:
+    if re.fullmatch(r"\s*0\.\d+\s*", value):
+        raise ParseError("standalone amount line requires manual review")
+
     car_shorthand = _parse_confirmed_car_shorthand(value, game_name=game_name)
     if car_shorthand is not None:
         return car_shorthand
@@ -166,6 +169,8 @@ def _is_allowed_long_number(text: str, match: re.Match[str]) -> bool:
 
     before = _previous_non_space(text, match.start())
     after = _next_non_space(text, match.end())
+    if before in {CHINESE_TWO, CHINESE_ALT_TWO, CHINESE_THREE, CHINESE_FOUR, STAR_WORD} and number >= 50:
+        return True
     if after in {YUAN_WORD, BLOCK_WORD, UNIT_WORD}:
         return True
     if before in {"/", "=", "x", "X", MULTIPLY_SIGN} and number >= 50:

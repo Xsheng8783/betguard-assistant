@@ -276,14 +276,19 @@ def test_inline_numeric_star_amount_continuation_is_merged() -> None:
     assert result["money"] == 100
 
 
-def test_inline_numeric_star_amount_with_arm_still_needs_review() -> None:
+def test_inline_numeric_star_amount_with_trailing_arm_is_clean_bet() -> None:
     queue = build_batch_mock_queue(f"30.31.32.33.19.39..234.100{ARM}")
     item = queue["items"][0]
+    result = item["review_result"]
 
-    assert queue["status"] != READY_FOR_QUEUE
-    assert item["original"] == f"30.31.32.33.19.39 234.100{ARM}"
-    assert item["review_result"]["status"] == "error"
-    assert f"unsupported characters: {ARM}" in item["review_result"]["errors"]
+    assert queue["status"] == READY_FOR_QUEUE
+    assert item["original"] == "30.31.32.33.19.39 234.100"
+    assert result["status"] == "ok"
+    assert result["numbers"] == [30, 31, 32, 33, 19, 39]
+    assert result["stars"] == [2, 3, 4]
+    assert result["unit"] == 1
+    assert result["money"] == 100
+    assert "ignored trailing name marker 臂" in item["preprocessing_notes"]
 
 
 def test_embedded_star_amount_keeps_next_number_fragment_separate() -> None:
@@ -318,14 +323,17 @@ def test_leading_game_label_with_inline_star_amount_continuation_is_valid() -> N
     assert result["money"] == 100
 
 
-def test_continuation_with_arm_still_needs_review() -> None:
+def test_continuation_with_trailing_arm_is_clean_bet() -> None:
     queue = build_batch_mock_queue(f"06.13.23 {TWO}{THREE}50\n30.31.32.33.19.39\n234.100{ARM}")
     item = queue["items"][1]
+    result = item["review_result"]
 
-    assert queue["status"] == NEEDS_REVIEW
-    assert item["original"] == f"30.31.32.33.19.39 234.100{ARM}"
-    assert item["review_result"]["status"] == "error"
-    assert f"unsupported characters: {ARM}" in item["review_result"]["errors"]
+    assert queue["status"] == READY_FOR_QUEUE
+    assert item["original"] == "30.31.32.33.19.39 234.100"
+    assert result["status"] == "ok"
+    assert result["numbers"] == [30, 31, 32, 33, 19, 39]
+    assert result["stars"] == [2, 3, 4]
+    assert result["money"] == 100
     assert queue["final_decision"]["real_site_operation"] is False
     assert queue["final_decision"]["auto_submit"] is False
 
@@ -690,6 +698,177 @@ def test_equals_amount_with_trailing_ping_metadata() -> None:
     assert result["stars"] == [2, 3, 4]
     assert result["unit"] == 0.15
     assert result["money"] == 15
+
+
+def test_trailing_gai_after_confirmed_hyphen_amounts_is_ignored() -> None:
+    cases = [
+        ("01.39-500改", "01.39-500", [1, 39], 5, 500),
+        ("11.39-1000改", "11.39-1000", [11, 39], 10, 1000),
+        ("02-10 -200改", "02-10 -200", [2, 10], 2, 200),
+    ]
+    for text, expected_raw, numbers, unit, money in cases:
+        queue = build_batch_mock_queue(text)
+        item = queue["items"][0]
+        result = item["review_result"]
+
+        assert queue["status"] == READY_FOR_QUEUE, text
+        assert item["original"] == expected_raw
+        assert result["status"] == "ok"
+        assert result["numbers"] == numbers
+        assert result["stars"] == [2]
+        assert result["unit"] == unit
+        assert result["money"] == money
+
+
+def test_write_word_per_star_lines_merge_with_numbers_line() -> None:
+    for text in ["16.19.28.33\n2星寫2\n3.4星寫1", "10.11.22.28\n2星寫2  3.4星寫1"]:
+        queue = build_batch_mock_queue(text)
+        result = queue["items"][0]["review_result"]
+
+        assert queue["status"] == READY_FOR_QUEUE, text
+        assert len(queue["items"]) == 1
+        assert result["status"] == "ok"
+        assert result["stars"] == [2, 3, 4]
+        assert result["bets"]["2"]["unit"] == 2
+        assert result["bets"]["2"]["money"] == 200
+        assert result["bets"]["3"]["unit"] == 1
+        assert result["bets"]["3"]["money"] == 100
+        assert result["bets"]["4"]["unit"] == 1
+        assert result["bets"]["4"]["money"] == 100
+
+
+def test_235_star_typo_line_becomes_234_without_duplicate_merge() -> None:
+    queue = build_batch_mock_queue("07-10-25-29-37\n235-50\n天天樂\n234.50")
+    result = queue["items"][0]["review_result"]
+
+    assert queue["status"] == READY_FOR_QUEUE
+    assert len(queue["items"]) == 1
+    assert queue["items"][0]["original"] == "07-10-25-29-37 234.50"
+    assert result["status"] == "ok"
+    assert result["numbers"] == [7, 10, 25, 29, 37]
+    assert result["stars"] == [2, 3, 4]
+    assert result["unit"] == 0.5
+    assert result["money"] == 50
+    assert "normalized 235 star typo to 234" in queue["items"][0]["preprocessing_notes"]
+    assert "duplicate star amount line ignored" in queue["items"][0]["preprocessing_notes"]
+
+
+def test_standalone_decimal_amount_line_merges_with_missing_money_numbers() -> None:
+    queue = build_batch_mock_queue("32.23.15.20.14\n0.15")
+    result = queue["items"][0]["review_result"]
+
+    assert queue["status"] == READY_FOR_QUEUE
+    assert len(queue["items"]) == 1
+    assert result["status"] == "ok"
+    assert result["numbers"] == [32, 23, 15, 20, 14]
+    assert result["stars"] == [2, 3, 4]
+    assert result["unit"] == 0.15
+    assert result["money"] == 15
+
+
+def test_standalone_decimal_amount_line_alone_stays_review_without_zero_number() -> None:
+    queue = build_batch_mock_queue("0.15")
+    result = queue["items"][0]["review_result"]
+
+    assert queue["status"] != READY_FOR_QUEUE
+    assert result["status"] == "error"
+    assert "standalone amount line requires manual review" in result["errors"]
+    assert result["numbers"] in ([], None)
+
+
+def test_dot_continuation_with_x_unit_word_and_trailing_539() -> None:
+    queue = build_batch_mock_queue("12.16.22...2.3x 3支539")
+    result = queue["items"][0]["review_result"]
+
+    assert queue["status"] == READY_FOR_QUEUE
+    assert result["status"] == "ok"
+    assert result["numbers"] == [12, 16, 22]
+    assert result["stars"] == [2, 3]
+    assert result["unit"] == 3
+    assert result["money"] == 300
+
+
+def test_multi_group_line_with_broken_prefix_keeps_three_valid_bets() -> None:
+    queue = build_batch_mock_queue(
+        "33 35 36 車 134.100.11.09,10.兩三200..21.20.23.32.05.06..234.100..33.27.30.兩600三200臂"
+    )
+    raws = [item["original"] for item in queue["items"]]
+
+    assert queue["status"] == NEEDS_REVIEW
+    assert raws == [
+        "33 35 36 車 134.100",
+        "11.09,10.兩三200",
+        "21.20.23.32.05.06 234.100",
+        "33.27.30.兩600三200",
+    ]
+    assert queue["items"][0]["review_result"]["status"] == "error"
+
+    bet_a = queue["items"][1]["review_result"]
+    assert bet_a["status"] == "ok"
+    assert bet_a["numbers"] == [11, 9, 10]
+    assert bet_a["stars"] == [2, 3]
+    assert bet_a["money"] == 200
+
+    bet_b = queue["items"][2]["review_result"]
+    assert bet_b["status"] == "ok"
+    assert bet_b["numbers"] == [21, 20, 23, 32, 5, 6]
+    assert bet_b["stars"] == [2, 3, 4]
+    assert bet_b["money"] == 100
+
+    bet_c = queue["items"][3]["review_result"]
+    assert bet_c["status"] == "ok"
+    assert bet_c["numbers"] == [33, 27, 30]
+    assert bet_c["bets"]["2"]["money"] == 600
+    assert bet_c["bets"]["3"]["money"] == 200
+
+
+def test_each_car_amount_with_trailing_comma_539_expands() -> None:
+    for text, numbers in [
+        ("05 28 24 16二三100各10，539", [5, 28, 24, 16]),
+        ("29 28 32二三100各10元，539坪", [29, 28, 32]),
+    ]:
+        queue = build_batch_mock_queue(text)
+
+        assert queue["status"] == READY_FOR_QUEUE, text
+        normal = queue["items"][0]["review_result"]
+        assert normal["numbers"] == numbers
+        assert normal["stars"] == [2, 3]
+        assert normal["money"] == 100
+        car_items = queue["items"][1:]
+        assert [item["review_result"]["number"] for item in car_items] == numbers
+        assert all(item["review_result"]["car_units"] == 0.1 for item in car_items)
+        assert all(item["review_result"]["money"] == 10 for item in car_items)
+
+
+def test_normal_bet_and_car_shorthand_in_same_line_split() -> None:
+    queue = build_batch_mock_queue("01.11.35.39-50 35-0.5")
+    raws = [item["original"] for item in queue["items"]]
+
+    assert queue["status"] == READY_FOR_QUEUE
+    assert raws == ["01.11.35.39-50", "35-0.5"]
+
+    normal = queue["items"][0]["review_result"]
+    assert normal["numbers"] == [1, 11, 35, 39]
+    assert normal["stars"] == [2, 3, 4]
+    assert normal["money"] == 50
+
+    car = queue["items"][1]["review_result"]
+    assert car["type"] == "car"
+    assert car["number"] == 35
+    assert car["car_units"] == 0.5
+    assert car["money"] == 50
+
+
+def test_out_of_range_46_fragment_stays_review() -> None:
+    queue = build_batch_mock_queue("36.46.22..28.23.11=15坪")
+
+    assert queue["status"] == NEEDS_REVIEW
+    first = queue["items"][0]["review_result"]
+    assert first["status"] == "error"
+    assert "number out of range 46; valid range is 1-39" in first["errors"]
+    second = queue["items"][1]["review_result"]
+    assert second["status"] == "ok"
+    assert second["numbers"] == [28, 23, 11]
 
 
 def test_confirmed_existing_formats_do_not_regress() -> None:
@@ -1277,15 +1456,15 @@ def test_standalone_game_labels_are_ignored_metadata_not_candidates() -> None:
 
 def test_remaining_review_only_formats_still_need_review() -> None:
     for text in [
-        "29 28 32二三100各10元，539坪",
-        "05 28 24 16二三100各10，539",
         "2星寫2",
         "3.4星寫1",
-        "01.39-500改",
-        "11.39-1000改",
         "1000臂",
         "港08-22-46-/100",
         "02-03-05-16-20-0.1",
+        "11. 37. 1000",
+        "15.29.1000",
+        "11.28.600",
+        "11.28.400",
     ]:
         queue = build_batch_mock_queue(text)
 
