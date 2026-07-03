@@ -49,6 +49,7 @@ from betguard.webfill.live_b03_snapshot import (
 )
 from betguard.webfill.page_routes import PAGE_ROUTE_LABELS
 from betguard.webfill.real_site_fill_plan import (
+    FINAL_DECISION as REAL_SITE_FILL_PLAN_FINAL_DECISION,
     build_real_site_assisted_fill_plan,
     format_pretty_real_site_fill_plan,
 )
@@ -342,10 +343,34 @@ def main() -> None:
         return
 
     if args.real_site_fill_plan:
-        if not args.queue_path or not args.selector_report:
-            parser.error("--real-site-fill-plan requires --queue and --selector-report")
+        if not args.queue_path:
+            parser.error("--real-site-fill-plan requires --queue")
+        if args.selector_report and args.profile_path:
+            parser.error("--real-site-fill-plan accepts only one of --selector-report or --profile")
+        if not args.selector_report and not args.profile_path:
+            parser.error("--real-site-fill-plan requires one of --selector-report or --profile")
         queue = json.loads(Path(args.queue_path).read_text(encoding="utf-8"))
-        selector_report = json.loads(Path(args.selector_report).read_text(encoding="utf-8"))
+        if args.profile_path:
+            profile = load_site_profile(args.profile_path)
+            validation = validate_site_profile(profile)
+            if validation.get("status") != "OK":
+                report = {
+                    "mode": "real_site_assisted_fill_plan",
+                    "status": "BLOCKED",
+                    "item": None,
+                    "planned_actions": [],
+                    "missing": [],
+                    "errors": ["site profile validation failed"] + list(validation.get("errors", [])),
+                    "final_decision": dict(REAL_SITE_FILL_PLAN_FINAL_DECISION),
+                }
+                if args.pretty:
+                    print(format_pretty_real_site_fill_plan(report))
+                else:
+                    print(json.dumps(report, ensure_ascii=False, indent=2))
+                return
+            selector_report = profile_as_selector_report(profile)
+        else:
+            selector_report = json.loads(Path(args.selector_report).read_text(encoding="utf-8"))
         report = build_real_site_assisted_fill_plan(queue, selector_report)
         if args.pretty:
             print(format_pretty_real_site_fill_plan(report))
