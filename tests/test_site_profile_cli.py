@@ -7,7 +7,9 @@ import sys
 
 import pytest
 
+from betguard.review import build_report
 from betguard.webfill import cli as webfill_cli
+from betguard.webfill.fill_plan import build_fill_plan
 from betguard.webfill.site_profile import build_site_profile
 
 
@@ -38,8 +40,12 @@ def complete_selector_report() -> dict:
 def _new_cli_branch_source() -> str:
     source = inspect.getsource(webfill_cli)
     start = source.index("if args.save_site_profile:")
-    end = source.index("if args.map_dry_run:")
+    end = source.index("if args.dry_run_pipeline:")
     return source[start:end]
+
+
+def normal_fill_plan() -> dict:
+    return build_fill_plan(build_report("06-13-23-22/50").to_dict())
 
 
 def test_save_site_profile_reads_selector_report_and_writes_profile(tmp_path, monkeypatch) -> None:
@@ -244,3 +250,130 @@ def test_cli_output_does_not_trigger_browser_automation(tmp_path, monkeypatch, c
     assert "playwright" not in lowered
     assert "selenium" not in lowered
     assert ".click(" not in output
+
+
+def test_map_dry_run_with_profile_matches_map_dry_run_with_selector_report(tmp_path, monkeypatch, capsys) -> None:
+    selector_report = complete_selector_report()
+    fill_plan_path = tmp_path / "fill_plan.json"
+    fill_plan_path.write_text(json.dumps(normal_fill_plan(), ensure_ascii=False), encoding="utf-8")
+
+    selector_report_path = tmp_path / "selector_report.json"
+    selector_report_path.write_text(json.dumps(selector_report, ensure_ascii=False), encoding="utf-8")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prog",
+            "--map-dry-run",
+            "--fill-plan",
+            str(fill_plan_path),
+            "--selector-report",
+            str(selector_report_path),
+        ],
+    )
+    webfill_cli.main()
+    report_from_selector_report = json.loads(capsys.readouterr().out)
+
+    profile_path = tmp_path / "site_profile.json"
+    profile = build_site_profile(selector_report, site_name="local", page_name="539")
+    profile_path.write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prog",
+            "--map-dry-run",
+            "--fill-plan",
+            str(fill_plan_path),
+            "--profile",
+            str(profile_path),
+        ],
+    )
+    webfill_cli.main()
+    report_from_profile = json.loads(capsys.readouterr().out)
+
+    assert report_from_profile == report_from_selector_report
+    assert report_from_profile["status"] == "SAFE"
+    assert report_from_profile["final_decision"]["executable"] is False
+
+
+def test_map_dry_run_rejects_both_selector_report_and_profile(tmp_path, monkeypatch, capsys) -> None:
+    fill_plan_path = tmp_path / "fill_plan.json"
+    fill_plan_path.write_text(json.dumps(normal_fill_plan(), ensure_ascii=False), encoding="utf-8")
+    selector_report_path = tmp_path / "selector_report.json"
+    selector_report_path.write_text(json.dumps(complete_selector_report(), ensure_ascii=False), encoding="utf-8")
+    profile_path = tmp_path / "site_profile.json"
+    profile_path.write_text(
+        json.dumps(build_site_profile(complete_selector_report(), site_name="local", page_name="539"), ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prog",
+            "--map-dry-run",
+            "--fill-plan",
+            str(fill_plan_path),
+            "--selector-report",
+            str(selector_report_path),
+            "--profile",
+            str(profile_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        webfill_cli.main()
+
+    error_output = capsys.readouterr().err
+    assert "only one of --selector-report or --profile" in error_output
+
+
+def test_map_dry_run_rejects_missing_both_selector_report_and_profile(tmp_path, monkeypatch, capsys) -> None:
+    fill_plan_path = tmp_path / "fill_plan.json"
+    fill_plan_path.write_text(json.dumps(normal_fill_plan(), ensure_ascii=False), encoding="utf-8")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["prog", "--map-dry-run", "--fill-plan", str(fill_plan_path)],
+    )
+
+    with pytest.raises(SystemExit):
+        webfill_cli.main()
+
+    error_output = capsys.readouterr().err
+    assert "--selector-report or --profile" in error_output
+
+
+def test_map_dry_run_with_profile_missing_danger_candidates_stays_blocked(tmp_path, monkeypatch, capsys) -> None:
+    selector_report = complete_selector_report()
+    selector_report["danger_candidates"] = []
+    fill_plan_path = tmp_path / "fill_plan.json"
+    fill_plan_path.write_text(json.dumps(normal_fill_plan(), ensure_ascii=False), encoding="utf-8")
+    profile_path = tmp_path / "site_profile.json"
+    profile_path.write_text(
+        json.dumps(build_site_profile(selector_report, site_name="local", page_name="539"), ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prog",
+            "--map-dry-run",
+            "--fill-plan",
+            str(fill_plan_path),
+            "--profile",
+            str(profile_path),
+        ],
+    )
+    webfill_cli.main()
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "BLOCKED"
+    assert {"type": "danger", "reason": "danger buttons not verified"} in report["missing"]

@@ -67,6 +67,7 @@ from betguard.webfill.site_profile import (
     build_site_profile,
     format_pretty_site_profile_validation,
     load_site_profile,
+    profile_as_selector_report,
     save_site_profile,
     validate_site_profile,
 )
@@ -436,10 +437,17 @@ def main() -> None:
         return
 
     if args.map_dry_run:
-        if not args.fill_plan_path or not args.selector_report:
-            parser.error("--map-dry-run requires --fill-plan and --selector-report")
+        if not args.fill_plan_path:
+            parser.error("--map-dry-run requires --fill-plan")
+        if args.selector_report and args.profile_path:
+            parser.error("--map-dry-run accepts only one of --selector-report or --profile")
+        if not args.selector_report and not args.profile_path:
+            parser.error("--map-dry-run requires one of --selector-report or --profile")
         fill_plan = json.loads(Path(args.fill_plan_path).read_text(encoding="utf-8"))
-        selector_report = json.loads(Path(args.selector_report).read_text(encoding="utf-8"))
+        if args.profile_path:
+            selector_report = profile_as_selector_report(load_site_profile(args.profile_path))
+        else:
+            selector_report = json.loads(Path(args.selector_report).read_text(encoding="utf-8"))
         report = build_mapping_report(fill_plan, selector_report)
         if args.pretty:
             print(format_pretty_mapping_report(report))
