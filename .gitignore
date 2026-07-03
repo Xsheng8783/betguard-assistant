@@ -20,6 +20,8 @@ selector_report*.zip
 selector_report_unzipped/
 manual_mapping_test/
 
+overrides/
+
 .env
 .env.*
 
