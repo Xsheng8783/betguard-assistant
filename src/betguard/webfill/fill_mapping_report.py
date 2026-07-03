@@ -9,12 +9,15 @@ from betguard.webfill.fill_mapping import (
     resolve_final_selector,
 )
 from betguard.webfill.fill_plan import FORBIDDEN_STEPS
+from betguard.webfill.manual_amount_mapping import apply_manual_amount_overrides
 
 
 def build_mapping_report(
     fill_plan: dict[str, Any],
     selector_report: dict[str, Any],
     mapping_result: dict[str, Any] | None = None,
+    *,
+    manual_amount_overrides: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     mapping = mapping_result or build_dry_run_mapping(fill_plan, selector_report)
     danger_candidates = _danger_candidates(selector_report)
@@ -29,8 +32,11 @@ def build_mapping_report(
             missing.append({"type": "danger", "reason": "danger buttons not verified"})
 
     actions = [_action_from_mapped_step(item) for item in mapping.get("mapped_steps", [])]
+    # Context-verified manual overrides (if any) run before the guards so the
+    # cross-action uniqueness check still validates the final selectors.
+    override_result = apply_manual_amount_overrides(actions, overrides=manual_amount_overrides)
     grouped = _apply_selector_guards(actions, missing, warnings)
-    amount_diagnostics = _build_amount_field_diagnostics(actions, grouped)
+    amount_diagnostics = _build_amount_field_diagnostics(actions, grouped, override_result)
     unfound = any(not action["selector_found"] for action in actions)
     blocked = (
         bool(errors)
@@ -47,6 +53,11 @@ def build_mapping_report(
         "actions": actions,
         "actions_summary": [_action_summary(action) for action in actions],
         "amount_field_status": amount_diagnostics["status"],
+        "amount_field_source": amount_diagnostics["source"],
+        "amount_field_overrides": {
+            "applied": override_result.get("applied", []),
+            "rejected": override_result.get("rejected", []),
+        },
         "ambiguous_amount_fields": amount_diagnostics["ambiguous"],
         "shared_amount_selectors": amount_diagnostics["shared_selectors"],
         "amount_field_diagnostics": amount_diagnostics["diagnostics"],
@@ -91,6 +102,8 @@ def format_pretty_mapping_report(report: dict[str, Any]) -> str:
         lines.append(f"    selector: {action.get('selector') or ''}")
         lines.append(f"    frame: {action.get('frame') or ''}")
         lines.append(f"    confidence: {action.get('confidence') or 'low'}")
+        if action.get("source"):
+            lines.append(f"    source: {action.get('source')}")
 
     lines.append("")
     lines.append("Danger Check:")
@@ -119,6 +132,17 @@ def format_pretty_mapping_report(report: dict[str, Any]) -> str:
         for selector in report.get("shared_amount_selectors", []):
             lines.append(f"- Shared selector: {selector}")
         lines.append("- Result: amount fields are not safe for assisted fill")
+
+    overrides = report.get("amount_field_overrides") or {}
+    if overrides.get("applied") or overrides.get("rejected"):
+        lines.append("")
+        lines.append("Amount Field Mapping:")
+        lines.append(f"- status: {report.get('amount_field_status', 'BLOCKED')}")
+        lines.append(f"- source: {report.get('amount_field_source', 'automatic_mapping')}")
+        for star in overrides.get("applied", []):
+            lines.append(f"- manual_override applied: {star}")
+        for item in overrides.get("rejected", []):
+            lines.append(f"- manual_override rejected: {item.get('star')} ({item.get('reason')})")
 
     if report.get("missing"):
         lines.append("")
@@ -270,6 +294,7 @@ def _is_amount_action(action: dict[str, Any]) -> bool:
 def _build_amount_field_diagnostics(
     actions: list[dict[str, Any]],
     grouped: dict[str, list[dict[str, Any]]],
+    override_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Reporting-only diagnostics for ambiguous amount fields.
 
@@ -277,6 +302,10 @@ def _build_amount_field_diagnostics(
     and the ``selector_unsafe`` flags it already set, so the diagnostics can
     never disagree with the actual BLOCKED/SAFE decision. Never mutates actions;
     never resolves selectors independently.
+
+    When manual overrides were applied and every amount field is safe, the status
+    becomes ``MANUAL_VERIFIED`` and the source ``manual_override`` — a clearer
+    provenance than a bare SAFE.
     """
 
     amount_actions = [action for action in actions if _is_amount_action(action)]
@@ -312,9 +341,19 @@ def _build_amount_field_diagnostics(
             _amount_diagnostic_entry(action, star, selector, found, unsafe, shared, shared_with)
         )
 
-    status = "BLOCKED" if diagnostics else "SAFE"
+    applied_overrides = list((override_result or {}).get("applied") or [])
+    if diagnostics:
+        status = "BLOCKED"
+        source = "manual_override" if applied_overrides else "automatic_mapping"
+    elif applied_overrides:
+        status = "MANUAL_VERIFIED"
+        source = "manual_override"
+    else:
+        status = "SAFE"
+        source = "automatic_mapping"
     return {
         "status": status,
+        "source": source,
         "ambiguous": ambiguous,
         "shared_selectors": shared_selectors,
         "diagnostics": diagnostics,
