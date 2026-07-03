@@ -89,7 +89,7 @@ def run_real_site_assisted_fill_with_page(
 
     try:
         executed_actions = execute_actions_on_page(page, preflight["execution_actions"])
-    except RuntimeError as exc:
+    except Exception as exc:
         blocked = _blocked_runtime_report(preflight)
         blocked["errors"].append(str(exc))
         return blocked
@@ -131,6 +131,10 @@ def run_real_site_assisted_fill(
             report = build_real_site_assisted_fill_report(queue, preflight, executed_actions)
             input_func("已完成安全帶入，請人工檢查畫面。按 Enter 結束此工具。")
             return report
+        except Exception as exc:
+            blocked = _blocked_runtime_report(preflight)
+            blocked["errors"].append(str(exc))
+            return blocked
         finally:
             browser.close()
 
@@ -142,13 +146,20 @@ def execute_actions_on_page(page: Any, actions: list[dict[str, Any]]) -> list[di
         if error:
             raise RuntimeError(error)
 
-        locator = _locator_for_action(page, action)
+        try:
+            locator = _locator_for_action(page, action)
+        except Exception as exc:
+            raise RuntimeError(f"locator lookup failed for {action_label(action)}: {exc}") from exc
+
         element_info = _read_element_safety_info(locator)
         if not _metadata_is_safe(element_info):
             raise RuntimeError(f"danger text detected on target element for {action_label(action)}")
 
         if action["type"] == "SELECT_NUMBER":
-            locator.click()
+            try:
+                locator.click()
+            except Exception as exc:
+                raise RuntimeError(f"click failed for {action_label(action)}: {exc}") from exc
             executed.append(
                 {
                     "type": "SELECT_NUMBER",
@@ -157,7 +168,10 @@ def execute_actions_on_page(page: Any, actions: list[dict[str, Any]]) -> list[di
                 }
             )
         elif action["type"] == "SET_AMOUNT":
-            locator.fill(str(action["amount"]))
+            try:
+                locator.fill(str(action["amount"]))
+            except Exception as exc:
+                raise RuntimeError(f"fill failed for {action_label(action)}: {exc}") from exc
             executed.append(
                 {
                     "type": "SET_AMOUNT",
@@ -418,7 +432,21 @@ def _contains_danger_text(text: Any) -> bool:
 
 def _locator_for_action(page: Any, action: dict[str, Any]) -> Any:
     context = _frame_context(page, str(action.get("frame") or ""))
-    return context.locator(str(action["selector"])).first()
+    return _resolve_first_locator(context.locator(str(action["selector"])))
+
+
+def _resolve_first_locator(locator: Any) -> Any:
+    """Return the first-match locator across Playwright versions and fakes.
+
+    Real Playwright exposes ``Locator.first`` as a property, while some fakes
+    implement it as a callable method. Handle both without crashing.
+    """
+    first = getattr(locator, "first", None)
+    if first is None:
+        return locator
+    if callable(first):
+        return first()
+    return first
 
 
 def _frame_context(page: Any, frame_ref: str) -> Any:

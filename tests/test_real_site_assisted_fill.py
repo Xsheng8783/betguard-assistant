@@ -6,6 +6,7 @@ from betguard.review import review_text
 from betguard.webfill import cli as webfill_cli
 from betguard.webfill.batch_queue import (
     BATCH_BLOCKED,
+    CURRENT,
     PENDING,
     WAITING_FOR_HUMAN_CONFIRM,
     build_batch_queue,
@@ -261,3 +262,190 @@ def test_does_not_mark_done_or_advance_to_next_item() -> None:
     assert report["queue"]["items"][0]["status"] == WAITING_FOR_HUMAN_CONFIRM
     assert report["queue"]["items"][1]["status"] == PENDING
     assert all(item["status"] != "DONE" for item in report["queue"]["items"])
+
+
+# --- Execution guard v1: locator.first compatibility and safe failure ---
+
+
+class PropertyFirstLocator:
+    def __init__(self, page, selector: str, metadata: dict):
+        self.page = page
+        self.selector = selector
+        self.metadata = metadata
+
+    @property
+    def first(self):
+        return self
+
+    def evaluate(self, _script: str):
+        return self.metadata
+
+    def click(self):
+        self.page.clicked.append(self.selector)
+
+    def fill(self, value: str):
+        self.page.filled[self.selector] = value
+
+
+class PropertyFirstPage(FakePage):
+    def locator(self, selector: str):
+        metadata = self.elements.get(selector)
+        if metadata is None:
+            raise AssertionError(f"unexpected selector: {selector}")
+        return PropertyFirstLocator(self, selector, metadata)
+
+
+class LocatorLookupRaisingPage(FakePage):
+    def locator(self, selector: str):
+        raise ValueError(f"locator boom: {selector}")
+
+
+class RaisingLocator(FakeLocator):
+    def __init__(self, page, selector: str, metadata: dict, raise_on: str):
+        super().__init__(page, selector, metadata)
+        self.raise_on = raise_on
+
+    def click(self):
+        if self.raise_on == "click":
+            raise ValueError("click boom")
+        super().click()
+
+    def fill(self, value: str):
+        if self.raise_on == "fill":
+            raise ValueError("fill boom")
+        super().fill(value)
+
+
+class RaisingPage(FakePage):
+    def __init__(self, elements: dict[str, dict], raise_on: str):
+        super().__init__(elements)
+        self.raise_on = raise_on
+
+    def locator(self, selector: str):
+        metadata = self.elements.get(selector)
+        if metadata is None:
+            raise AssertionError(f"unexpected selector: {selector}")
+        return RaisingLocator(self, selector, metadata, self.raise_on)
+
+
+def property_first_page() -> PropertyFirstPage:
+    return PropertyFirstPage(fake_page().elements)
+
+
+def raising_page(raise_on: str) -> RaisingPage:
+    return RaisingPage(fake_page().elements, raise_on)
+
+
+def test_locator_first_as_method_still_fills_and_waits() -> None:
+    report = run_real_site_assisted_fill_with_page(
+        queue_for(f"06.13.23.22 {TWO_THREE}50"),
+        full_selector_report(),
+        fake_page(),
+        risk_acknowledged=True,
+    )
+
+    assert report["status"] == WAITING_FOR_HUMAN_CONFIRM
+    assert [action["type"] for action in report["actions_executed"]].count("SELECT_NUMBER") == 4
+
+
+def test_locator_first_as_property_also_fills_and_waits() -> None:
+    page = property_first_page()
+
+    report = run_real_site_assisted_fill_with_page(
+        queue_for(f"06.13.23.22 {TWO_THREE}50"),
+        full_selector_report(),
+        page,
+        risk_acknowledged=True,
+    )
+
+    assert report["status"] == WAITING_FOR_HUMAN_CONFIRM
+    assert page.clicked == [
+        'button[data-number="06"]',
+        'button[data-number="13"]',
+        'button[data-number="23"]',
+        'button[data-number="22"]',
+    ]
+    assert page.filled == {
+        'input[data-amount-field="two"]': "50",
+        'input[data-amount-field="three"]': "50",
+    }
+
+
+def test_locator_lookup_exception_becomes_safe_blocked() -> None:
+    page = LocatorLookupRaisingPage(fake_page().elements)
+
+    report = run_real_site_assisted_fill_with_page(
+        queue_for(f"06.13.23.22 {TWO_THREE}50"),
+        full_selector_report(),
+        page,
+        risk_acknowledged=True,
+    )
+
+    assert report["status"] == "BLOCKED"
+    assert any("locator lookup failed" in error for error in report["errors"])
+    assert page.clicked == []
+    assert page.filled == {}
+    assert report["danger_buttons_clicked"] == []
+
+
+def test_click_exception_becomes_safe_blocked() -> None:
+    page = raising_page("click")
+
+    report = run_real_site_assisted_fill_with_page(
+        queue_for(f"06.13.23.22 {TWO_THREE}50"),
+        full_selector_report(),
+        page,
+        risk_acknowledged=True,
+    )
+
+    assert report["status"] == "BLOCKED"
+    assert any("click failed" in error for error in report["errors"])
+    assert page.clicked == []
+    assert page.filled == {}
+    assert report["danger_buttons_clicked"] == []
+
+
+def test_fill_exception_becomes_safe_blocked() -> None:
+    page = raising_page("fill")
+
+    report = run_real_site_assisted_fill_with_page(
+        queue_for(f"06.13.23.22 {TWO_THREE}50"),
+        full_selector_report(),
+        page,
+        risk_acknowledged=True,
+    )
+
+    assert report["status"] == "BLOCKED"
+    assert any("fill failed" in error for error in report["errors"])
+    assert page.filled == {}
+    assert report["danger_buttons_clicked"] == []
+
+
+def test_queue_does_not_advance_on_execution_failure() -> None:
+    queue = queue_for(f"06.13.23.22 {TWO_THREE}50")
+
+    report = run_real_site_assisted_fill_with_page(
+        queue,
+        full_selector_report(),
+        raising_page("click"),
+        risk_acknowledged=True,
+    )
+
+    assert report["status"] == "BLOCKED"
+    assert queue["items"][0]["status"] == CURRENT
+    assert all(item["status"] != "DONE" for item in queue["items"])
+    assert queue["status"] != WAITING_FOR_HUMAN_CONFIRM
+
+
+def test_execution_failure_never_submits_or_auto_confirms() -> None:
+    report = run_real_site_assisted_fill_with_page(
+        queue_for(f"06.13.23.22 {TWO_THREE}50"),
+        full_selector_report(),
+        raising_page("fill"),
+        risk_acknowledged=True,
+    )
+
+    assert report["status"] == "BLOCKED"
+    assert report["danger_buttons_clicked"] == []
+    assert report["final_decision"]["real_site_auto_submit"] is False
+    assert report["final_decision"]["human_required"] is True
