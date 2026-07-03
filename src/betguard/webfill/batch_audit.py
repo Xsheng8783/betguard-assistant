@@ -162,6 +162,7 @@ def _item_audit(item: dict[str, Any]) -> dict[str, Any]:
         "parsed_summary": item.get("parsed_summary"),
         "star_amounts": _star_amounts(item.get("review_result", {})),
         "status": item.get("status"),
+        "approved_source": dict(item["approved_source"]) if isinstance(item.get("approved_source"), dict) else None,
         "mock_result_summary": _mock_result_summary(item),
         "human_confirmation_status": _human_status(item),
     }

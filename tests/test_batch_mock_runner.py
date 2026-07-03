@@ -131,11 +131,9 @@ def test_pretty_report_contains_expected_sections() -> None:
     assert f"- {DANGER_BUTTONS[0]} detected, not clicked" in pretty
 
 
-def test_cli_batch_mock_run_uses_mock_runner(capsys, monkeypatch, tmp_path) -> None:
+def test_cli_batch_mock_run_auto_confirm_is_refused(capsys, monkeypatch, tmp_path) -> None:
     input_file = tmp_path / "input.txt"
     input_file.write_text(f"06.13.23.22 {TWO_THREE}50", encoding="utf-8")
-    fake_report = build_batch_mock_runner_report(input_file.read_text(encoding="utf-8"), auto_confirm_mock=True)
-    monkeypatch.setattr(webfill_cli, "run_batch_mock_runner_from_file", lambda *args, **kwargs: fake_report)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -151,5 +149,33 @@ def test_cli_batch_mock_run_uses_mock_runner(capsys, monkeypatch, tmp_path) -> N
     webfill_cli.main()
 
     output = json.loads(capsys.readouterr().out)
-    assert output["status"] == "COMPLETED_MOCK_ONLY"
-    assert output["final_decision"]["real_site_auto_submit"] is False
+    assert output["status"] == "REFUSED"
+    assert any("test-only" in error for error in output["errors"])
+    assert any("--batch-review-accept-valid" in error for error in output["errors"])
+    assert output["final_decision"]["real_site_operation"] is False
+    assert output["final_decision"]["auto_submit"] is False
+    assert output["final_decision"]["human_required_each_item"] is True
+
+
+def test_cli_batch_mock_run_queue_path_requires_approved_fill_queue(capsys, monkeypatch, tmp_path) -> None:
+    input_file = tmp_path / "input.txt"
+    input_file.write_text(f"06.13.23.22 {TWO_THREE}50", encoding="utf-8")
+    queue_file = tmp_path / "queue_state.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "betguard.webfill.cli",
+            "--batch-mock-run",
+            "--file",
+            str(input_file),
+            "--queue",
+            str(queue_file),
+        ],
+    )
+
+    webfill_cli.main()
+
+    output = json.loads(capsys.readouterr().out)
+    assert "approved fill queue is empty" in " ".join(output.get("errors", []))
+    assert all(item["status"] == "PENDING" for item in output["items"])

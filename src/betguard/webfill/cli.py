@@ -39,7 +39,6 @@ from betguard.webfill.batch_mock_queue import (
     run_current_mock_queue_item,
     save_queue_state,
 )
-from betguard.webfill.batch_mock_runner import run_batch_mock_runner_from_file, format_pretty_batch_mock_report
 from betguard.webfill.fill_preview import PREVIEW_SAFETY, build_fill_preview, format_pretty_fill_preview
 from betguard.webfill.fill_mapping_report import build_mapping_report, format_pretty_mapping_report
 from betguard.webfill.fill_mapping import build_b03_selector_mapping, format_pretty_b03_selector_mapping
@@ -155,18 +154,26 @@ def main() -> None:
             parser.error("--batch-mock-run requires exactly one of --text or --file")
         raw_text = args.pipeline_text if args.pipeline_text is not None else Path(args.pipeline_file).read_text(encoding="utf-8")
         if args.auto_confirm_mock:
-            report = run_batch_mock_runner_from_file(
-                args.pipeline_file,
-                auto_confirm_mock=args.auto_confirm_mock,
-            ) if args.pipeline_file is not None else None
-            if report is None:
-                from betguard.webfill.batch_mock_runner import run_batch_mock_runner
-
-                report = run_batch_mock_runner(raw_text, auto_confirm_mock=True)
+            refusal = {
+                "status": "REFUSED",
+                "errors": [
+                    "--auto-confirm-mock is a test-only simulation and is disabled for normal CLI use; "
+                    "use --batch-review-accept-valid and --batch-mock-next so every item goes through "
+                    "the human-approved fill queue"
+                ],
+                "final_decision": {
+                    "real_site_operation": False,
+                    "auto_submit": False,
+                    "human_required_each_item": True,
+                },
+            }
             if args.pretty:
-                print(format_pretty_batch_mock_report(report))
+                print("Batch Mock Run")
+                print("")
+                for error in refusal["errors"]:
+                    print(f"Error: {error}")
             else:
-                print(json.dumps(report, ensure_ascii=False, indent=2))
+                print(json.dumps(refusal, ensure_ascii=False, indent=2))
             return
         queue = build_batch_mock_queue(raw_text)
         if queue.get("status") == "READY_FOR_QUEUE":

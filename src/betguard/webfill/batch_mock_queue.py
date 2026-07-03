@@ -133,6 +133,13 @@ def run_current_mock_queue_item(queue: dict[str, Any]) -> dict[str, Any]:
     if item is None:
         raise ValueError("no pending item available")
 
+    approved_source = _approved_source_for_item(updated, item)
+    if approved_source is None:
+        raise ValueError(
+            "current item is not in the approved fill queue; run --batch-review-accept-valid first"
+        )
+    item["approved_source"] = approved_source
+
     report = build_mock_fill_report(str(item.get("original") or ""))
     if report.get("status") != "COMPLETED_MOCK_ONLY":
         item["status"] = MOCK_FILL_FAILED
@@ -197,6 +204,26 @@ def advance_queue_after_human_confirm(queue: dict[str, Any]) -> dict[str, Any]:
     _refresh_summary(updated)
     sync_batch_audit(updated)
     return updated
+
+
+def _approved_source_for_item(queue: dict[str, Any], item: dict[str, Any]) -> dict[str, Any] | None:
+    from betguard.webfill.fill_preview import _preview_entry
+
+    target_index = item.get("index")
+    target_fragment = item.get("original_fragment") or item.get("original")
+    for position, entry in enumerate(queue.get("approved_fill_queue") or [], start=1):
+        if entry.get("accepted_by_human") is not True:
+            continue
+        matches_index = entry.get("index") is not None and entry.get("index") == target_index
+        matches_fragment = entry.get("original_fragment") == target_fragment
+        if not (matches_index or matches_fragment):
+            continue
+        source = _preview_entry(position, entry)
+        source["from_approved_fill_queue"] = True
+        source["accepted_by_human"] = True
+        source["accepted_at"] = entry.get("accepted_at")
+        return source
+    return None
 
 
 def _has_human_approved_items(queue: dict[str, Any]) -> bool:
