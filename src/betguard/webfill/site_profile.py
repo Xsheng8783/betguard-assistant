@@ -32,6 +32,13 @@ REQUIRED_NUMBER_COUNT = 39
 STATUS_OK = "OK"
 STATUS_BLOCKED = "BLOCKED"
 
+# Read-only Snapshot Enrichment v1: bound the persisted context so the profile
+# stays small even though amount input records now carry visibility + context.
+AMOUNT_CONTEXT_TEXT_LIMIT = 240
+AMOUNT_CONTEXT_HTML_LIMIT = 500
+_AMOUNT_TEXT_FIELDS = ("parentText", "grandparentText", "containerLabel")
+_AMOUNT_HTML_FIELDS = ("outerHTML", "parentHTML", "grandparentHTML")
+
 
 def build_site_profile(
     selector_report: dict[str, Any],
@@ -41,7 +48,9 @@ def build_site_profile(
     captured_at: str | None = None,
 ) -> dict[str, Any]:
     number_candidates = dict(selector_report.get("number_candidates") or {})
-    amount_field_candidates = dict(selector_report.get("amount_field_candidates") or {})
+    amount_field_candidates = _bounded_amount_field_candidates(
+        selector_report.get("amount_field_candidates") or {}
+    )
     danger_candidates = list(selector_report.get("danger_candidates") or [])
     market_state = dict(selector_report.get("market_state") or {})
 
@@ -112,6 +121,38 @@ def profile_as_selector_report(profile: dict[str, Any]) -> dict[str, Any]:
         "danger_candidates": list(profile.get("danger_candidates") or []),
         "market_state": dict(profile.get("market_state") or {}),
     }
+
+
+def _bounded_amount_field_candidates(
+    amount_field_candidates: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist amount candidates (with enriched read-only fields) size-bounded.
+
+    Enriched fields such as ``visible``/``box``/``amountTableAnchor`` are retained
+    verbatim; only the free-text/HTML context is truncated so the profile stays
+    small. This never re-maps or marks any selector safe.
+    """
+    result: dict[str, Any] = {}
+    for star, records in amount_field_candidates.items():
+        if not isinstance(records, list):
+            result[star] = records
+            continue
+        result[star] = [
+            _bounded_amount_record(record) if isinstance(record, dict) else record
+            for record in records
+        ]
+    return result
+
+
+def _bounded_amount_record(record: dict[str, Any]) -> dict[str, Any]:
+    bounded = dict(record)
+    for key in _AMOUNT_TEXT_FIELDS:
+        if key in bounded:
+            bounded[key] = str(bounded.get(key) or "")[:AMOUNT_CONTEXT_TEXT_LIMIT]
+    for key in _AMOUNT_HTML_FIELDS:
+        if key in bounded:
+            bounded[key] = str(bounded.get(key) or "")[:AMOUNT_CONTEXT_HTML_LIMIT]
+    return bounded
 
 
 def _found_count(candidates: dict[str, Any]) -> int:

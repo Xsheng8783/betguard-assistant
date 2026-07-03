@@ -57,6 +57,72 @@ MATCH_FIELDS = (
     "outerHTML",
 )
 
+# Read-only Snapshot Enrichment v1: bounded visibility + amount-table context.
+# These fields never trigger any interaction; they are pure captured reads used
+# later (in a separate, not-yet-implemented mapper) to reason about the visible
+# amount inputs. Persisted only for input/select/textarea records.
+READONLY_HTML_LIMIT = 500
+CONTAINER_LABEL_LIMIT = 120
+READONLY_ENRICHMENT_KEYS = (
+    "visible",
+    "box",
+    "display",
+    "visibilityCss",
+    "hidden",
+    "ariaHidden",
+    "amountTableAnchor",
+    "amountTableInputIndex",
+    "containerLabel",
+)
+READONLY_CONTEXT_KEYS = ("parentText", "grandparentText", "outerHTML")
+
+
+def _readonly_bool(value: Any) -> bool:
+    """Fail-closed boolean: only an explicit ``True`` counts as true."""
+    return value is True
+
+
+def _readonly_box(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    box: dict[str, int] = {}
+    for key in ("w", "h", "top", "left"):
+        try:
+            box[key] = int(round(float(value.get(key))))
+        except (TypeError, ValueError):
+            box[key] = 0
+    return box
+
+
+def _readonly_int(value: Any, default: int = -1) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _bounded_str(value: Any, limit: int) -> str:
+    return str(value or "").strip()[:limit]
+
+
+def _readonly_enrichment(element: dict[str, Any]) -> dict[str, Any]:
+    """Bounded, fail-closed read-only enrichment fields for one element.
+
+    ``visible`` defaults to ``False`` when unknown (fail-closed), so a missing or
+    malformed visibility signal never makes an input look safely visible.
+    """
+    return {
+        "visible": _readonly_bool(element.get("visible")),
+        "box": _readonly_box(element.get("box")),
+        "display": str(element.get("display", "")).strip(),
+        "visibilityCss": str(element.get("visibilityCss", "")).strip(),
+        "hidden": _readonly_bool(element.get("hidden")),
+        "ariaHidden": str(element.get("ariaHidden", "")).strip(),
+        "amountTableAnchor": _bounded_str(element.get("amountTableAnchor"), CONTAINER_LABEL_LIMIT),
+        "amountTableInputIndex": _readonly_int(element.get("amountTableInputIndex"), -1),
+        "containerLabel": _bounded_str(element.get("containerLabel"), CONTAINER_LABEL_LIMIT),
+    }
+
 
 def run_selector_discovery(url: str, *, probe_route: str | None = None) -> dict[str, Any]:
     try:
@@ -1743,6 +1809,44 @@ def _collect_selector_elements(
       const className = typeof el.className === 'string' ? el.className : (el.getAttribute('class') || '');
       const parent = el.parentElement;
       const grandparent = parent ? parent.parentElement : null;
+      // --- read-only visibility (no interaction; pure reads) ---
+      const cssStyle = (() => {{ try {{ return window.getComputedStyle(el); }} catch (e) {{ return null; }} }})();
+      let rectBox = {{ w: 0, h: 0, top: 0, left: 0 }};
+      try {{
+        const r = el.getBoundingClientRect();
+        rectBox = {{ w: Math.round(r.width), h: Math.round(r.height), top: Math.round(r.top), left: Math.round(r.left) }};
+      }} catch (e) {{}}
+      const cssDisplay = cssStyle ? cssStyle.display : '';
+      const cssVisibility = cssStyle ? cssStyle.visibility : '';
+      const isVisible = (el.offsetParent !== null) && rectBox.w > 0 && rectBox.h > 0
+                        && cssDisplay !== 'none' && cssVisibility !== 'hidden';
+      // --- amount-table context for input-like fields only ---
+      const tagLower = (el.tagName || '').toLowerCase();
+      const isInputLike = tagLower === 'input' || tagLower === 'select' || tagLower === 'textarea';
+      let amountTableAnchor = '';
+      let amountTableInputIndex = -1;
+      let containerLabel = '';
+      if (isInputLike) {{
+        let node = el.parentElement;
+        let amountTable = null;
+        for (let depth = 0; depth < 6 && node; depth++) {{
+          const nodeText = (node.innerText || node.textContent || '');
+          if (nodeText.indexOf('每碰金額') !== -1) {{
+            amountTable = node;
+            containerLabel = nodeText.slice(0, 120);
+            break;
+          }}
+          node = node.parentElement;
+        }}
+        if (amountTable) {{
+          const anchorClass = (typeof amountTable.className === 'string' ? amountTable.className : '').split(' ')[0];
+          amountTableAnchor = ((amountTable.id || '') || ((amountTable.tagName || '').toLowerCase() + (anchorClass ? '.' + anchorClass : ''))).slice(0, 120);
+          try {{
+            const boxes = Array.from(amountTable.querySelectorAll('input, select, textarea'));
+            amountTableInputIndex = boxes.indexOf(el);
+          }} catch (e) {{ amountTableInputIndex = -1; }}
+        }}
+      }}
       return {{
         tag: (el.tagName || '').toLowerCase(),
         textContent: el.textContent || '',
@@ -1766,6 +1870,15 @@ def _collect_selector_elements(
         parentHTML: parent ? (parent.outerHTML || '').slice(0, 500) : '',
         grandparentText: grandparent ? (grandparent.innerText || grandparent.textContent || '') : '',
         grandparentHTML: grandparent ? (grandparent.outerHTML || '').slice(0, 500) : '',
+        visible: isVisible,
+        box: rectBox,
+        display: cssDisplay,
+        visibilityCss: cssVisibility,
+        hidden: el.hidden === true,
+        ariaHidden: attr('aria-hidden'),
+        amountTableAnchor: amountTableAnchor,
+        amountTableInputIndex: amountTableInputIndex,
+        containerLabel: containerLabel,
         index,
       }};
     }})
@@ -1923,7 +2036,7 @@ def _frame_sample_key(frame: Any, frame_url: str, fallback_name: str) -> str:
 
 def _selector_record(element: dict[str, Any]) -> dict[str, Any]:
     normalized = _normalize_element(element)
-    return {
+    record = {
         "tag": normalized["tag"],
         "text": normalized["text"],
         "textContent": normalized["textContent"],
@@ -1947,13 +2060,22 @@ def _selector_record(element: dict[str, Any]) -> dict[str, Any]:
         "index": normalized["index"],
         "candidate_selectors": build_candidate_selectors(normalized),
     }
+    # Read-only Snapshot Enrichment v1: retain visibility + amount-table context
+    # for input-like fields only. This is captured data, not a mapping decision;
+    # no selector is marked safe and #GroupSet_Value stays an ordinary id record.
+    if normalized["tag"] in INPUT_TAGS:
+        for key in READONLY_ENRICHMENT_KEYS:
+            record[key] = normalized[key]
+        for key in READONLY_CONTEXT_KEYS:
+            record[key] = normalized[key]
+    return record
 
 
 def _normalize_element(element: dict[str, Any]) -> dict[str, Any]:
     text_content = str(element.get("textContent", element.get("text", ""))).strip()
     inner_text = str(element.get("innerText", element.get("text", ""))).strip()
     text = str(element.get("text", inner_text or text_content)).strip()
-    return {
+    normalized = {
         "tag": str(element.get("tag", "")).lower(),
         "text": text,
         "textContent": text_content,
@@ -1968,11 +2090,11 @@ def _normalize_element(element: dict[str, Any]) -> dict[str, Any]:
         "src": str(element.get("src", "")).strip(),
         "alt": str(element.get("alt", "")).strip(),
         "onclick": str(element.get("onclick", "")).strip(),
-        "outerHTML": str(element.get("outerHTML", "")).strip(),
+        "outerHTML": _bounded_str(element.get("outerHTML", ""), READONLY_HTML_LIMIT),
         "parentText": str(element.get("parentText", "")).strip(),
-        "parentHTML": str(element.get("parentHTML", "")).strip(),
+        "parentHTML": _bounded_str(element.get("parentHTML", ""), READONLY_HTML_LIMIT),
         "grandparentText": str(element.get("grandparentText", "")).strip(),
-        "grandparentHTML": str(element.get("grandparentHTML", "")).strip(),
+        "grandparentHTML": _bounded_str(element.get("grandparentHTML", ""), READONLY_HTML_LIMIT),
         "frame_url": str(element.get("frame_url", "")).strip(),
         "source_url": str(element.get("source_url", "")).strip(),
         "source_kind": str(element.get("source_kind", "")).strip(),
@@ -1984,6 +2106,8 @@ def _normalize_element(element: dict[str, Any]) -> dict[str, Any]:
         "page_index": element.get("page_index"),
         "frame_index": element.get("frame_index"),
     }
+    normalized.update(_readonly_enrichment(element))
+    return normalized
 
 
 def _element_search_text(element: dict[str, Any]) -> str:
