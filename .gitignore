@@ -15,6 +15,11 @@ audit_after_next.json
 review.html
 review_after_next.html
 
+selector_report.json
+selector_report*.zip
+selector_report_unzipped/
+manual_mapping_test/
+
 .env
 .env.*
 
