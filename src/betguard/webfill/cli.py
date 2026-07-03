@@ -498,6 +498,12 @@ def main() -> None:
             report = run_selector_discovery(args.url)
     else:
         report = run_dry_run_inspector(args.url)
+    if args.discover_selectors and args.output_path:
+        Path(args.output_path).write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        print(f"Selector report written: {args.output_path}")
+        return
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 
