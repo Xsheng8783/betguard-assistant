@@ -883,15 +883,221 @@ def _base_mapping() -> dict[str, Any]:
 def _map_step(step: dict[str, Any], selector_report: dict[str, Any]) -> dict[str, Any]:
     step_type = step.get("type")
     if step_type == "select_number":
-        candidates = _number_candidates(selector_report).get(str(step.get("label")), [])
+        raw = _number_candidates(selector_report).get(str(step.get("label")), [])
+        candidates = _rank_actionable_candidates(raw, step_type, str(step.get("label")))
     elif step_type == "set_amount":
-        candidates = _amount_candidates(selector_report).get(str(step.get("star")), [])
+        raw = _amount_candidates(selector_report).get(str(step.get("star")), [])
+        candidates = _rank_actionable_candidates(raw, step_type, str(step.get("star")))
     else:
+        raw = []
         candidates = []
     return {
         "plan_step": step,
         "selector_candidates": candidates,
+        "rejected_candidate_count": len(raw) - len(candidates),
     }
+
+
+BROAD_CONTAINER_TAGS = {"html", "head", "body", "script", "style"}
+AMOUNT_INPUT_TAGS = {"input", "select", "textarea"}
+BROAD_AMOUNT_TAGS = {"html", "head", "body", "script", "style", "table", "tbody", "thead", "tr", "div"}
+B03_FRAME_MARKER = "/Front/B/B03"
+BROAD_SELECTOR_PREFIXES = ("text=+++", "text=var $Global", "html:has-text", "head:has-text", "body:has-text")
+MAX_ACTIONABLE_TEXT_LEN = 40
+
+
+def _rank_actionable_candidates(
+    candidates: list[dict[str, Any]],
+    step_type: str,
+    target: str,
+) -> list[dict[str, Any]]:
+    """Drop broad/false-positive candidates and rank precise ones first.
+
+    Read-only: never clicks/fills. Only decides which selectors are precise
+    enough to be considered actionable for a later human-confirmed step.
+    """
+
+    scored: list[tuple[int, int, dict[str, Any]]] = []
+    for index, candidate in enumerate(candidates):
+        if not isinstance(candidate, dict):
+            continue
+        if _candidate_is_broad(candidate, step_type):
+            continue
+        score = _candidate_precision_score(candidate, step_type, target)
+        if score <= 0:
+            continue
+        scored.append((score, -index, candidate))
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [candidate for _, _, candidate in scored]
+
+
+def _candidate_is_broad(candidate: dict[str, Any], step_type: str) -> bool:
+    tag = str(candidate.get("tag", "")).lower()
+    broad_tags = BROAD_AMOUNT_TAGS if step_type == "set_amount" else BROAD_CONTAINER_TAGS
+    if tag in broad_tags:
+        return True
+    selector = _first_selector(candidate)
+    lowered = selector.lower()
+    if any(lowered.startswith(prefix.lower()) for prefix in BROAD_SELECTOR_PREFIXES):
+        return True
+    if selector.startswith("text=") and len(selector) > MAX_ACTIONABLE_TEXT_LEN + 5:
+        return True
+    return False
+
+
+def _candidate_precision_score(candidate: dict[str, Any], step_type: str, target: str) -> int:
+    score = 0
+    tag = str(candidate.get("tag", "")).lower()
+    in_b03 = B03_FRAME_MARKER in str(candidate.get("frame_url", ""))
+    if in_b03:
+        score += 3
+
+    if step_type == "select_number":
+        exact = any(
+            str(candidate.get(field, "")).strip() == target
+            for field in ("text", "innerText", "value")
+        )
+        if exact:
+            score += 5
+        else:
+            matched = str(candidate.get("matched_value", "")).strip()
+            if matched == target:
+                score += 2
+        if tag in BROAD_CONTAINER_TAGS:
+            return 0
+        if _first_selector(candidate):
+            score += 1
+        return score if (exact or in_b03) else 0
+
+    if step_type == "set_amount":
+        # Broad containers already dropped in _candidate_is_broad. Input-like
+        # fields are strongly preferred; other actionable tags stay usable.
+        score += 5 if tag in AMOUNT_INPUT_TAGS else 1
+        if any(marker in _candidate_text(candidate) for marker in (target, target.replace("星", ""))):
+            score += 2
+        return score
+
+    return 0
+
+
+def _first_selector(candidate: dict[str, Any]) -> str:
+    selectors = candidate.get("candidate_selectors")
+    if isinstance(selectors, list) and selectors:
+        return str(selectors[0])
+    for key in ("text", "value", "id", "name"):
+        if candidate.get(key):
+            return str(candidate[key])
+    return ""
+
+
+def _candidate_text(candidate: dict[str, Any]) -> str:
+    return "\n".join(
+        str(candidate.get(field, ""))
+        for field in ("text", "innerText", "value", "name", "id", "matched_value")
+    )
+
+
+def _candidate_selector_list(candidate: dict[str, Any]) -> list[str]:
+    """Ordered list of concrete selector strings for a candidate.
+
+    Falls back to identity fields when no explicit ``candidate_selectors`` are
+    present, matching how the report used to pick a "best" selector.
+    """
+
+    selectors = candidate.get("candidate_selectors")
+    if isinstance(selectors, list):
+        cleaned = [str(item) for item in selectors if str(item).strip()]
+        if cleaned:
+            return cleaned
+    fallback: list[str] = []
+    for key in ("text", "value", "id", "name"):
+        value = candidate.get(key)
+        if value:
+            fallback.append(str(value))
+    return fallback
+
+
+def _selector_string_is_broad(selector: str) -> bool:
+    text = str(selector or "")
+    lowered = text.lower()
+    if any(lowered.startswith(prefix.lower()) for prefix in BROAD_SELECTOR_PREFIXES):
+        return True
+    if text.startswith("text=") and len(text) > MAX_ACTIONABLE_TEXT_LEN + 5:
+        return True
+    return False
+
+
+def _selector_targets_label(selector: str, target: str) -> bool:
+    """True when ``selector`` provably targets the exact ``target`` label.
+
+    Generic class-only selectors (``td.selectline2``) return False because they
+    could match any sibling cell; only exact-text selectors, ``:has-text``
+    scoping, or id/attribute selectors carrying the label token qualify.
+    """
+
+    text = str(selector or "").strip()
+    label = str(target or "").strip()
+    if not text or not label:
+        return False
+    if text in {f"text={label}", f'text="{label}"'}:
+        return True
+    if f'has-text("{label}")' in text or f"has-text('{label}')" in text:
+        return True
+    if label in text and (text.startswith("#") or "[" in text):
+        return True
+    return False
+
+
+def _amount_selector_is_specific(selector: str, star: str) -> bool:
+    """True when an amount selector is unique enough to trust for a star.
+
+    Plain class selectors such as ``input.BDAll`` are shared across every star
+    field, so only id/name/attribute selectors or star-scoped text selectors
+    count as specific.
+    """
+
+    text = str(selector or "").strip()
+    if not text:
+        return False
+    if text.startswith("#"):
+        return True
+    if "[" in text and ("id=" in text or "name=" in text):
+        return True
+    return _selector_targets_label(text, star)
+
+
+def resolve_final_selector(candidate: dict[str, Any], step: dict[str, Any]) -> tuple[str, bool]:
+    """Pick the final selector for a step, preferring label/star-specific forms.
+
+    Returns ``(selector, unique)`` where ``unique`` reports whether the chosen
+    selector is provably specific to the requested number/star. Read-only: it
+    never synthesizes selectors that were not discovered, so a candidate that
+    only carries a generic class selector stays generic (and ``unique=False``).
+    """
+
+    selectors = _candidate_selector_list(candidate)
+    non_broad = [selector for selector in selectors if not _selector_string_is_broad(selector)]
+    step_type = step.get("type")
+
+    if step_type == "select_number":
+        target = str(step.get("label") or "")
+        for selector in non_broad:
+            if _selector_targets_label(selector, target):
+                return selector, True
+        if non_broad:
+            return non_broad[0], False
+        return (selectors[0] if selectors else ""), False
+
+    if step_type == "set_amount":
+        star = str(step.get("star") or "")
+        for selector in non_broad:
+            if _amount_selector_is_specific(selector, star):
+                return selector, True
+        if non_broad:
+            return non_broad[0], False
+        return (selectors[0] if selectors else ""), False
+
+    return (selectors[0] if selectors else ""), False
 
 
 def _missing_for_step(step: dict[str, Any]) -> dict[str, Any] | None:

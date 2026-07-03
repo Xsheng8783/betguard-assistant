@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from betguard.webfill.fill_mapping import build_dry_run_mapping
+from betguard.webfill.fill_mapping import build_dry_run_mapping, resolve_final_selector
 from betguard.webfill.fill_plan import FORBIDDEN_STEPS
 
 
@@ -24,7 +24,14 @@ def build_mapping_report(
             missing.append({"type": "danger", "reason": "danger buttons not verified"})
 
     actions = [_action_from_mapped_step(item) for item in mapping.get("mapped_steps", [])]
-    blocked = bool(errors) or bool(missing) or not mapping.get("can_map_all_required_fields")
+    _apply_selector_guards(actions, missing, warnings)
+    unfound = any(not action["selector_found"] for action in actions)
+    blocked = (
+        bool(errors)
+        or bool(missing)
+        or unfound
+        or not mapping.get("can_map_all_required_fields")
+    )
     status = "BLOCKED" if blocked else "SAFE"
 
     return {
@@ -32,6 +39,7 @@ def build_mapping_report(
         "status": status,
         "market": _market_summary(selector_report),
         "actions": actions,
+        "actions_summary": [_action_summary(action) for action in actions],
         "missing": missing,
         "danger_check": {
             "danger_candidates_found": danger_verified,
@@ -111,24 +119,147 @@ def format_pretty_mapping_report(report: dict[str, Any]) -> str:
 def _action_from_mapped_step(item: dict[str, Any]) -> dict[str, Any]:
     candidates = list(item.get("selector_candidates") or [])
     first = candidates[0] if candidates else {}
+    step = item.get("plan_step", {})
+    if candidates:
+        selector, unique = resolve_final_selector(first, step)
+    else:
+        selector, unique = "", False
     return {
-        "plan_step": item.get("plan_step", {}),
+        "plan_step": step,
         "selector_found": bool(candidates),
-        "selector": _best_selector(first),
+        "selector": selector,
         "frame": first.get("frame_name") or first.get("frame_url") or "",
-        "confidence": _confidence(first),
+        "confidence": _confidence_for(first, step, selector, unique) if candidates else "blocked",
+        "unique_selector": unique,
+        "selector_unsafe": False,
+        "rejected_candidate_count": int(item.get("rejected_candidate_count", 0) or 0),
         "selector_candidates": candidates,
     }
 
 
-def _best_selector(candidate: dict[str, Any]) -> str:
-    selectors = candidate.get("candidate_selectors")
-    if isinstance(selectors, list) and selectors:
-        return str(selectors[0])
-    for key in ("text", "value", "id", "name"):
-        if candidate.get(key):
-            return str(candidate[key])
-    return ""
+def _apply_selector_guards(
+    actions: list[dict[str, Any]],
+    missing: list[dict[str, Any]],
+    warnings: list[str],
+) -> None:
+    """Block actions whose final selector cannot be proven unique.
+
+    Two independent checks, both read-only:
+    1. Per-action specificity: a select_number/set_amount whose final selector is
+       only a generic class (e.g. ``td.selectline2``/``input.BDAll``) is unsafe.
+    2. Cross-action uniqueness: if two different numbers/stars resolve to the
+       exact same selector, none of them can be trusted.
+    """
+
+    for action in actions:
+        step = action.get("plan_step", {})
+        if step.get("type") not in {"select_number", "set_amount"}:
+            continue
+        if not action.get("selector_found"):
+            continue
+        if action.get("unique_selector"):
+            continue
+        _mark_action_unsafe(action, missing, warnings, reason="not-specific")
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for action in actions:
+        step = action.get("plan_step", {})
+        if step.get("type") not in {"select_number", "set_amount"}:
+            continue
+        if not action.get("selector_found"):
+            continue
+        selector = str(action.get("selector") or "")
+        if not selector:
+            continue
+        grouped.setdefault(selector, []).append(action)
+
+    for selector, group in grouped.items():
+        targets = sorted({str(_action_target(action)) for action in group})
+        if len(targets) <= 1:
+            continue
+        for action in group:
+            _mark_action_unsafe(action, missing, warnings, reason="shared")
+        _append_once(
+            warnings,
+            f"selector '{selector}' maps to multiple targets ({', '.join(targets)}); not unique",
+        )
+
+
+def _mark_action_unsafe(
+    action: dict[str, Any],
+    missing: list[dict[str, Any]],
+    warnings: list[str],
+    *,
+    reason: str,
+) -> None:
+    action["confidence"] = "low"
+    action["selector_unsafe"] = True
+    step = action.get("plan_step", {})
+    selector = action.get("selector") or ""
+    if step.get("type") == "select_number":
+        label = step.get("label")
+        if reason == "shared":
+            detail = "selector shared by multiple numbers"
+            warning = f"number {label} selector '{selector}' is shared by another number; not unique"
+        else:
+            detail = "selector not label-specific"
+            warning = (
+                f"number {label} selector '{selector}' is not unique to {label}; "
+                "prefer exact text such as text=" + str(label)
+            )
+        _append_missing(missing, {"type": "number", "label": label, "reason": detail})
+    else:
+        star = step.get("star")
+        if reason == "shared":
+            detail = "selector shared by multiple amount fields"
+            warning = f"amount {star} selector '{selector}' is shared by another field; not unique"
+        else:
+            detail = "selector not star-specific"
+            warning = f"amount {star} selector '{selector}' is not proven unique; prefer id/name"
+        _append_missing(missing, {"type": "amount", "star": star, "reason": detail})
+    _append_once(warnings, warning)
+
+
+def _action_target(action: dict[str, Any]) -> Any:
+    step = action.get("plan_step", {})
+    if step.get("type") == "set_amount":
+        return step.get("star")
+    return step.get("label")
+
+
+def _append_missing(missing: list[dict[str, Any]], item: dict[str, Any]) -> None:
+    if item not in missing:
+        missing.append(item)
+
+
+def _confidence_for(
+    candidate: dict[str, Any],
+    step: dict[str, Any],
+    selector: str,
+    unique: bool,
+) -> str:
+    if step.get("type") in {"select_number", "set_amount"}:
+        if not selector:
+            return "low"
+        return "high" if unique else "low"
+    return _confidence(candidate)
+
+
+def _action_summary(action: dict[str, Any]) -> dict[str, Any]:
+    step = action.get("plan_step", {})
+    if step.get("type") == "set_amount":
+        label = f"{step.get('star')} {step.get('amount')}".strip()
+    else:
+        label = str(step.get("label", ""))
+    return {
+        "type": step.get("type"),
+        "label": label,
+        "selector_found": action.get("selector_found"),
+        "selector": action.get("selector") or "",
+        "frame": action.get("frame") or "",
+        "confidence": action.get("confidence") or "blocked",
+        "rejected_candidate_count": action.get("rejected_candidate_count", 0),
+    }
 
 
 def _confidence(candidate: dict[str, Any]) -> str:
@@ -167,9 +298,14 @@ def _market_summary(selector_report: dict[str, Any]) -> dict[str, Any]:
 
 
 def _format_missing(item: dict[str, Any]) -> str:
+    reason = item.get("reason")
     if item.get("type") == "number":
+        if reason:
+            return f"number {item.get('label')}: {reason}"
         return f"number {item.get('label')} selector missing"
     if item.get("type") == "amount":
+        if reason:
+            return f"amount field {item.get('star')}: {reason}"
         return f"amount field {item.get('star')} missing"
     if item.get("type") == "danger":
         return "danger buttons not verified"

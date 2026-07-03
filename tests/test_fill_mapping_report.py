@@ -131,3 +131,259 @@ def test_report_can_accept_prebuilt_mapping_result() -> None:
     report = build_mapping_report(plan, selector_report, mapping_result=mapping)
 
     assert report["status"] == "SAFE"
+
+
+# --- Selector Quality Guard / Precise Mapping v1 ---
+
+B03_FRAME_URL = "https://w1.gts362.com/token/Front/B/B03"
+INDEX_FRAME_URL = "https://w1.gts362.com/token/Front/Shared/Index"
+
+
+def broad_html_candidate(target: str) -> dict:
+    return {
+        "tag": "html",
+        "text": f"+++ var $Global = {{...huge page text containing {target} and much more...}}",
+        "frame_name": "mainFrame",
+        "frame_url": INDEX_FRAME_URL,
+        "candidate_selectors": ["text=+++ var $Global = {...}", "html:has-text(\"06\")"],
+    }
+
+
+def precise_number_candidate(target: str) -> dict:
+    return {
+        "tag": "td",
+        "text": target,
+        "innerText": target,
+        "frame_name": "mainFrame",
+        "frame_url": B03_FRAME_URL,
+        "candidate_selectors": [f"text={target}", f"td[id=\"num{target}\"]"],
+    }
+
+
+def broad_only_selector_report(plan: dict) -> dict:
+    report = selector_report_for(plan)
+    report["number_candidates"] = {
+        number: [broad_html_candidate(number)] for number in plan.get("numbers", [])
+    }
+    return report
+
+
+def test_broad_html_candidate_is_rejected_precise_b03_accepted() -> None:
+    plan = normal_fill_plan()
+    selector_report = selector_report_for(plan)
+    # For 06: a broad html candidate first, then the precise B03 element.
+    selector_report["number_candidates"]["06"] = [
+        broad_html_candidate("06"),
+        precise_number_candidate("06"),
+    ]
+
+    report = build_mapping_report(plan, selector_report)
+
+    action = next(a for a in report["actions"] if a["plan_step"].get("label") == "06")
+    assert action["selector_found"] is True
+    assert action["selector"] == "text=06"
+    assert action["frame"] == "mainFrame"
+    assert action["rejected_candidate_count"] == 1
+    assert "$Global" not in action["selector"]
+    assert "html:has-text" not in action["selector"]
+
+
+def test_broad_only_number_candidates_force_blocked() -> None:
+    plan = normal_fill_plan()
+    report = build_mapping_report(plan, broad_only_selector_report(plan))
+
+    assert report["status"] == "BLOCKED"
+    action = next(a for a in report["actions"] if a["plan_step"].get("label") == "06")
+    assert action["selector_found"] is False
+    assert action["confidence"] == "blocked"
+    assert {"type": "number", "label": "06"} in report["missing"]
+
+
+def test_amount_prefers_input_over_broad_container() -> None:
+    plan = normal_fill_plan()
+    selector_report = selector_report_for(plan)
+    first_star = plan["stars"][0]
+    selector_report["amount_field_candidates"][first_star] = [
+        {
+            "tag": "div",
+            "text": first_star,
+            "frame_url": B03_FRAME_URL,
+            "candidate_selectors": ["div.amount-wrap"],
+        },
+        {
+            "tag": "input",
+            "name": f"{first_star}_amount",
+            "text": first_star,
+            "frame_url": B03_FRAME_URL,
+            "candidate_selectors": [f"input[name=\"{first_star}_amount\"]"],
+        },
+    ]
+
+    report = build_mapping_report(plan, selector_report)
+
+    action = next(
+        a for a in report["actions"]
+        if a["plan_step"].get("type") == "set_amount" and a["plan_step"].get("star") == first_star
+    )
+    assert action["selector_found"] is True
+    assert action["selector"] == f"input[name=\"{first_star}_amount\"]"
+    assert action["rejected_candidate_count"] == 1
+
+
+def test_amount_broad_only_container_blocks_report() -> None:
+    plan = normal_fill_plan()
+    selector_report = selector_report_for(plan)
+    first_star = plan["stars"][0]
+    selector_report["amount_field_candidates"][first_star] = [
+        {
+            "tag": "table",
+            "text": first_star,
+            "frame_url": B03_FRAME_URL,
+            "candidate_selectors": ["table.bet-grid"],
+        }
+    ]
+
+    report = build_mapping_report(plan, selector_report)
+
+    assert report["status"] == "BLOCKED"
+    assert {"type": "amount", "star": first_star} in report["missing"]
+
+
+# --- Selector Uniqueness / Precise Text Guard v2 ---
+
+
+def class_only_number_candidate(target: str) -> dict:
+    """A generic td.selectline2 cell shared by every number (no unique proof)."""
+    return {
+        "tag": "td",
+        "text": target,
+        "innerText": target,
+        "frame_name": "mainFrame",
+        "frame_url": B03_FRAME_URL,
+        "candidate_selectors": ["td.selectline2"],
+    }
+
+
+def test_class_only_selector_shared_by_two_numbers_is_not_safe() -> None:
+    plan = normal_fill_plan()
+    selector_report = selector_report_for(plan)
+    # 06 and 13 both collapse to the same generic td.selectline2 selector.
+    selector_report["number_candidates"]["06"] = [class_only_number_candidate("06")]
+    selector_report["number_candidates"]["13"] = [class_only_number_candidate("13")]
+
+    report = build_mapping_report(plan, selector_report)
+
+    assert report["status"] == "BLOCKED"
+    action_06 = next(a for a in report["actions"] if a["plan_step"].get("label") == "06")
+    action_13 = next(a for a in report["actions"] if a["plan_step"].get("label") == "13")
+    # Both must be flagged; they must NOT both be reported as safe/high confidence.
+    assert action_06["selector_unsafe"] is True
+    assert action_13["selector_unsafe"] is True
+    assert action_06["confidence"] == "low"
+    assert action_13["confidence"] == "low"
+    assert {"type": "number", "label": "06", "reason": "selector shared by multiple numbers"} in report["missing"]
+    assert {"type": "number", "label": "13", "reason": "selector shared by multiple numbers"} in report["missing"]
+
+
+def test_precise_exact_text_selector_for_number_is_accepted() -> None:
+    plan = normal_fill_plan()
+    selector_report = selector_report_for(plan)
+    selector_report["number_candidates"]["06"] = [precise_number_candidate("06")]
+
+    report = build_mapping_report(plan, selector_report)
+
+    action_06 = next(a for a in report["actions"] if a["plan_step"].get("label") == "06")
+    assert action_06["selector"] == "text=06"
+    assert action_06["selector_found"] is True
+    assert action_06["unique_selector"] is True
+    assert action_06["selector_unsafe"] is False
+    assert action_06["confidence"] == "high"
+
+
+def test_generic_class_only_number_selector_is_blocked() -> None:
+    plan = normal_fill_plan()
+    selector_report = selector_report_for(plan)
+    # Only 06 is generic; the rest keep their precise text= selectors.
+    selector_report["number_candidates"]["06"] = [class_only_number_candidate("06")]
+
+    report = build_mapping_report(plan, selector_report)
+
+    assert report["status"] == "BLOCKED"
+    action_06 = next(a for a in report["actions"] if a["plan_step"].get("label") == "06")
+    assert action_06["selector"] == "td.selectline2"
+    assert action_06["unique_selector"] is False
+    assert action_06["selector_unsafe"] is True
+    assert action_06["confidence"] == "low"
+    assert {"type": "number", "label": "06", "reason": "selector not label-specific"} in report["missing"]
+
+
+def test_real_number_cell_prefers_text_selector_over_class() -> None:
+    plan = normal_fill_plan()
+    selector_report = selector_report_for(plan)
+    # Mirrors build_candidate_selectors output: class first, exact text after.
+    selector_report["number_candidates"]["06"] = [
+        {
+            "tag": "td",
+            "text": "06",
+            "innerText": "06",
+            "frame_name": "mainFrame",
+            "frame_url": B03_FRAME_URL,
+            "candidate_selectors": ["td.selectline2", "text=06", 'td:has-text("06")'],
+        }
+    ]
+
+    report = build_mapping_report(plan, selector_report)
+
+    action_06 = next(a for a in report["actions"] if a["plan_step"].get("label") == "06")
+    assert action_06["selector"] == "text=06"
+    assert action_06["unique_selector"] is True
+    assert action_06["selector_unsafe"] is False
+
+
+def test_amount_shared_generic_input_class_is_rejected() -> None:
+    plan = normal_fill_plan()
+    selector_report = selector_report_for(plan)
+    # Every star field collapses to the same generic input.BDAll selector.
+    for star in plan.get("stars", []):
+        selector_report["amount_field_candidates"][star] = [
+            {
+                "tag": "input",
+                "text": star,
+                "frame_url": B03_FRAME_URL,
+                "candidate_selectors": ["input.BDAll"],
+            }
+        ]
+
+    report = build_mapping_report(plan, selector_report)
+
+    assert report["status"] == "BLOCKED"
+    first_star = plan["stars"][0]
+    action = next(
+        a for a in report["actions"]
+        if a["plan_step"].get("type") == "set_amount" and a["plan_step"].get("star") == first_star
+    )
+    assert action["unique_selector"] is False
+    assert action["selector_unsafe"] is True
+    assert action["confidence"] == "low"
+    assert any(
+        item.get("type") == "amount" and item.get("star") == first_star and item.get("reason")
+        for item in report["missing"]
+    )
+
+
+def test_actions_summary_is_compact_without_candidate_dump() -> None:
+    plan = normal_fill_plan()
+    report = build_mapping_report(plan, selector_report_for(plan))
+
+    assert report["actions_summary"]
+    for entry in report["actions_summary"]:
+        assert set(entry) == {
+            "type",
+            "label",
+            "selector_found",
+            "selector",
+            "frame",
+            "confidence",
+            "rejected_candidate_count",
+        }
+        assert "selector_candidates" not in entry
