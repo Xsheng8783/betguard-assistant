@@ -63,6 +63,13 @@ from betguard.webfill.review_console import (
     write_review_console_html,
 )
 from betguard.webfill.selector_discovery import run_selector_discovery, run_selector_route_probe
+from betguard.webfill.site_profile import (
+    build_site_profile,
+    format_pretty_site_profile_validation,
+    load_site_profile,
+    save_site_profile,
+    validate_site_profile,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -77,6 +84,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--mock-assisted-fill", action="store_true", help="Run assisted fill against the local mock page only")
     parser.add_argument("--map-dry-run", action="store_true", help="Build an offline assisted fill mapping report")
+    parser.add_argument("--save-site-profile", action="store_true", help="Convert a local selector_report JSON into a local site_profile JSON")
+    parser.add_argument("--site-profile-report", action="store_true", help="Read a local site_profile JSON and print a validation report")
     parser.add_argument("--dry-run-pipeline", action="store_true", help="Run the offline assisted fill dry-run pipeline")
     parser.add_argument("--build-batch-queue", action="store_true", help="Build a batch assisted fill queue from reviewed text")
     parser.add_argument("--batch-mock-run", action="store_true", help="Run a batch assisted fill queue against the local mock page")
@@ -108,6 +117,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fill-plan", dest="fill_plan_path", help="Read an assisted fill plan JSON file")
     parser.add_argument("--queue", dest="queue_path", help="Read a batch queue JSON file")
     parser.add_argument("--selector-report", help="Read a selector discovery JSON report file")
+    parser.add_argument("--profile", dest="profile_path", help="Read a local site_profile JSON file")
+    parser.add_argument("--site-name", help="Site name to record in a saved site_profile")
+    parser.add_argument("--page-name", help="Page name to record in a saved site_profile")
+    parser.add_argument("--captured-at", help="Optional capture timestamp to record in a saved site_profile")
     parser.add_argument("--out", dest="output_path", help="Output path for JSON export commands")
     parser.add_argument("--out-dir", dest="output_dir", help="Output directory for demo packs")
     parser.add_argument("--overwrite", action="store_true", help="Allow overwriting an existing queue output file")
@@ -390,6 +403,36 @@ def main() -> None:
             print(format_pretty_mock_report(report))
         else:
             print(json.dumps(report, ensure_ascii=False, indent=2))
+        return
+
+    if args.save_site_profile:
+        if not args.selector_report or not args.output_path or not args.site_name or not args.page_name:
+            parser.error("--save-site-profile requires --selector-report, --out, --site-name, and --page-name")
+        selector_report = json.loads(Path(args.selector_report).read_text(encoding="utf-8"))
+        profile = build_site_profile(
+            selector_report,
+            site_name=args.site_name,
+            page_name=args.page_name,
+            captured_at=args.captured_at,
+        )
+        save_site_profile(profile, args.output_path)
+        if args.pretty:
+            validation = validate_site_profile(profile)
+            print(format_pretty_site_profile_validation(profile, validation))
+            print(f"Site profile written: {args.output_path}")
+        else:
+            print(json.dumps(profile, ensure_ascii=False, indent=2))
+        return
+
+    if args.site_profile_report:
+        if not args.profile_path:
+            parser.error("--site-profile-report requires --profile")
+        profile = load_site_profile(args.profile_path)
+        validation = validate_site_profile(profile)
+        if args.pretty:
+            print(format_pretty_site_profile_validation(profile, validation))
+        else:
+            print(json.dumps(validation, ensure_ascii=False, indent=2))
         return
 
     if args.map_dry_run:

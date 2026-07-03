@@ -116,3 +116,31 @@ def profile_as_selector_report(profile: dict[str, Any]) -> dict[str, Any]:
 
 def _found_count(candidates: dict[str, Any]) -> int:
     return len([label for label, records in candidates.items() if records])
+
+
+def format_pretty_site_profile_validation(profile: dict[str, Any], validation: dict[str, Any]) -> str:
+    metadata = profile.get("metadata") if isinstance(profile.get("metadata"), dict) else {}
+    lines = [
+        "Site Profile Validation",
+        "",
+        f"Site: {profile.get('site_name') or ''}",
+        f"Page: {profile.get('page_name') or ''}",
+        f"Captured at: {profile.get('captured_at') or ''}",
+        "",
+        "Counts:",
+        f"- number candidates: {metadata.get('number_count', 0)}",
+        f"- amount field candidates: {metadata.get('amount_field_count', 0)}",
+        f"- danger candidates: {metadata.get('danger_candidate_count', 0)}",
+        "",
+        f"Status: {validation.get('status', STATUS_BLOCKED)}",
+    ]
+
+    if validation.get("errors"):
+        lines.extend(["", "Errors:"])
+        lines.extend(f"- {error}" for error in validation["errors"])
+
+    if validation.get("warnings"):
+        lines.extend(["", "Warnings:"])
+        lines.extend(f"- {warning}" for warning in validation["warnings"])
+
+    return "\n".join(lines)
