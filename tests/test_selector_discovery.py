@@ -1,6 +1,7 @@
 from betguard.webfill.selector_discovery import (
     build_candidate_selectors,
     build_market_state,
+    build_route_probe_report,
     build_selector_discovery_report,
     build_route_url,
     detect_login_page,
@@ -16,6 +17,204 @@ from betguard.webfill.selector_discovery import (
     resolve_frame_src,
     should_scan_frame_src,
 )
+
+
+AUTHENTICATED_B03_HTML = (
+    "<html><head><script>"
+    "$Global.GameID = 13;"
+    "$Global.Auth = 1;"
+    "</script></head><body>"
+    "-539 已開盤- "
+    "帳號 密碼 下載Chrome"
+    "</body></html>"
+)
+
+
+def _b03_number_board_elements() -> list[dict]:
+    numbers = [element(tag="td", text=f"{n:02d}") for n in range(1, 40)]
+    inputs = [
+        element(tag="input", name="twoStar"),
+        element(tag="input", name="threeStar"),
+        element(tag="input", name="fourStar"),
+    ]
+    danger = [element(tag="button", text="送出")]
+    return numbers + inputs + danger
+
+
+def _authenticated_b03_route_page_scan(*, gated_elements: list[dict]) -> dict:
+    raw_elements = _b03_number_board_elements()
+    return {
+        "resolved_url": "https://w1.gts362.com/token/Front/B/B03",
+        "actual_url": "https://w1.gts362.com/token/Front/B/B03",
+        "title": "539",
+        "origin_source": "frame_elements.frame_url",
+        "gid_source": "active_url",
+        "probe_method": "mainFrame",
+        "status_code": 200,
+        "scan": {
+            "text_sources": ["-539 已開盤- 帳號 密碼 下載Chrome"],
+            "html_sources": [AUTHENTICATED_B03_HTML],
+            "elements": list(gated_elements),
+            "raw_elements": raw_elements,
+            "live_frames": [
+                {
+                    "name": "mainFrame",
+                    "url": "https://w1.gts362.com/token/Front/B/B03",
+                    "element_count": len(raw_elements),
+                    "appears_login_page": True,
+                }
+            ],
+            "elements_sample_by_frame": {"mainFrame | b03": raw_elements[:20]},
+        },
+    }
+
+
+def test_authenticated_b03_with_login_words_is_not_login_page() -> None:
+    board = _b03_number_board_elements()
+    report = build_route_probe_report(
+        url="http://www.gts362.com",
+        active_url="https://w1.gts362.com/token/Front/Shared/Index",
+        route_name="二三四星",
+        global_config={"routes": {"二三四星": "/Front/B/B03"}, "game_id": 12},
+        route_page_scan=_authenticated_b03_route_page_scan(gated_elements=board),
+    )
+
+    assert report["route_probe"]["appears_login_page"] is False
+    assert report["number_candidates_count"] == 39
+    assert report["route_probe_elements"] != []
+    assert all(report["amount_field_candidates"][marker] for marker in ("二星", "三星", "四星"))
+    assert report["danger_candidates"] != []
+    assert "safe_to_continue" not in report
+    assert "download Chrome banner detected; not treated as login page" in report["warnings"]
+
+    gate_before = report["route_probe_gate_before"]
+    assert gate_before["raw_elements_count"] == 43
+    assert gate_before["raw_number_candidates_count"] == 39
+    assert gate_before["route_probe_global_game_id_from_b03"] == 13
+    assert gate_before["route_probe_auth_from_b03"] == 1
+    assert gate_before["appears_login_page_before_gate"] is False
+
+
+def _real_login_page_scan() -> dict:
+    login_html = (
+        "<html><body><form>"
+        "帳號 <input type=\"text\" name=\"user\">"
+        "密碼 <input type=\"password\" name=\"pass\">"
+        "<div>登入</div><div>下載Chrome</div>"
+        "</form></body></html>"
+    )
+    login_elements = [
+        element(tag="input", type="text", name="user"),
+        element(tag="input", type="password", name="pass"),
+    ]
+    return {
+        "resolved_url": "https://www.gts362.com/Front/Shared/Login",
+        "actual_url": "https://www.gts362.com/Front/Shared/Login",
+        "title": "登入",
+        "origin_source": "active_page.url",
+        "gid_source": "",
+        "probe_method": "mainFrame",
+        "status_code": 200,
+        "scan": {
+            "text_sources": ["帳號 密碼 登入 下載Chrome"],
+            "html_sources": [login_html],
+            "elements": list(login_elements),
+            "raw_elements": list(login_elements),
+            "live_frames": [
+                {
+                    "name": "mainFrame",
+                    "url": "https://www.gts362.com/Front/Shared/Login",
+                    "element_count": len(login_elements),
+                    "appears_login_page": True,
+                }
+            ],
+            "elements_sample_by_frame": {},
+        },
+    }
+
+
+def test_real_login_page_with_password_input_is_still_login() -> None:
+    report = build_route_probe_report(
+        url="http://www.gts362.com",
+        active_url="https://www.gts362.com/Front/Shared/Index",
+        route_name="二三四星",
+        global_config={"routes": {"二三四星": "/Front/B/B03"}, "game_id": 12},
+        route_page_scan=_real_login_page_scan(),
+    )
+
+    assert report["route_probe"]["appears_login_page"] is True
+    assert report["number_candidates_count"] == 0
+    assert report["route_probe_elements"] == []
+    assert not any(report["amount_field_candidates"].values())
+    assert report["danger_candidates"] == []
+    assert report["route_probe_gate_before"]["appears_login_page_before_gate"] is True
+
+
+def test_gate_before_game_id_and_auth_come_from_b03_frame_not_index() -> None:
+    scan = _authenticated_b03_route_page_scan(gated_elements=_b03_number_board_elements())
+    index_html = "<html><script>$Global.GameID = 12;$Global.Auth = 0;</script></html>"
+    scan["scan"]["html_sources"] = [index_html, AUTHENTICATED_B03_HTML]
+    scan["scan"]["frame_html_sources"] = [
+        {
+            "frame_url": "https://w1.gts362.com/token/Front/Shared/Index",
+            "frame_name": "",
+            "html": index_html,
+        },
+        {
+            "frame_url": "https://w1.gts362.com/token/Front/B/B03",
+            "frame_name": "mainFrame",
+            "html": AUTHENTICATED_B03_HTML,
+        },
+    ]
+
+    report = build_route_probe_report(
+        url="http://www.gts362.com",
+        active_url="https://w1.gts362.com/token/Front/Shared/Index",
+        route_name="二三四星",
+        global_config={"routes": {"二三四星": "/Front/B/B03"}, "game_id": 12},
+        route_page_scan=scan,
+    )
+
+    gate_before = report["route_probe_gate_before"]
+    assert gate_before["route_probe_global_game_id_from_b03"] == 13
+    assert gate_before["route_probe_auth_from_b03"] == 1
+
+
+def test_route_probe_gate_before_does_not_flip_safe_to_continue_or_safety() -> None:
+    report = build_route_probe_report(
+        url="http://www.gts362.com",
+        active_url="https://w1.gts362.com/token/Front/Shared/Index",
+        route_name="二三四星",
+        global_config={"routes": {"二三四星": "/Front/B/B03"}, "game_id": 12},
+        route_page_scan=_authenticated_b03_route_page_scan(gated_elements=[]),
+    )
+
+    # Diagnostics-only: it must not introduce any go-ahead / real-site signal.
+    assert "safe_to_continue" not in report
+    assert report["route_probe_gate_before"]["route_probe_auth_from_b03"] == 1
+    assert "read-only diagnostics" in report["route_probe_gate_before"]["note"]
+
+
+def test_route_probe_gate_before_matches_primary_when_not_login() -> None:
+    scan = _authenticated_b03_route_page_scan(gated_elements=_b03_number_board_elements())
+    # Remove login markers so the page is not classified as login.
+    scan["scan"]["text_sources"] = ["-539 已開盤-"]
+    scan["scan"]["html_sources"] = ["<html><script>$Global.GameID = 13;$Global.Auth = 1;</script></html>"]
+    scan["scan"]["live_frames"][0]["appears_login_page"] = False
+
+    report = build_route_probe_report(
+        url="http://www.gts362.com",
+        active_url="https://w1.gts362.com/token/Front/Shared/Index",
+        route_name="二三四星",
+        global_config={"routes": {"二三四星": "/Front/B/B03"}, "game_id": 12},
+        route_page_scan=scan,
+    )
+
+    assert report["route_probe"]["appears_login_page"] is False
+    assert report["number_candidates_count"] == 39
+    gate_before = report["route_probe_gate_before"]
+    assert gate_before["raw_number_candidates_count"] == report["number_candidates_count"]
+    assert gate_before["appears_login_page_before_gate"] is False
 
 
 def element(**overrides) -> dict:
@@ -217,7 +416,14 @@ def test_frame_src_login_page_elements_are_ignored() -> None:
                 text="\u5e33\u865f \u5bc6\u78bc \u767b\u5165 \u4e0b\u8f09Chrome 01",
                 source_kind="frame_src_page",
                 frame_url="http://w0.gts362.com/login",
-            )
+            ),
+            element(
+                tag="input",
+                type="password",
+                name="pass",
+                source_kind="frame_src_page",
+                frame_url="http://w0.gts362.com/login",
+            ),
         ],
         live_frames=[
             {
@@ -446,5 +652,34 @@ def test_can_probe_true_missing_numbers_emits_expected_39_warning() -> None:
 
 
 def test_detect_login_page_markers() -> None:
-    assert detect_login_page("\u5e33\u865f \u5bc6\u78bc \u767b\u5165 \u4e0b\u8f09Chrome") is True
+    # Text markers alone (menus, change-password links, Chrome banner) are no
+    # longer enough; a real password input is required.
+    assert detect_login_page("\u5e33\u865f \u5bc6\u78bc \u767b\u5165 \u4e0b\u8f09Chrome") is False
+    assert (
+        detect_login_page(
+            "\u5e33\u865f \u5bc6\u78bc \u767b\u5165 \u4e0b\u8f09Chrome",
+            '<form><input type="password"></form>',
+        )
+        is True
+    )
     assert detect_login_page("539 \u4e8c\u4e09\u56db\u661f 01 02 03") is False
+
+
+def test_authenticated_bet_page_signals_override_login_markers() -> None:
+    # Auth=1 wins even when a password input exists (e.g. change-password form
+    # inside the logged-in shell).
+    assert (
+        detect_login_page(
+            "\u5e33\u865f \u5bc6\u78bc \u4e0b\u8f09Chrome",
+            '<script>$Global.Auth = 1;</script><input type="password">',
+        )
+        is False
+    )
+    # /Front/B/B03 marker also wins.
+    assert (
+        detect_login_page(
+            "\u5e33\u865f \u5bc6\u78bc",
+            '<frame src="/token/Front/B/B03"><input type="password">',
+        )
+        is False
+    )

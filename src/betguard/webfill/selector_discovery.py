@@ -699,11 +699,18 @@ def build_route_probe_report(
         detection_elements: list[dict[str, Any]] = []
     else:
         detection_elements = elements
+        if LOGIN_MARKERS[3] in "\n".join([text, html]):
+            _append_warning_once(
+                report_warnings,
+                "download Chrome banner detected; not treated as login page",
+            )
 
     number_candidates = detect_number_candidates(detection_elements)
     amount_field_candidates = detect_amount_field_candidates(detection_elements)
     danger_candidates = detect_danger_candidates(detection_elements)
     elements_sample_by_frame = scan.get("elements_sample_by_frame", {}) if scan else {}
+
+    gate_before = _build_route_probe_gate_before(scan, html, appears_login_page)
 
     if not route_path:
         _append_warning_once(report_warnings, f"route not found for probe: {route_name}")
@@ -739,8 +746,57 @@ def build_route_probe_report(
         "amount_field_candidates": amount_field_candidates,
         "danger_candidates": danger_candidates,
         "elements_sample_by_frame": elements_sample_by_frame,
+        "route_probe_gate_before": gate_before,
         "warnings": report_warnings,
         "errors": report_errors,
+    }
+
+
+def _preferred_bet_page_html(scan: dict[str, Any] | None, *, fallback: str) -> str:
+    sources = list(scan.get("frame_html_sources", [])) if scan else []
+    for item in sources:
+        if "/Front/B/B03" in str(item.get("frame_url", "")):
+            return str(item.get("html", ""))
+    return fallback
+
+
+def _build_route_probe_gate_before(
+    scan: dict[str, Any] | None,
+    html: str,
+    appears_login_page_before_gate: bool,
+) -> dict[str, Any]:
+    """Read-only diagnostics captured BEFORE the login gate zeroes elements.
+
+    This never affects number_candidates / amount_field_candidates /
+    danger_candidates or safe_to_continue. It only exposes what was scanned so
+    a false-positive login classification can be proven.
+    """
+
+    raw_elements = list(scan.get("raw_elements", [])) if scan else []
+    live_frames = list(scan.get("live_frames", [])) if scan else []
+    raw_number_candidates = detect_number_candidates(raw_elements)
+    raw_amount_field_candidates = detect_amount_field_candidates(raw_elements)
+    raw_danger_candidates = detect_danger_candidates(raw_elements)
+    bet_page_html = _preferred_bet_page_html(scan, fallback=html)
+    return {
+        "raw_elements_count": len(raw_elements),
+        "raw_number_candidates_count": len(raw_number_candidates),
+        "raw_number_candidates": raw_number_candidates,
+        "raw_amount_field_candidates": raw_amount_field_candidates,
+        "raw_amount_field_candidates_count": {
+            marker: len(records) for marker, records in raw_amount_field_candidates.items()
+        },
+        "raw_danger_candidates": raw_danger_candidates,
+        "raw_danger_candidates_count": len(raw_danger_candidates),
+        "route_probe_global_game_id_from_b03": _parse_int(_extract_global_assignment(bet_page_html, "GameID")),
+        "route_probe_auth_from_b03": _parse_int(_extract_global_assignment(bet_page_html, "Auth")),
+        "raw_frame_urls": [str(frame.get("url", "")) for frame in live_frames],
+        "raw_frame_element_counts": [int(frame.get("element_count", 0) or 0) for frame in live_frames],
+        "appears_login_page_before_gate": bool(appears_login_page_before_gate),
+        "note": (
+            "read-only diagnostics; does not change number_candidates / "
+            "amount_field_candidates / danger_candidates / safe_to_continue"
+        ),
     }
 
 
@@ -1231,10 +1287,40 @@ def _appears_login_page(
     content = "\n".join([text or "", html or "", _elements_text(elements or [])])
     if not content.strip():
         return False
+    if _appears_authenticated_bet_page(content):
+        return False
+    if not _has_password_input(html, elements):
+        return False
     marker_count = sum(1 for marker in LOGIN_MARKERS if marker in content)
     has_account_password = LOGIN_MARKERS[0] in content and LOGIN_MARKERS[1] in content
-    has_chrome_download = LOGIN_MARKERS[3] in content
-    return has_chrome_download or has_account_password or marker_count >= 3
+    return has_account_password or marker_count >= 2
+
+
+BET_PAGE_FEATURES = ("/Front/B/B03", "tb_0", "ta_0_0", "input1", "input2")
+MIN_NUMBER_BOARD_LABELS = 30
+
+
+def _appears_authenticated_bet_page(content: str) -> bool:
+    if any(feature in content for feature in BET_PAGE_FEATURES):
+        return True
+    if _parse_int(_extract_global_assignment(content, "Auth")) == 1:
+        return True
+    if any(marker in content for marker in AMOUNT_MARKERS):
+        return True
+    number_hits = sum(1 for label in NUMBER_LABELS if label in content)
+    return number_hits >= MIN_NUMBER_BOARD_LABELS
+
+
+def _has_password_input(html: str, elements: list[dict[str, Any]] | None) -> bool:
+    if re.search(r"type\s*=\s*[\"']?password", str(html or ""), re.IGNORECASE):
+        return True
+    for element in elements or []:
+        normalized = _normalize_element(element)
+        if normalized["tag"] == "input" and normalized["type"].lower() == "password":
+            return True
+        if "password" in str(element.get("outerHTML", "")).lower() and normalized["tag"] == "input":
+            return True
+    return False
 
 
 def _append_warning_once(warnings: list[str], warning: str) -> None:
@@ -1549,6 +1635,13 @@ def _scan_page(
             state["text_sources"].append(frame_text)
         if frame_html:
             state["html_sources"].append(frame_html)
+            state["frame_html_sources"].append(
+                {
+                    "frame_url": frame_url,
+                    "frame_name": _safe_frame_name(frame) or frame_name,
+                    "html": frame_html,
+                }
+            )
         frame_elements_raw = _collect_selector_elements(
             frame,
             frame_url,
@@ -1594,6 +1687,7 @@ def _scan_page(
         )
         state["frame_elements"].extend(frame_elements)
         state["iframe_elements"].extend(iframe_elements)
+        state["raw_elements"].extend(frame_elements_raw)
         if not appears_login_page:
             state["elements"].extend(frame_elements_raw)
     return state
@@ -1602,6 +1696,8 @@ def _scan_page(
 def _empty_scan_state() -> dict[str, Any]:
     return {
         "elements": [],
+        "raw_elements": [],
+        "frame_html_sources": [],
         "frame_urls": [],
         "frame_elements": [],
         "iframe_elements": [],
@@ -1616,6 +1712,8 @@ def _empty_scan_state() -> dict[str, Any]:
 
 def _merge_scan_state(target: dict[str, Any], source: dict[str, Any]) -> None:
     target["elements"].extend(source["elements"])
+    target["raw_elements"].extend(source.get("raw_elements", []))
+    target["frame_html_sources"].extend(source.get("frame_html_sources", []))
     target["frame_urls"].extend(source["frame_urls"])
     target["frame_elements"].extend(source["frame_elements"])
     target["iframe_elements"].extend(source["iframe_elements"])

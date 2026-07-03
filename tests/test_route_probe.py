@@ -178,7 +178,15 @@ def test_detect_404_page_identifies_common_markers() -> None:
 
 
 def test_detect_login_page_identifies_login_markers() -> None:
-    assert detect_login_page("\u5e33\u865f \u5bc6\u78bc \u767b\u5165 \u4e0b\u8f09Chrome") is True
+    # Login words alone no longer classify as login; a password input is required.
+    assert detect_login_page("\u5e33\u865f \u5bc6\u78bc \u767b\u5165 \u4e0b\u8f09Chrome") is False
+    assert (
+        detect_login_page(
+            "\u5e33\u865f \u5bc6\u78bc \u767b\u5165 \u4e0b\u8f09Chrome",
+            '<form><input type="password"></form>',
+        )
+        is True
+    )
     assert detect_login_page("539 二三四星 01 02 03") is False
 
 
@@ -260,7 +268,11 @@ def test_route_probe_login_page_is_not_used_for_selector_detection() -> None:
             "resolved_url": "http://w0.gts362.com/token/Front/B/B03",
             "actual_url": "http://w0.gts362.com/Login",
             "title": "login",
-            "scan": route_scan([element(text=login_text)], text=login_text, html="<html>login</html>"),
+            "scan": route_scan(
+                [element(text=login_text), element(tag="input", type="password", name="pass")],
+                text=login_text,
+                html='<html><form><input type="password"></form></html>',
+            ),
         },
     )
 
