@@ -24,3 +24,6 @@ manual_mapping_test/
 .env.*
 
 *.log
+site_profile*.json
+fill_plan*.json
+amount_summary.txt
