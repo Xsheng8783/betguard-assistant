@@ -975,9 +975,30 @@ def _candidate_precision_score(candidate: dict[str, Any], step_type: str, target
         score += 5 if tag in AMOUNT_INPUT_TAGS else 1
         if any(marker in _candidate_text(candidate) for marker in (target, target.replace("星", ""))):
             score += 2
+        # Prefer a candidate that already carries a star-specific, provably
+        # unique selector (id/name/star-scoped) over one that only offers a
+        # generic shared class such as input.BDAll, so the specific field wins
+        # ranking regardless of discovery order.
+        if _candidate_has_specific_amount_selector(candidate, target):
+            score += 4
         return score
 
     return 0
+
+
+def _candidate_has_specific_amount_selector(candidate: dict[str, Any], star: str) -> bool:
+    """True when the candidate offers a star-specific, unique amount selector.
+
+    Read-only: only inspects already-discovered selectors. Generic class-only
+    selectors (input.BDAll) and broad page selectors never qualify.
+    """
+
+    for selector in _candidate_selector_list(candidate):
+        if _selector_string_is_broad(selector):
+            continue
+        if _amount_selector_is_specific(selector, star):
+            return True
+    return False
 
 
 def _first_selector(candidate: dict[str, Any]) -> str:

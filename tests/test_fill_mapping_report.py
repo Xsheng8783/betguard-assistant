@@ -371,6 +371,107 @@ def test_amount_shared_generic_input_class_is_rejected() -> None:
     )
 
 
+# --- Amount Field Precise Mapping v1 ---
+
+
+def unique_amount_candidate(star: str, selector: str) -> dict:
+    return {
+        "tag": "input",
+        "text": star,
+        "frame_url": B03_FRAME_URL,
+        "candidate_selectors": [selector],
+    }
+
+
+def _amount_action(report: dict, star: str) -> dict:
+    return next(
+        a
+        for a in report["actions"]
+        if a["plan_step"].get("type") == "set_amount" and a["plan_step"].get("star") == star
+    )
+
+
+def test_amount_unique_id_name_selectors_are_safe() -> None:
+    plan = normal_fill_plan()
+    selector_report = selector_report_for(plan)
+    # 二星 / 三星 / 四星 each get a distinct id or name selector.
+    star_selectors: dict[str, str] = {}
+    for index, star in enumerate(plan.get("stars", [])):
+        selector = f"#Amount_{index}" if index % 2 == 0 else f'input[name="amt_{index}"]'
+        star_selectors[star] = selector
+        selector_report["amount_field_candidates"][star] = [unique_amount_candidate(star, selector)]
+
+    report = build_mapping_report(plan, selector_report)
+
+    assert report["status"] == "SAFE"
+    for star, selector in star_selectors.items():
+        action = _amount_action(report, star)
+        assert action["selector"] == selector
+        assert action["unique_selector"] is True
+        assert action["selector_unsafe"] is False
+        assert action["confidence"] == "high"
+    # Number selector guard must still hold alongside the amount fields.
+    for number in plan.get("numbers", []):
+        action = next(a for a in report["actions"] if a["plan_step"].get("label") == number)
+        assert action["unique_selector"] is True
+        assert action["confidence"] == "high"
+
+
+def test_amount_shared_generic_input_class_stays_blocked() -> None:
+    plan = normal_fill_plan()
+    selector_report = selector_report_for(plan)
+    # Every star collapses to the same generic input.BDAll selector.
+    for star in plan.get("stars", []):
+        selector_report["amount_field_candidates"][star] = [
+            {
+                "tag": "input",
+                "text": star,
+                "frame_url": B03_FRAME_URL,
+                "candidate_selectors": ["input.BDAll"],
+            }
+        ]
+
+    report = build_mapping_report(plan, selector_report)
+
+    assert report["status"] == "BLOCKED"
+    for star in plan.get("stars", []):
+        action = _amount_action(report, star)
+        assert action["selector"] == "input.BDAll"
+        assert action["unique_selector"] is False
+        assert action["selector_unsafe"] is True
+        assert action["confidence"] == "low"
+
+
+def test_amount_star_specific_selector_preferred_over_generic_class() -> None:
+    plan = normal_fill_plan()
+    selector_report = selector_report_for(plan)
+    first_star = plan["stars"][0]
+    # Discovery lists the shared generic class first and the star-specific
+    # field second; the specific one must win ranking and be trusted.
+    selector_report["amount_field_candidates"][first_star] = [
+        {
+            "tag": "input",
+            "text": first_star,
+            "frame_url": B03_FRAME_URL,
+            "candidate_selectors": ["input.BDAll"],
+        },
+        {
+            "tag": "input",
+            "text": first_star,
+            "frame_url": B03_FRAME_URL,
+            "candidate_selectors": [f"#Amount_{first_star}"],
+        },
+    ]
+
+    report = build_mapping_report(plan, selector_report)
+
+    action = _amount_action(report, first_star)
+    assert action["selector"] == f"#Amount_{first_star}"
+    assert action["unique_selector"] is True
+    assert action["selector_unsafe"] is False
+    assert action["confidence"] == "high"
+
+
 def test_actions_summary_is_compact_without_candidate_dump() -> None:
     plan = normal_fill_plan()
     report = build_mapping_report(plan, selector_report_for(plan))
