@@ -100,3 +100,43 @@ BATCH_BLOCKED
 - `danger_buttons_clicked=[]`
 
 Readonly snapshot code must remain read-only. It must not fill, click, press, submit, or trigger any real website action.
+
+## End-to-End Flow (gated pipeline)
+
+The sections above describe the modules. This section describes the full flow
+and, more importantly, the gates between stages. Every arrow crossing a gate
+requires an explicit human step — nothing advances automatically.
+
+```text
+input.txt
+  -> parser (+ input_preprocessor)         # produces valid candidates + invalid/needs-review
+  -> review.html                            # human reads the review
+  -> audit.json                             # raw text + parsed result recorded
+  -> [GATE] accept-valid                    # explicit human confirmation
+  -> approved_fill_queue                    # created ONLY after accept-valid
+  -> queue_state.json                       # persisted approved snapshot
+  -> fill-preview / mock-fill               # read approved_fill_queue ONLY
+  -> site profile (read-only snapshot)      # DOM/text/attribute inspection only
+  -> map-dry-run                            # selector mapping report (SAFE / BLOCKED)
+  -> future assisted fill                   # NOT IMPLEMENTED; stays gated
+```
+
+### Gate rules
+
+- **Valid candidates alone are not enough.** A parsed-valid item is a
+  *candidate*, not an approved action. It cannot enter any fill flow on its own.
+- **accept-valid is required.** `approved_fill_queue` is created only after a
+  human runs accept-valid. Without that step there is no approved queue.
+- **Needs Review / Invalid / Watchlist never enter the fill flow.** These items
+  must never appear in `approved_fill_queue`, `fill-preview`, `mock-fill`, or any
+  future assisted fill. They stay in review only.
+- **fill-preview and mock-fill read `approved_fill_queue` only.** They never read
+  raw candidates, never re-parse, and never pull unreviewed items.
+- **map-dry-run is reporting-only.** It maps selectors and reports SAFE / BLOCKED.
+  It never clicks, fills, or submits. Ambiguous or shared selectors stay BLOCKED
+  (see `DIAGNOSTICS_GUIDE.md`).
+- **future assisted fill is not implemented.** Any real-site click/fill/submit
+  path is out of scope for this package and must remain gated behind an explicit,
+  separately-implemented step.
+
+See `SAFETY_INVARIANTS.md` for the non-negotiable rules that back these gates.
