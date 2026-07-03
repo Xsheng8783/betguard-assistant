@@ -12,6 +12,9 @@ def build_review_console_model(queue: dict[str, Any], *, queue_path: str | None 
     audit = queue.get("audit", {})
     safety = _safety_view(queue)
     current = _current_item(queue)
+    all_not_ok = list(preprocessing.get("invalid_fragments", []))
+    watchlist_source = [item for item in all_not_ok if _fragment_status(item) == "warning"]
+    invalid_source = [item for item in all_not_ok if _fragment_status(item) != "warning"]
     model = {
         "mode": "local_review_console",
         "status": queue.get("status"),
@@ -21,6 +24,8 @@ def build_review_console_model(queue: dict[str, Any], *, queue_path: str | None 
             "candidate_count": int(preprocessing_summary.get("candidate_count", queue.get("summary", {}).get("total", 0))),
             "valid_count": int(preprocessing_summary.get("valid_count", queue.get("summary", {}).get("ok", 0))),
             "invalid_count": int(preprocessing_summary.get("invalid_unsupported_count", 0)),
+            "watchlist_count": len(watchlist_source),
+            "needs_review_count": len(invalid_source),
             "warnings_count": int(preprocessing_summary.get("warnings_count", 0)),
             "ignored_metadata_count": int(preprocessing_summary.get("ignored_metadata_count", 0)),
         },
@@ -33,20 +38,8 @@ def build_review_console_model(queue: dict[str, Any], *, queue_path: str | None 
             }
             for item in preprocessing.get("valid_candidates", [])
         ],
-        "invalid_fragments": [
-            {
-                "index": item.get("index"),
-                "original_fragment": item.get("original_fragment") or item.get("raw"),
-                "parsed_summary": item.get("summary", ""),
-                "numbers": list(item.get("result", {}).get("numbers", [])),
-                "stars": list(item.get("result", {}).get("stars", [])),
-                "reason": _reason_text(item),
-                "warnings": list(item.get("warnings", [])),
-                "errors": list(item.get("errors", [])),
-                "is_missing_money": _is_missing_money_only(item),
-            }
-            for item in preprocessing.get("invalid_fragments", [])
-        ],
+        "watchlist": [_watchlist_entry(item) for item in watchlist_source],
+        "invalid_fragments": [_invalid_entry(item) for item in invalid_source],
         "ignored_metadata_lines": list(preprocessing.get("ignored_metadata_lines", [])),
         "queue_view": {
             "status": queue.get("status"),
@@ -72,7 +65,8 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     model = build_review_console_model(queue, queue_path=queue_path)
     status_class = _status_class(str(model.get("status") or ""))
     valid_rows = "".join(_candidate_row(item) for item in model["valid_candidates"]) or _empty_row(4, "No valid candidates")
-    invalid_rows = "".join(_invalid_row(item) for item in model["invalid_fragments"]) or _empty_row(4, "No invalid or review fragments")
+    watchlist_rows = "".join(_watchlist_row(item) for item in model["watchlist"]) or _empty_row(4, "No watchlist items")
+    invalid_rows = "".join(_invalid_row(item) for item in model["invalid_fragments"]) or _empty_row(4, "No invalid or error fragments")
     metadata_rows = "".join(
         f"<li>{_e(str(item.get('raw', item)))}</li>" for item in model["ignored_metadata_lines"][:8]
     ) or "<li>None</li>"
@@ -99,14 +93,19 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     .status.ready {{ border-left-color: #198754; }}
     .status.review {{ border-left-color: #f59f00; }}
     .status.blocked {{ border-left-color: #dc3545; }}
-    .metrics {{ display: grid; grid-template-columns: repeat(5, minmax(90px, 1fr)); gap: 8px; }}
+    .metrics {{ display: grid; grid-template-columns: repeat(6, minmax(90px, 1fr)); gap: 8px; }}
     .metric {{ background: #f1f4f8; border-radius: 6px; padding: 10px; }}
     .metric strong {{ display: block; font-size: 22px; }}
+    .card.watch {{ border-left: 8px solid #f59f00; }}
     table {{ width: 100%; border-collapse: collapse; }}
     th, td {{ border-bottom: 1px solid #e7ebf0; padding: 8px; text-align: left; vertical-align: top; }}
     th {{ background: #f7f9fb; }}
     code, pre {{ background: #eef2f6; border-radius: 4px; padding: 2px 4px; }}
     pre {{ padding: 12px; overflow: auto; max-height: 360px; }}
+    .badge {{ display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: bold; color: #fff; }}
+    .badge.valid {{ background: #198754; }}
+    .badge.watch {{ background: #f59f00; }}
+    .badge.invalid {{ background: #dc3545; }}
     .safe {{ color: #087f5b; font-weight: bold; }}
     .danger {{ color: #c92a2a; font-weight: bold; }}
   </style>
@@ -120,7 +119,8 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     <div class="metrics">
       <div class="metric">Candidates<strong>{model["preprocessing"]["candidate_count"]}</strong></div>
       <div class="metric">Valid<strong>{model["preprocessing"]["valid_count"]}</strong></div>
-      <div class="metric">Invalid / Review<strong>{model["preprocessing"]["invalid_count"]}</strong></div>
+      <div class="metric">待觀察 Watchlist<strong>{model["preprocessing"]["watchlist_count"]}</strong></div>
+      <div class="metric">Needs Review / Invalid<strong>{model["preprocessing"]["needs_review_count"]}</strong></div>
       <div class="metric">Warnings<strong>{model["preprocessing"]["warnings_count"]}</strong></div>
       <div class="metric">Ignored Metadata<strong>{model["preprocessing"]["ignored_metadata_count"]}</strong></div>
     </div>
@@ -128,14 +128,20 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
 
   <div class="grid">
     <section class="card">
-      <h2>Valid Candidates</h2>
+      <h2><span class="badge valid">Valid</span> Valid Candidates</h2>
       <table><thead><tr><th>#</th><th>Original Fragment</th><th>Summary</th><th>Type</th></tr></thead><tbody>{valid_rows}</tbody></table>
     </section>
     <section class="card">
-      <h2>Needs Review / Invalid</h2>
+      <h2><span class="badge invalid">Invalid</span> Needs Review / Invalid</h2>
       <table><thead><tr><th>#</th><th>Original Fragment</th><th>Parsed Summary</th><th>Reason</th></tr></thead><tbody>{invalid_rows}</tbody></table>
     </section>
   </div>
+
+  <section class="card watch">
+    <h2><span class="badge watch">待觀察</span> 待觀察 / Watchlist</h2>
+    <p>需人工判斷的不確定項目。<strong>display-only；不會自動接受，不會進入 approved_fill_queue、fill-preview 或 mock-fill。</strong></p>
+    <table><thead><tr><th>#</th><th>Original Fragment</th><th>Parsed Summary</th><th>Reason</th></tr></thead><tbody>{watchlist_rows}</tbody></table>
+  </section>
 
   <div class="grid">
     <section class="card">
@@ -205,6 +211,7 @@ def format_pretty_review_console(model: dict[str, Any]) -> str:
         "Preprocessing:",
         f"- candidates: {preprocessing.get('candidate_count', 0)}",
         f"- valid: {preprocessing.get('valid_count', 0)}",
+        f"- watchlist: {preprocessing.get('watchlist_count', 0)}",
         f"- invalid/review: {preprocessing.get('invalid_count', 0)}",
         f"- ignored metadata: {preprocessing.get('ignored_metadata_count', 0)}",
         "",
@@ -248,6 +255,17 @@ def _candidate_row(item: dict[str, Any]) -> str:
 
 
 def _invalid_row(item: dict[str, Any]) -> str:
+    return (
+        "<tr>"
+        f"<td>{_e(str(item.get('index')))}</td>"
+        f"<td>{_e(str(item.get('original_fragment')))}</td>"
+        f"<td>{_e(str(item.get('parsed_summary')))}</td>"
+        f"<td>{_e(str(item.get('reason')))}</td>"
+        "</tr>"
+    )
+
+
+def _watchlist_row(item: dict[str, Any]) -> str:
     return (
         "<tr>"
         f"<td>{_e(str(item.get('index')))}</td>"
@@ -349,6 +367,60 @@ def _reason_text(item: dict[str, Any]) -> str:
 
 def _is_missing_money_only(item: dict[str, Any]) -> bool:
     return not item.get("errors") and list(item.get("warnings", [])) == ["missing money"]
+
+
+def _fragment_status(item: dict[str, Any]) -> str:
+    return str(item.get("status") or item.get("result", {}).get("status") or "")
+
+
+def _parsed_amount_view(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "money": result.get("money"),
+        "unit": result.get("unit"),
+        "car_units": result.get("car_units"),
+        "number": result.get("number"),
+    }
+
+
+def _watchlist_entry(item: dict[str, Any]) -> dict[str, Any]:
+    result = item.get("result", {})
+    entry = {
+        "index": item.get("index"),
+        "original_fragment": item.get("original_fragment") or item.get("raw"),
+        "parsed_summary": item.get("summary", ""),
+        "bet_type": result.get("type"),
+        "numbers": list(result.get("numbers", [])),
+        "stars": list(result.get("stars", [])),
+        "reason": _watchlist_reason(item),
+        "warnings": list(item.get("warnings", [])),
+        "is_missing_money": _is_missing_money_only(item),
+        "accepted_automatically": False,
+    }
+    entry.update(_parsed_amount_view(result))
+    return entry
+
+
+def _invalid_entry(item: dict[str, Any]) -> dict[str, Any]:
+    result = item.get("result", {})
+    return {
+        "index": item.get("index"),
+        "original_fragment": item.get("original_fragment") or item.get("raw"),
+        "parsed_summary": item.get("summary", ""),
+        "numbers": list(result.get("numbers", [])),
+        "stars": list(result.get("stars", [])),
+        "reason": _reason_text(item),
+        "warnings": list(item.get("warnings", [])),
+        "errors": list(item.get("errors", [])),
+        "is_missing_money": _is_missing_money_only(item),
+    }
+
+
+def _watchlist_reason(item: dict[str, Any]) -> str:
+    if _is_missing_money_only(item):
+        return "待觀察 / Watchlist: 缺金額，需人工補 (missing money)"
+    reasons = list(item.get("warnings", []))
+    joined = "; ".join(str(reason) for reason in reasons)
+    return f"待觀察 / Watchlist: {joined}" if joined else "待觀察 / Watchlist: 需人工判斷"
 
 
 def _status_class(status: str) -> str:

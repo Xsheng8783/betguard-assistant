@@ -76,11 +76,30 @@ def test_review_package_generates_html_audit_and_summary(tmp_path) -> None:
     assert Path(package["summary_path"]).exists()
     summary = Path(package["summary_path"]).read_text(encoding="utf-8")
     assert "Next Suggested Command:" in summary
+    assert "valid count:" in summary
+    assert "watchlist count:" in summary
+    assert "invalid/review count:" in summary
     assert "real_site_operation=false" in summary
     assert "auto_submit=false" in summary
     assert "danger_buttons_clicked=[]" in summary
     html = Path(package["review_html_path"]).read_text(encoding="utf-8")
     assert "live selector" not in html.lower()
+
+
+def test_review_package_summary_counts_watchlist_items(tmp_path) -> None:
+    queue_path = tmp_path / "queue_state.json"
+    out_dir = tmp_path / "review_out"
+    text = f"06.13.23.22 {TWO_THREE}50\n10.25"
+    result = create_batch_from_text(text, queue_path=queue_path)
+    queue = result["queue"]
+
+    package = create_review_package(queue, queue_path=queue_path, out_dir=out_dir)
+
+    summary = Path(package["summary_path"]).read_text(encoding="utf-8")
+    assert "watchlist count: 1" in summary
+    html = Path(package["review_html_path"]).read_text(encoding="utf-8")
+    assert "待觀察 / Watchlist" in html
+    assert "10.25" in html
 
 
 def test_queue_overwrite_protection_blocks_without_overwrite(tmp_path) -> None:

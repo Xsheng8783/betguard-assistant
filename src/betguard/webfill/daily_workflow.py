@@ -69,6 +69,7 @@ def build_review_package_summary(queue: dict[str, Any], *, queue_path: str | Pat
     preprocessing_summary = preprocessing.get("summary", {})
     summary = queue.get("summary", {})
     queue_path_text = str(queue_path)
+    watchlist_count = _watchlist_count(preprocessing)
     return "\n".join(
         [
             "Betguard Daily Review Package",
@@ -78,6 +79,7 @@ def build_review_package_summary(queue: dict[str, Any], *, queue_path: str | Pat
             f"preprocessing status: {preprocessing.get('status') or queue.get('preprocessing_status')}",
             f"candidate count: {preprocessing_summary.get('candidate_count', summary.get('total', 0))}",
             f"valid count: {preprocessing_summary.get('valid_count', summary.get('ok', 0))}",
+            f"watchlist count: {watchlist_count}",
             f"invalid/review count: {preprocessing_summary.get('invalid_unsupported_count', 0)}",
             f"ignored metadata count: {preprocessing_summary.get('ignored_metadata_count', 0)}",
             "",
@@ -155,6 +157,14 @@ def format_pretty_review_package_result(result: dict[str, Any]) -> str:
             "- auto_submit=false",
             "- danger_buttons_clicked=[]",
         ]
+    )
+
+
+def _watchlist_count(preprocessing: dict[str, Any]) -> int:
+    return sum(
+        1
+        for fragment in preprocessing.get("invalid_fragments", [])
+        if str(fragment.get("status") or fragment.get("result", {}).get("status") or "") == "warning"
     )
 
 

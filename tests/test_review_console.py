@@ -135,30 +135,33 @@ def test_review_console_actions_include_accept_reject_mock_next_and_audit_export
     assert any("--batch-mock-next" in action for action in waiting["actions"])
 
 
-def test_review_console_model_shows_clear_missing_money_wording() -> None:
+def test_review_console_model_puts_missing_money_in_watchlist() -> None:
     queue = build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}50\n10.25")
 
     model = build_review_console_model(queue)
 
     assert model["status"] == NEEDS_REVIEW
-    fragment = model["invalid_fragments"][0]
+    assert model["preprocessing"]["watchlist_count"] == 1
+    fragment = model["watchlist"][0]
     assert fragment["original_fragment"] == "10.25"
     assert fragment["numbers"] == [10, 25]
     assert fragment["stars"] == [2]
     assert fragment["parsed_summary"]
     assert fragment["is_missing_money"] is True
-    assert "missing money" in fragment["reason"]
+    assert fragment["accepted_automatically"] is False
+    assert "缺金額" in fragment["reason"]
     assert "10.25" not in [item["original_fragment"] for item in model["valid_candidates"]]
+    assert "10.25" not in [item["original_fragment"] for item in model["invalid_fragments"]]
 
 
-def test_review_console_html_shows_clear_missing_money_wording_not_as_valid() -> None:
+def test_review_console_html_shows_watchlist_wording_not_as_valid() -> None:
     queue = build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}50\n10.25")
 
     html = render_review_console_html(queue, queue_path="queue_state.json")
 
-    assert "missing money" in html
+    assert "待觀察 / Watchlist" in html
     assert "缺金額" in html
-    assert "Needs Review: missing money" in html
+    assert "10.25" in html
     valid_section = html.split("Needs Review / Invalid")[0]
     assert "10.25" not in valid_section
 
@@ -190,3 +193,54 @@ def test_write_review_console_html_and_cli_command(tmp_path, monkeypatch) -> Non
     webfill_cli.main()
 
     assert "Betguard Local Review Console" in cli_html_path.read_text(encoding="utf-8")
+
+
+def test_error_status_item_stays_in_needs_review_not_watchlist() -> None:
+    queue = build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}50\n11.28.400")
+
+    model = build_review_console_model(queue)
+
+    invalid_raws = [item["original_fragment"] for item in model["invalid_fragments"]]
+    watchlist_raws = [item["original_fragment"] for item in model["watchlist"]]
+    assert "11.28.400" in invalid_raws
+    assert "11.28.400" not in watchlist_raws
+
+
+def test_watchlist_original_fragment_appears_in_html_but_not_in_valid_section() -> None:
+    queue = build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}50\n10.25\n11.28.400")
+
+    html = render_review_console_html(queue, queue_path="queue_state.json")
+
+    assert "待觀察 / Watchlist" in html
+    assert "10.25" in html
+    assert "display-only" in html
+    valid_section = html.split("待觀察 / Watchlist")[0]
+    assert "10.25" not in valid_section
+
+
+def test_watchlist_items_never_enter_approved_fill_queue() -> None:
+    queue = build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}50\n10.25\n11.28.400")
+    model = build_review_console_model(queue)
+    watchlist_raws = [item["original_fragment"] for item in model["watchlist"]]
+    assert "10.25" in watchlist_raws
+
+    assert queue["status"] == NEEDS_REVIEW
+    accepted = accept_valid_candidates_for_mock_queue(queue)
+
+    accepted_originals = [item.get("original") for item in accepted["items"]]
+    approved = accepted.get("approved_fill_queue") or []
+    approved_fragments = [entry.get("original_fragment") for entry in approved]
+    for raw in watchlist_raws:
+        assert raw not in accepted_originals
+        assert raw not in approved_fragments
+    assert accepted["audit"]["safety"]["real_site_operation"] is False
+    assert accepted["audit"]["safety"]["auto_submit"] is False
+
+
+def test_valid_candidate_behavior_unchanged_with_watchlist_present() -> None:
+    queue = build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}50\n10.25")
+
+    model = build_review_console_model(queue)
+
+    valid_raws = [item["original_fragment"] for item in model["valid_candidates"]]
+    assert valid_raws == [f"06.13.23.22 {TWO_THREE}50"]
