@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from betguard.webfill.fill_mapping import build_dry_run_mapping, resolve_final_selector
+from betguard.webfill.fill_mapping import (
+    AMOUNT_DIAGNOSTIC_OUTER_HTML_LIMIT,
+    AMOUNT_DIAGNOSTIC_TEXT_LIMIT,
+    build_dry_run_mapping,
+    resolve_final_selector,
+)
 from betguard.webfill.fill_plan import FORBIDDEN_STEPS
 
 
@@ -24,7 +29,8 @@ def build_mapping_report(
             missing.append({"type": "danger", "reason": "danger buttons not verified"})
 
     actions = [_action_from_mapped_step(item) for item in mapping.get("mapped_steps", [])]
-    _apply_selector_guards(actions, missing, warnings)
+    grouped = _apply_selector_guards(actions, missing, warnings)
+    amount_diagnostics = _build_amount_field_diagnostics(actions, grouped)
     unfound = any(not action["selector_found"] for action in actions)
     blocked = (
         bool(errors)
@@ -40,6 +46,10 @@ def build_mapping_report(
         "market": _market_summary(selector_report),
         "actions": actions,
         "actions_summary": [_action_summary(action) for action in actions],
+        "amount_field_status": amount_diagnostics["status"],
+        "ambiguous_amount_fields": amount_diagnostics["ambiguous"],
+        "shared_amount_selectors": amount_diagnostics["shared_selectors"],
+        "amount_field_diagnostics": amount_diagnostics["diagnostics"],
         "missing": missing,
         "danger_check": {
             "danger_candidates_found": danger_verified,
@@ -89,6 +99,26 @@ def format_pretty_mapping_report(report: dict[str, Any]) -> str:
     lines.append("- dangerous buttons detected:")
     for label in danger_check.get("dangerous_buttons_detected", []):
         lines.append(f"  - {label}")
+
+    amount_diagnostics = report.get("amount_field_diagnostics") or []
+    if amount_diagnostics:
+        lines.append("")
+        lines.append("Amount Field Diagnostics:")
+        lines.append(f"- Status: {report.get('amount_field_status', 'BLOCKED')}")
+        for entry in amount_diagnostics:
+            lines.append(f"- {entry.get('star')}: {entry.get('blocked_reason')}")
+            if entry.get("source_index") is not None:
+                lines.append(f"    source_index: {entry.get('source_index')}")
+            if entry.get("parentText"):
+                lines.append(f"    parentText: {entry.get('parentText')}")
+            if entry.get("grandparentText"):
+                lines.append(f"    grandparentText: {entry.get('grandparentText')}")
+            attributes = _format_amount_attributes(entry)
+            if attributes:
+                lines.append(f"    attributes: {attributes}")
+        for selector in report.get("shared_amount_selectors", []):
+            lines.append(f"- Shared selector: {selector}")
+        lines.append("- Result: amount fields are not safe for assisted fill")
 
     if report.get("missing"):
         lines.append("")
@@ -141,7 +171,7 @@ def _apply_selector_guards(
     actions: list[dict[str, Any]],
     missing: list[dict[str, Any]],
     warnings: list[str],
-) -> None:
+) -> dict[str, list[dict[str, Any]]]:
     """Block actions whose final selector cannot be proven unique.
 
     Two independent checks, both read-only:
@@ -149,6 +179,10 @@ def _apply_selector_guards(
        only a generic class (e.g. ``td.selectline2``/``input.BDAll``) is unsafe.
     2. Cross-action uniqueness: if two different numbers/stars resolve to the
        exact same selector, none of them can be trusted.
+
+    Returns the ``selector -> actions`` grouping computed for check 2 so the
+    diagnostics layer reuses the exact same conflict decision (never a separate
+    recomputation that could disagree with BLOCKED/SAFE).
     """
 
     for action in actions:
@@ -183,6 +217,8 @@ def _apply_selector_guards(
             warnings,
             f"selector '{selector}' maps to multiple targets ({', '.join(targets)}); not unique",
         )
+
+    return grouped
 
 
 def _mark_action_unsafe(
@@ -225,6 +261,147 @@ def _action_target(action: dict[str, Any]) -> Any:
     if step.get("type") == "set_amount":
         return step.get("star")
     return step.get("label")
+
+
+def _is_amount_action(action: dict[str, Any]) -> bool:
+    return action.get("plan_step", {}).get("type") == "set_amount"
+
+
+def _build_amount_field_diagnostics(
+    actions: list[dict[str, Any]],
+    grouped: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Reporting-only diagnostics for ambiguous amount fields.
+
+    Reuses the ``selector -> actions`` grouping from ``_apply_selector_guards``
+    and the ``selector_unsafe`` flags it already set, so the diagnostics can
+    never disagree with the actual BLOCKED/SAFE decision. Never mutates actions;
+    never resolves selectors independently.
+    """
+
+    amount_actions = [action for action in actions if _is_amount_action(action)]
+
+    # selector -> stars sharing it, taken straight from the guard's grouped dict.
+    selector_stars: dict[str, list[str]] = {}
+    for selector, group in grouped.items():
+        stars = sorted({str(_action_target(a)) for a in group if _is_amount_action(a)})
+        if stars:
+            selector_stars[selector] = stars
+
+    diagnostics: list[dict[str, Any]] = []
+    ambiguous: list[str] = []
+    shared_selectors: list[str] = []
+    for action in amount_actions:
+        star = str(_action_target(action))
+        selector = str(action.get("selector") or "")
+        found = bool(action.get("selector_found"))
+        unsafe = bool(action.get("selector_unsafe"))
+        stars_for_selector = selector_stars.get(selector, [])
+        shared = unsafe and len(stars_for_selector) > 1
+        shared_with = [other for other in stars_for_selector if other != star] if shared else []
+
+        if not (unsafe or not found):
+            # Unique, resolvable amount field: no ambiguity diagnostic emitted.
+            continue
+
+        if unsafe and star not in ambiguous:
+            ambiguous.append(star)
+        if shared and selector and selector not in shared_selectors:
+            shared_selectors.append(selector)
+        diagnostics.append(
+            _amount_diagnostic_entry(action, star, selector, found, unsafe, shared, shared_with)
+        )
+
+    status = "BLOCKED" if diagnostics else "SAFE"
+    return {
+        "status": status,
+        "ambiguous": ambiguous,
+        "shared_selectors": shared_selectors,
+        "diagnostics": diagnostics,
+    }
+
+
+def _amount_diagnostic_entry(
+    action: dict[str, Any],
+    star: str,
+    selector: str,
+    found: bool,
+    unsafe: bool,
+    shared: bool,
+    shared_with: list[str],
+) -> dict[str, Any]:
+    candidates = action.get("selector_candidates") or []
+    candidate = candidates[0] if candidates else {}
+    context = _amount_diagnostic_context(candidate)
+    return {
+        "star": star,
+        "matched_label": star,
+        "selector": selector,
+        "confidence": action.get("confidence") or "low",
+        "selector_found": found,
+        "shared": shared,
+        "shared_with": shared_with,
+        "blocked_reason": _amount_blocked_reason(found, unsafe, shared, shared_with, selector),
+        "diagnostic_source": context.get("diagnostic_source") or "automatic_mapping",
+        "source_index": context.get("source_index"),
+        "id": context.get("id") or "",
+        "name": context.get("name") or "",
+        "className": context.get("className") or "",
+        "parentText": context.get("parentText") or "",
+        "grandparentText": context.get("grandparentText") or "",
+        "text": context.get("text") or "",
+        "value": context.get("value") or "",
+        "outerHTML": context.get("outerHTML") or "",
+    }
+
+
+def _amount_diagnostic_context(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Diagnostic context for a candidate, always bounded.
+
+    Prefers the structured ``amount_diagnostic`` block produced by the mapping
+    layer; falls back to bounded excerpts of flat candidate fields so lightweight
+    (test) candidates still surface context.
+    """
+
+    diagnostic = candidate.get("amount_diagnostic")
+    context: dict[str, Any] = dict(diagnostic) if isinstance(diagnostic, dict) else {}
+    excerpt_limits = {
+        "id": AMOUNT_DIAGNOSTIC_TEXT_LIMIT,
+        "name": AMOUNT_DIAGNOSTIC_TEXT_LIMIT,
+        "className": AMOUNT_DIAGNOSTIC_TEXT_LIMIT,
+        "parentText": AMOUNT_DIAGNOSTIC_TEXT_LIMIT,
+        "grandparentText": AMOUNT_DIAGNOSTIC_TEXT_LIMIT,
+        "text": AMOUNT_DIAGNOSTIC_TEXT_LIMIT,
+        "value": AMOUNT_DIAGNOSTIC_TEXT_LIMIT,
+        "outerHTML": AMOUNT_DIAGNOSTIC_OUTER_HTML_LIMIT,
+    }
+    for key, limit in excerpt_limits.items():
+        if not context.get(key) and candidate.get(key):
+            context[key] = _bounded_excerpt(candidate.get(key), limit)
+    if context.get("source_index") is None and candidate.get("source_index") is not None:
+        context["source_index"] = candidate.get("source_index")
+    return context
+
+
+def _bounded_excerpt(value: Any, limit: int) -> str:
+    return " ".join(str(value or "").split())[:limit]
+
+
+def _amount_blocked_reason(
+    found: bool,
+    unsafe: bool,
+    shared: bool,
+    shared_with: list[str],
+    selector: str,
+) -> str:
+    if not found:
+        return "no amount selector found"
+    if shared:
+        others = ", ".join(shared_with) if shared_with else "another field"
+        return f"selector {selector} is shared with {others}; not unique"
+    if unsafe:
+        return f"selector {selector} is not proven unique to this star"
+    return ""
 
 
 def _append_missing(missing: list[dict[str, Any]], item: dict[str, Any]) -> None:
@@ -310,6 +487,17 @@ def _format_missing(item: dict[str, Any]) -> str:
     if item.get("type") == "danger":
         return "danger buttons not verified"
     return str(item)
+
+
+def _format_amount_attributes(entry: dict[str, Any]) -> str:
+    parts = []
+    if entry.get("id"):
+        parts.append(f"id={entry['id']}")
+    if entry.get("name"):
+        parts.append(f"name={entry['name']}")
+    if entry.get("className"):
+        parts.append(f"class={entry['className']}")
+    return ", ".join(parts)
 
 
 def _append_once(items: list[str], value: str) -> None:

@@ -644,13 +644,16 @@ def _b03_amount_fields(route_probe_report: dict[str, Any], elements: list[dict[s
                 if isinstance(candidate, dict):
                     _append_unique_candidate(found[star], _b03_selector_candidate(candidate))
 
-    for element in elements:
+    for index, element in enumerate(elements):
         if str(element.get("tag") or "").lower() not in {"input", "select", "textarea"}:
             continue
         context = _element_context(element)
         for star in B03_AMOUNT_STARS:
             if star in context and any(word in context for word in ("本金", "每碰金額", "下注金額", "金額")):
-                _append_unique_candidate(found[star], _b03_selector_candidate(element, matched_label=star))
+                _append_unique_candidate(
+                    found[star],
+                    _b03_amount_diagnostic_candidate(element, star=star, index=index),
+                )
     page_text = _b03_page_text(elements)
     for star in B03_AMOUNT_STARS:
         if found[star]:
@@ -705,6 +708,43 @@ def _b03_selector_candidate(element: dict[str, Any], *, matched_label: str | Non
         "candidate_selectors": selectors,
         "matched_label": matched_label,
     }
+
+
+AMOUNT_DIAGNOSTIC_OUTER_HTML_LIMIT = 800
+AMOUNT_DIAGNOSTIC_TEXT_LIMIT = 200
+
+
+def _b03_amount_diagnostic_candidate(
+    element: dict[str, Any], *, star: str, index: int
+) -> dict[str, Any]:
+    """Amount-only wrapper that adds bounded diagnostic context to a candidate.
+
+    Reporting-only. Deliberately separate from the shared
+    ``_b03_selector_candidate`` (used by number/amount/danger paths) so adding
+    diagnostic keys here cannot alter number or danger behavior. Every excerpt is
+    truncated via ``_short_preview`` so the report never emits huge blobs.
+    """
+
+    candidate = _b03_selector_candidate(element, matched_label=star)
+    candidate["amount_diagnostic"] = {
+        "matched_label": star,
+        "source_index": index,
+        "id": str(element.get("id") or ""),
+        "name": str(element.get("name") or ""),
+        "className": str(element.get("className") or ""),
+        "parentText": _short_preview(element.get("parentText"), AMOUNT_DIAGNOSTIC_TEXT_LIMIT),
+        "grandparentText": _short_preview(
+            element.get("grandparentText"), AMOUNT_DIAGNOSTIC_TEXT_LIMIT
+        ),
+        "text": _short_preview(
+            element.get("text") or element.get("innerText") or element.get("textContent"),
+            AMOUNT_DIAGNOSTIC_TEXT_LIMIT,
+        ),
+        "value": _short_preview(element.get("value"), AMOUNT_DIAGNOSTIC_TEXT_LIMIT),
+        "outerHTML": _short_preview(element.get("outerHTML"), AMOUNT_DIAGNOSTIC_OUTER_HTML_LIMIT),
+        "diagnostic_source": "automatic_mapping",
+    }
+    return candidate
 
 
 def _danger_candidate(element: dict[str, Any], text: str) -> dict[str, Any]:

@@ -1,5 +1,9 @@
 from betguard.review import build_report
-from betguard.webfill.fill_mapping import build_dry_run_mapping
+from betguard.webfill.fill_mapping import (
+    AMOUNT_DIAGNOSTIC_OUTER_HTML_LIMIT,
+    _b03_amount_diagnostic_candidate,
+    build_dry_run_mapping,
+)
 from betguard.webfill.fill_mapping_report import build_mapping_report, format_pretty_mapping_report
 from betguard.webfill.fill_plan import build_fill_plan
 
@@ -488,3 +492,204 @@ def test_actions_summary_is_compact_without_candidate_dump() -> None:
             "rejected_candidate_count",
         }
         assert "selector_candidates" not in entry
+
+
+# --- Amount Field Diagnostic Report v1 ---
+
+
+def shared_group_set_candidate(star: str, *, index: int = 0) -> dict:
+    """Amount candidate resolving to the shared #GroupSet_Value id (nested diag)."""
+    return {
+        "tag": "input",
+        "text": star,
+        "frame_url": B03_FRAME_URL,
+        "candidate_selectors": ["#GroupSet_Value"],
+        "amount_diagnostic": {
+            "matched_label": star,
+            "source_index": index,
+            "id": "GroupSet_Value",
+            "name": "GroupSet_Value",
+            "className": "BDAll RightText",
+            "parentText": f"每碰金額 {star} 本金",
+            "grandparentText": "539 下注資訊",
+            "outerHTML": "<input id='GroupSet_Value' class='BDAll'>",
+            "diagnostic_source": "automatic_mapping",
+        },
+    }
+
+
+def _amount_diagnostics(report: dict) -> list[dict]:
+    return report.get("amount_field_diagnostics") or []
+
+
+def test_shared_group_set_value_creates_diagnostics_and_blocks() -> None:
+    plan = normal_fill_plan()
+    selector_report = selector_report_for(plan)
+    stars = plan["stars"]
+    selector_report["amount_field_candidates"][stars[0]] = [shared_group_set_candidate(stars[0], index=25)]
+    selector_report["amount_field_candidates"][stars[1]] = [shared_group_set_candidate(stars[1], index=21)]
+    # Third star keeps a distinct unique id so it stays out of the ambiguity list.
+    selector_report["amount_field_candidates"][stars[2]] = [
+        unique_amount_candidate(stars[2], "#GroupSet_Value_4")
+    ]
+
+    report = build_mapping_report(plan, selector_report)
+
+    assert report["status"] == "BLOCKED"
+    assert report["amount_field_status"] == "BLOCKED"
+    assert set(report["ambiguous_amount_fields"]) == {stars[0], stars[1]}
+    assert report["shared_amount_selectors"] == ["#GroupSet_Value"]
+
+    diag_stars = {entry["star"] for entry in _amount_diagnostics(report)}
+    assert diag_stars == {stars[0], stars[1]}
+    entry0 = next(e for e in _amount_diagnostics(report) if e["star"] == stars[0])
+    assert entry0["selector"] == "#GroupSet_Value"
+    assert entry0["shared"] is True
+    assert entry0["shared_with"] == [stars[1]]
+    assert entry0["confidence"] == "low"
+    assert entry0["source_index"] == 25
+    assert "GroupSet_Value" in entry0["blocked_reason"]
+
+    # Number selectors must be unaffected by the amount diagnostics.
+    for number in plan["numbers"]:
+        action = next(a for a in report["actions"] if a["plan_step"].get("label") == number)
+        assert action["confidence"] == "high"
+        assert action["unique_selector"] is True
+
+
+def test_shared_input_bdall_creates_diagnostics_and_blocks() -> None:
+    plan = normal_fill_plan()
+    selector_report = selector_report_for(plan)
+    for star in plan["stars"]:
+        selector_report["amount_field_candidates"][star] = [
+            {
+                "tag": "input",
+                "text": star,
+                "frame_url": B03_FRAME_URL,
+                "candidate_selectors": ["input.BDAll"],
+                "amount_diagnostic": {
+                    "matched_label": star,
+                    "source_index": 3,
+                    "className": "BDAll",
+                    "parentText": f"每碰金額 {star}",
+                    "diagnostic_source": "automatic_mapping",
+                },
+            }
+        ]
+
+    report = build_mapping_report(plan, selector_report)
+
+    assert report["status"] == "BLOCKED"
+    assert report["amount_field_status"] == "BLOCKED"
+    assert set(report["ambiguous_amount_fields"]) == set(plan["stars"])
+    assert report["shared_amount_selectors"] == ["input.BDAll"]
+    for entry in _amount_diagnostics(report):
+        assert entry["selector"] == "input.BDAll"
+        assert entry["shared"] is True
+
+
+def test_amount_diagnostics_include_parent_context_excerpts() -> None:
+    plan = normal_fill_plan()
+    selector_report = selector_report_for(plan)
+    for star in plan["stars"][:2]:
+        selector_report["amount_field_candidates"][star] = [shared_group_set_candidate(star)]
+
+    report = build_mapping_report(plan, selector_report)
+
+    entry = _amount_diagnostics(report)[0]
+    assert entry["parentText"]
+    assert entry["grandparentText"]
+    assert entry["diagnostic_source"] == "automatic_mapping"
+
+
+def test_amount_diagnostic_candidate_bounds_outer_html_and_keeps_index() -> None:
+    element = {
+        "tag": "input",
+        "text": "二星",
+        "outerHTML": "<input " + "x" * 5000 + ">",
+        "id": "GroupSet_Value",
+        "name": "amt",
+        "className": "BDAll",
+        "parentText": "每碰金額 二星",
+    }
+
+    candidate = _b03_amount_diagnostic_candidate(element, star="二星", index=25)
+    diag = candidate["amount_diagnostic"]
+
+    assert diag["source_index"] == 25
+    assert diag["matched_label"] == "二星"
+    assert diag["id"] == "GroupSet_Value"
+    assert diag["diagnostic_source"] == "automatic_mapping"
+    assert 0 < len(diag["outerHTML"]) <= AMOUNT_DIAGNOSTIC_OUTER_HTML_LIMIT
+    assert len(diag["outerHTML"]) < 5000
+    # The shared _b03_selector_candidate contract stays intact.
+    assert candidate["candidate_selectors"]
+
+
+def test_amount_diagnostics_do_not_require_structured_data_attributes() -> None:
+    plan = normal_fill_plan()
+    selector_report = selector_report_for(plan)
+    # Candidates carry no data-* structured fields at all.
+    for star in plan["stars"][:2]:
+        selector_report["amount_field_candidates"][star] = [shared_group_set_candidate(star)]
+
+    report = build_mapping_report(plan, selector_report)
+
+    assert _amount_diagnostics(report)
+    for entry in _amount_diagnostics(report):
+        assert not any(str(key).startswith("data-") for key in entry)
+
+
+def test_unique_amount_selectors_produce_no_ambiguity_diagnostics() -> None:
+    plan = normal_fill_plan()
+    selector_report = selector_report_for(plan)
+    for index, star in enumerate(plan["stars"]):
+        selector_report["amount_field_candidates"][star] = [
+            unique_amount_candidate(star, f"#Amount_{index}")
+        ]
+
+    report = build_mapping_report(plan, selector_report)
+
+    assert report["status"] == "SAFE"
+    assert report["amount_field_status"] == "SAFE"
+    assert report["ambiguous_amount_fields"] == []
+    assert report["shared_amount_selectors"] == []
+    assert _amount_diagnostics(report) == []
+    for number in plan["numbers"]:
+        action = next(a for a in report["actions"] if a["plan_step"].get("label") == number)
+        assert action["confidence"] == "high"
+        assert action["unique_selector"] is True
+
+
+def test_amount_diagnostics_agree_with_selector_guard_decision() -> None:
+    plan = normal_fill_plan()
+    selector_report = selector_report_for(plan)
+    for star in plan["stars"][:2]:
+        selector_report["amount_field_candidates"][star] = [shared_group_set_candidate(star)]
+
+    report = build_mapping_report(plan, selector_report)
+
+    guard_unsafe = {
+        a["plan_step"]["star"]
+        for a in report["actions"]
+        if a["plan_step"].get("type") == "set_amount" and a.get("selector_unsafe")
+    }
+    diag_unsafe = {entry["star"] for entry in _amount_diagnostics(report)}
+    # Diagnostics must reflect exactly the guard's unsafe decision.
+    assert guard_unsafe == diag_unsafe
+    assert guard_unsafe == set(report["ambiguous_amount_fields"])
+
+
+def test_pretty_report_contains_amount_diagnostics_section() -> None:
+    plan = normal_fill_plan()
+    selector_report = selector_report_for(plan)
+    for star in plan["stars"][:2]:
+        selector_report["amount_field_candidates"][star] = [shared_group_set_candidate(star)]
+
+    report = build_mapping_report(plan, selector_report)
+    pretty = format_pretty_mapping_report(report)
+
+    assert "Amount Field Diagnostics:" in pretty
+    assert "Shared selector: #GroupSet_Value" in pretty
+    assert "Result: amount fields are not safe for assisted fill" in pretty
+    assert "attributes: id=GroupSet_Value" in pretty
