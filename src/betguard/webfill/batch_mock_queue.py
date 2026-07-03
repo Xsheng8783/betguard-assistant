@@ -206,7 +206,11 @@ def _has_human_approved_items(queue: dict[str, Any]) -> bool:
     return any(entry.get("accepted_by_human") is True for entry in approved)
 
 
-def _build_approved_fill_queue(queue: dict[str, Any]) -> list[dict[str, Any]]:
+def _build_approved_fill_queue(
+    queue: dict[str, Any],
+    *,
+    source_candidates: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     accepted_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     audit = queue.get("audit", {})
     audit_snapshot = {
@@ -215,17 +219,20 @@ def _build_approved_fill_queue(queue: dict[str, Any]) -> list[dict[str, Any]]:
         "preprocessing_status": queue.get("preprocessing_status"),
         "review_action": "accept_valid",
     }
+    items = queue.get("items", [])
+    sources = source_candidates if source_candidates and len(source_candidates) == len(items) else []
     entries: list[dict[str, Any]] = []
-    for item in queue.get("items", []):
+    for position, item in enumerate(items):
         result = item.get("review_result", {})
         if result.get("status") != "ok":
             continue
+        source = sources[position] if position < len(sources) else {}
         entries.append(
             {
                 "index": item.get("index"),
                 "original_fragment": item.get("original_fragment") or item.get("original"),
-                "original_line": item.get("original_line"),
-                "original_lines": list(item.get("original_lines", [])),
+                "original_line": source.get("original_line") or item.get("original_line"),
+                "original_lines": list(source.get("original_lines") or item.get("original_lines", [])),
                 "review_result": copy.deepcopy(result),
                 "bet_type": result.get("type"),
                 "numbers": list(result.get("numbers") or []),
@@ -272,7 +279,7 @@ def accept_valid_candidates_for_mock_queue(queue: dict[str, Any], *, run_first: 
     accepted = build_batch_mock_queue([str(candidate.get("raw", "")) for candidate in valid_candidates])
     accepted["review_action"] = "accept_valid"
     accepted["accepted_from_queue_status"] = source_status
-    accepted["approved_fill_queue"] = _build_approved_fill_queue(accepted)
+    accepted["approved_fill_queue"] = _build_approved_fill_queue(accepted, source_candidates=valid_candidates)
     accepted["preprocessing"]["original_review_audit"] = {
         "status": queue.get("status"),
         "preprocessing_status": queue.get("preprocessing_status"),
@@ -516,6 +523,8 @@ def _candidate_review_items(
                 "index": index,
                 "raw": review_item.get("raw", ""),
                 "original_fragment": review_item.get("raw", ""),
+                "original_line": candidate.get("original_line"),
+                "original_lines": list(candidate.get("original_lines", [])),
                 "line_no": candidate.get("line_no"),
                 "fragment_index": candidate.get("fragment_index"),
                 "summary": review_item.get("summary", ""),

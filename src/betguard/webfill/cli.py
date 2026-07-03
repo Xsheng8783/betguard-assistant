@@ -40,6 +40,7 @@ from betguard.webfill.batch_mock_queue import (
     save_queue_state,
 )
 from betguard.webfill.batch_mock_runner import run_batch_mock_runner_from_file, format_pretty_batch_mock_report
+from betguard.webfill.fill_preview import PREVIEW_SAFETY, build_fill_preview, format_pretty_fill_preview
 from betguard.webfill.fill_mapping_report import build_mapping_report, format_pretty_mapping_report
 from betguard.webfill.fill_mapping import build_b03_selector_mapping, format_pretty_b03_selector_mapping
 from betguard.webfill.inspector import run_dry_run_inspector
@@ -84,6 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-review-accept-valid", action="store_true", help="Accept valid candidates from a NEEDS_REVIEW batch")
     parser.add_argument("--batch-review-reject", action="store_true", help="Reject a NEEDS_REVIEW batch without running mock fill")
     parser.add_argument("--batch-audit-export", action="store_true", help="Export the batch queue audit JSON")
+    parser.add_argument("--fill-preview", action="store_true", help="Show a read-only fill preview from the approved fill queue")
     parser.add_argument("--review-console", action="store_true", help="Print a local review console summary for a batch queue")
     parser.add_argument("--review-report-html", action="store_true", help="Write a local review console HTML report for a batch queue")
     parser.add_argument("--demo-e2e", action="store_true", help="Generate the offline end-to-end demo pack")
@@ -197,6 +199,31 @@ def main() -> None:
             print(format_pretty_batch_mock_queue(queue))
         else:
             print(json.dumps(queue, ensure_ascii=False, indent=2))
+        return
+
+    if args.fill_preview:
+        if not args.queue_path:
+            parser.error("--fill-preview requires --queue")
+        queue = load_queue_state(args.queue_path)
+        try:
+            preview = build_fill_preview(queue)
+        except ValueError as exc:
+            preview = {
+                "mode": "fill_preview",
+                "errors": [str(exc)],
+                "entries": [],
+                "safety": dict(PREVIEW_SAFETY),
+            }
+        if args.pretty:
+            if preview.get("errors"):
+                print("Fill Preview")
+                print("")
+                for error in preview["errors"]:
+                    print(f"Error: {error}")
+            else:
+                print(format_pretty_fill_preview(preview))
+        else:
+            print(json.dumps(preview, ensure_ascii=False, indent=2))
         return
 
     if args.batch_review_accept_valid:
