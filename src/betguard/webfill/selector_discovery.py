@@ -1690,7 +1690,7 @@ def _scan_page(
     warnings: list[str],
 ) -> dict[str, Any]:
     state = _empty_scan_state()
-    for frame_index, frame in enumerate(_collect_all_frames(page, warnings), start=1):
+    for frame_index, frame in enumerate(_collect_scan_frames(page, warnings), start=1):
         state["frames_scanned"] += 1
         frame_url = _safe_frame_url(frame) or source_url
         frame_base_url = active_origin_url(source_url)
@@ -1949,7 +1949,13 @@ def _collect_all_frames(page: Any, warnings: list[str]) -> list[Any]:
         roots = list(page.frames)
     except Exception as exc:  # pragma: no cover - depends on live browser state
         warnings.append(f"unable to list page frames: {exc}")
-        return []
+        roots = []
+
+    # Also seed from the main frame directly, in case ``page.frames`` is empty
+    # or lagging while frameset children attach.
+    main_frame = getattr(page, "main_frame", None)
+    if main_frame is not None and main_frame not in roots:
+        roots = [main_frame, *roots]
 
     frames: list[Any] = []
     seen: set[int] = set()
@@ -1970,6 +1976,54 @@ def _collect_all_frames(page: Any, warnings: list[str]) -> list[Any]:
 
     for frame in roots:
         add_frame(frame)
+    return frames
+
+
+# Classic <frameset>/<frame> sites (e.g. the Tiantianle B03 page) attach their
+# child frame documents slightly after the top document is ready. These bounds
+# let discovery wait (read-only) and re-enumerate so the child frames — which
+# hold the real inputs — are not missed.
+FRAME_SETTLE_ATTEMPTS = 4
+FRAME_SETTLE_TIMEOUT_MS = 1500
+
+
+def _settle_page_frames(page: Any) -> None:
+    """Best-effort, read-only wait so late frameset children can attach.
+
+    Only ever waits/reads; never clicks, fills, submits, or otherwise interacts
+    with the page. Every call is guarded so non-Playwright test doubles no-op.
+    """
+    load_state = getattr(page, "wait_for_load_state", None)
+    if callable(load_state):
+        try:
+            load_state("load", timeout=FRAME_SETTLE_TIMEOUT_MS)
+        except Exception:  # pragma: no cover - depends on live browser state
+            pass
+    wait_timeout = getattr(page, "wait_for_timeout", None)
+    if callable(wait_timeout):
+        try:
+            wait_timeout(300)
+        except Exception:  # pragma: no cover - depends on live browser state
+            pass
+
+
+def _collect_scan_frames(page: Any, warnings: list[str]) -> list[Any]:
+    """Enumerate every accessible frame, re-polling for late frameset children.
+
+    Read-only: only lists frames and waits. When the top document is a
+    ``<frameset>`` whose child ``<frame>`` documents have not attached yet, the
+    first enumeration returns just the root; this re-polls (bounded) until the
+    child frames appear so their DOM (the real B03 inputs) gets scanned.
+    """
+    frames = _collect_all_frames(page, warnings)
+    attempts = 0
+    while len(frames) <= 1 and attempts < FRAME_SETTLE_ATTEMPTS:
+        attempts += 1
+        _settle_page_frames(page)
+        refreshed = _collect_all_frames(page, warnings)
+        if len(refreshed) <= len(frames):
+            break
+        frames = refreshed
     return frames
 
 
