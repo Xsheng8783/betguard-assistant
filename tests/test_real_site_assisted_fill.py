@@ -16,6 +16,7 @@ from betguard.webfill.batch_queue import (
     build_batch_queue,
 )
 from betguard.webfill.real_site_assisted_fill import (
+    AMOUNT_FIELD_QUERY_SELECTOR,
     RISK_LOCK_MESSAGE,
     build_real_site_assisted_fill_preflight,
     execute_actions_on_page,
@@ -68,20 +69,56 @@ class FakeFrame:
         url: str | None = None,
         elements: dict | None = None,
         rendered_text: str = "",
+        amount_field_elements: list[dict] | None = None,
     ):
         self.name = name
         self.url = url if url is not None else f"https://example.invalid/Front/B/B03?frame={name}"
         self.rendered_text = rendered_text
         self._page = page
         self._own_elements = elements
+        self._amount_field_elements = amount_field_elements
 
     def locator(self, selector: str):
+        if selector == AMOUNT_FIELD_QUERY_SELECTOR and self._amount_field_elements is not None:
+            return FakeMultiLocator(self._amount_field_elements)
         if self._own_elements is None:
             return self._page.locator(selector)
         metadata = self._own_elements.get(selector)
         if metadata is None:
             raise AssertionError(f"unexpected selector in frame '{self.name}': {selector}")
         return FakeLocator(self._page, selector, metadata)
+
+
+class FakeElementHandle:
+    """Minimal Playwright-Locator-like double for a single already-found
+    element -- only what ``_frame_has_verified_amount_triple`` needs:
+    ``.evaluate()`` for the element id and ``.bounding_box()`` for position.
+    """
+
+    def __init__(self, data: dict):
+        self._data = data
+
+    def evaluate(self, _script: str):
+        return self._data.get("id", "")
+
+    def bounding_box(self):
+        return self._data.get("box")
+
+
+class FakeMultiLocator:
+    """Minimal Playwright-Locator-like double for a multi-element query
+    (``.count()`` / ``.nth(i)``), used only for the PengBet.Value amount
+    field re-verification query.
+    """
+
+    def __init__(self, elements: list[dict]):
+        self._elements = elements
+
+    def count(self) -> int:
+        return len(self._elements)
+
+    def nth(self, index: int) -> FakeElementHandle:
+        return FakeElementHandle(self._elements[index])
 
 
 class FakePage:
@@ -1604,3 +1641,256 @@ def test_danger_selector_still_rejected_inside_tiantianle_fallback_frame() -> No
     with pytest.raises(RuntimeError):
         execute_actions_on_page(page, [action])
     assert page.clicked == []
+
+
+# --- Frame resolution v3: Shared/Index DOM-signature fallback ---
+#
+# Root cause of the live Tiantianle BLOCKED trial: the runtime page only
+# exposed one frame, unnamed, whose URL was /Front/Shared/Index -- not the
+# recorded /Front/B/B03. Neither exact-name, recorded-URL, nor (apparently)
+# the plain rendered-marker fallback resolved it. /Front/Shared/Index is used
+# by many pages on this site, so it is never trusted on URL alone -- it must
+# also independently prove it is the real bet page via rendered text markers
+# *and* a live re-check of the exact 3-input PengBet.Value row structure the
+# offline mapping already required.
+
+
+def tiantianle_amount_field_elements() -> list[dict]:
+    return [
+        {"id": "", "box": {"x": 65, "y": 245, "width": 60, "height": 20}},
+        {"id": "", "box": {"x": 138, "y": 245, "width": 60, "height": 20}},
+        {"id": "", "box": {"x": 211, "y": 245, "width": 60, "height": 20}},
+    ]
+
+
+def test_shared_index_frame_with_full_signature_resolves_and_clicks() -> None:
+    # Live shape from the bug report: recorded frame="mainFrame" /
+    # frame_url=/Front/B/B03, but runtime only has one unnamed
+    # /Front/Shared/Index frame -- with a genuine Tiantianle betting DOM.
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "",
+            page,
+            url="https://w0.gts362.com/TC4S9h9ZvUyeIDSorO-1kA/Front/Shared/Index",
+            elements={"text=11": {"text": "11", "value": ""}},
+            rendered_text=TIANTIANLE_PAGE_RENDERED_TEXT,
+            amount_field_elements=tiantianle_amount_field_elements(),
+        )
+    ]
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "11",
+        "selector": "text=11",
+        "frame": "mainFrame",
+        "frame_url": "https://w1.gts362.com/6u_rmq1xO0G6m4bNfwLvsQ/Front/B/B03",
+    }
+
+    executed = execute_actions_on_page(page, [action])
+
+    assert executed[0]["executed"] is True
+    assert page.clicked == ["text=11"]
+
+
+def test_shared_index_frame_without_any_signature_blocked() -> None:
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "",
+            page,
+            url="https://w0.gts362.com/token/Front/Shared/Index",
+            elements={},
+            rendered_text="",
+            amount_field_elements=None,
+        )
+    ]
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "11",
+        "selector": "text=11",
+        "frame": "mainFrame",
+        "frame_url": "https://w1.gts362.com/token2/Front/B/B03",
+    }
+
+    with pytest.raises(RuntimeError, match="locator lookup failed"):
+        execute_actions_on_page(page, [action])
+    assert page.clicked == []
+
+
+def test_shared_index_frame_with_only_selector_text_but_no_signature_blocked() -> None:
+    # The target selector genuinely exists in this frame, but it has neither
+    # rendered betting-page text nor the verified amount-field triple --
+    # matching the selector alone must never be enough.
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "",
+            page,
+            url="https://w0.gts362.com/token/Front/Shared/Index",
+            elements={"text=11": {"text": "11", "value": ""}},
+            rendered_text="",  # no betting markers at all
+            amount_field_elements=None,  # no amount fields either
+        )
+    ]
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "11",
+        "selector": "text=11",
+        "frame": "mainFrame",
+        "frame_url": "https://w1.gts362.com/token2/Front/B/B03",
+    }
+
+    with pytest.raises(RuntimeError, match="locator lookup failed"):
+        execute_actions_on_page(page, [action])
+    assert page.clicked == []
+
+
+def test_shared_index_frame_with_markers_but_wrong_amount_field_count_blocked() -> None:
+    # Rendered text looks like a genuine bet page, but the amount-field DOM
+    # re-check finds only 2 PengBet.Value inputs (not the required 3) --
+    # text markers alone must never be enough either.
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "",
+            page,
+            url="https://w0.gts362.com/token/Front/Shared/Index",
+            elements={"text=11": {"text": "11", "value": ""}},
+            rendered_text=TIANTIANLE_PAGE_RENDERED_TEXT,
+            amount_field_elements=tiantianle_amount_field_elements()[:2],
+        )
+    ]
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "11",
+        "selector": "text=11",
+        "frame": "mainFrame",
+        "frame_url": "https://w1.gts362.com/token2/Front/B/B03",
+    }
+
+    with pytest.raises(RuntimeError, match="locator lookup failed"):
+        execute_actions_on_page(page, [action])
+    assert page.clicked == []
+
+
+def test_shared_index_groupset_value_as_target_still_rejected() -> None:
+    action = {
+        "type": "SET_AMOUNT",
+        "star": TWO_STAR,
+        "amount": 100,
+        "selector": "#GroupSet_Value",
+        "frame": "mainFrame",
+        "frame_url": "https://w1.gts362.com/token2/Front/B/B03",
+        "candidate": {"text": TWO_STAR, "value": ""},
+    }
+    error = validate_real_site_action(action)
+    assert error is not None
+    assert "GroupSet_Value" in error
+
+
+def test_shared_index_danger_selector_still_rejected() -> None:
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "",
+            page,
+            url="https://w0.gts362.com/token/Front/Shared/Index",
+            elements={'button[data-danger="true"]': {"text": "06", "value": ""}},
+            rendered_text=TIANTIANLE_PAGE_RENDERED_TEXT,
+            amount_field_elements=tiantianle_amount_field_elements(),
+        )
+    ]
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "06",
+        "selector": 'button[data-danger="true"]',
+        "frame": "mainFrame",
+        "frame_url": "https://w1.gts362.com/token2/Front/B/B03",
+    }
+
+    with pytest.raises(RuntimeError):
+        execute_actions_on_page(page, [action])
+    assert page.clicked == []
+
+
+def test_ambiguous_multiple_shared_index_betting_frames_blocked() -> None:
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "",
+            page,
+            url="https://w0.gts362.com/tokenA/Front/Shared/Index",
+            elements={"text=11": {"text": "11", "value": ""}},
+            rendered_text=TIANTIANLE_PAGE_RENDERED_TEXT,
+            amount_field_elements=tiantianle_amount_field_elements(),
+        ),
+        FakeFrame(
+            "",
+            page,
+            url="https://w0.gts362.com/tokenB/Front/Shared/Index",
+            elements={"text=11": {"text": "11", "value": ""}},
+            rendered_text=TIANTIANLE_PAGE_RENDERED_TEXT,
+            amount_field_elements=tiantianle_amount_field_elements(),
+        ),
+    ]
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "11",
+        "selector": "text=11",
+        "frame": "mainFrame",
+        "frame_url": "https://w1.gts362.com/token2/Front/B/B03",
+    }
+
+    with pytest.raises(RuntimeError, match="ambiguous frame match"):
+        execute_actions_on_page(page, [action])
+    assert page.clicked == []
+
+
+def test_full_run_via_shared_index_fallback_one_item_no_auto_submit_no_auto_next() -> None:
+    text = "\n".join(
+        [
+            f"06.13.23.22 {TWO_THREE}50",
+            f"08.09.10.11 {TWO_THREE}100",
+        ]
+    )
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "",  # unnamed, exactly like the live bug report
+            page,
+            url="https://w0.gts362.com/TC4S9h9ZvUyeIDSorO-1kA/Front/Shared/Index",
+            elements={
+                'button[data-number="06"]': {"text": "06", "value": ""},
+                'button[data-number="13"]': {"text": "13", "value": ""},
+                'button[data-number="23"]': {"text": "23", "value": ""},
+                'button[data-number="22"]': {"text": "22", "value": ""},
+                'input[data-bind*="PengBet.Value"] >> nth=0': {"text": TWO_STAR, "value": ""},
+                'input[data-bind*="PengBet.Value"] >> nth=1': {"text": THREE_STAR, "value": ""},
+            },
+            rendered_text=TIANTIANLE_PAGE_RENDERED_TEXT,
+            amount_field_elements=tiantianle_amount_field_elements(),
+        )
+    ]
+
+    report = run_real_site_assisted_fill_with_page(
+        approved_queue_for(text),
+        clean_profile(),
+        page,
+        item_index=0,
+        risk_acknowledged=True,
+    )
+
+    assert report["status"] == WAITING_FOR_HUMAN_CONFIRM
+    assert report["queue"]["items"][1]["status"] == PENDING
+    assert report["final_decision"]["real_site_auto_submit"] is False
+    assert report["danger_buttons_clicked"] == []
+    assert page.clicked == [
+        'button[data-number="06"]',
+        'button[data-number="13"]',
+        'button[data-number="23"]',
+        'button[data-number="22"]',
+    ]
+    assert page.filled == {
+        'input[data-bind*="PengBet.Value"] >> nth=0': "50",
+        'input[data-bind*="PengBet.Value"] >> nth=1': "50",
+    }

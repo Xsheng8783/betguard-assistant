@@ -5,7 +5,12 @@ from copy import deepcopy
 from typing import Any
 
 from betguard.webfill.batch_queue import WAITING_FOR_HUMAN_CONFIRM, mark_item_waiting_for_human
-from betguard.webfill.fill_mapping import B03_FRAME_MARKER
+from betguard.webfill.fill_mapping import (
+    AMOUNT_INPUT_DATA_BIND_MARKER,
+    AMOUNT_ROW_TOP_TOLERANCE,
+    B03_FRAME_MARKER,
+    REQUIRED_AMOUNT_FIELD_COUNT,
+)
 from betguard.webfill.real_site_fill_plan import build_real_site_assisted_fill_plan
 from betguard.webfill.real_site_fill_preflight import (
     build_execution_actions_from_preflight,
@@ -519,23 +524,33 @@ def _resolve_first_locator(locator: Any) -> Any:
     return first
 
 
-# --- Frame resolution v2: exact name -> URL/path -> rendered-content markers ---
+# --- Frame resolution v3: exact name -> URL/path -> rendered-content markers
+# -> Shared/Index DOM signature ---
 #
 # Frame Fix v1 threaded a discovered ``frame`` name into every execution
 # action, but a real Playwright page's live frame ``name`` is not guaranteed
 # to match what was recorded during selector discovery, or to stay stable
-# across page loads. This resolver never blindly falls back to the top-level
-# page and never picks a frame merely because it happens to contain the
-# target selector -- the frame must be identified by name, then URL/path,
-# then (only as a last resort) by genuine rendered betting-page content.
-# Any ambiguity (more than one candidate frame at a given step) is BLOCKED,
-# not guessed.
+# across page loads. Frame Fix v2 added URL/path and rendered-marker
+# fallbacks. Live Tiantianle trials then showed a runtime shape neither of
+# those cover: the site can expose the bet page through a single, generically
+# named ``/Front/Shared/Index`` frame instead of the recorded ``/Front/B/B03``
+# route. ``/Front/Shared/Index`` is used by many pages on this site, so its
+# URL alone is never trusted -- it is only accepted when the frame
+# independently proves it is the real bet page via rendered text markers
+# *and* a live re-verification of the exact 3-input PengBet.Value row the
+# offline mapping already required. This resolver never blindly falls back
+# to the top-level page and never picks a frame merely because it happens to
+# contain the target selector. Any ambiguity (more than one candidate frame
+# at a given step) is BLOCKED, not guessed.
 
 BETTING_FRAME_GAME_TEXT_MARKERS = ("539 - 下注資訊", "天天樂 - 下注資訊")
 BETTING_FRAME_STAR_MARKERS = ("二星", "三星", "四星")
 BETTING_FRAME_COMBO_MARKER = "連碰"
 NUMBER_BOARD_TOKEN_PATTERN = re.compile(r"(?<!\d)(0[1-9]|[12]\d|3[0-9])(?!\d)")
 MIN_NUMBER_BOARD_TOKENS = 10
+
+SHARED_INDEX_URL_MARKER = "/Front/Shared/Index"
+AMOUNT_FIELD_QUERY_SELECTOR = f'input[data-bind*="{AMOUNT_INPUT_DATA_BIND_MARKER}"]'
 
 
 def _resolve_frame(page: Any, action: dict[str, Any]) -> Any:
@@ -565,19 +580,107 @@ def _resolve_frame(page: Any, action: dict[str, Any]) -> Any:
                 f"ambiguous frame match for url '{frame_url_ref}': {len(url_matches)} frames matched"
             )
 
-    # 3) Last resort: safe rendered-content markers unique to the real
-    # betting page (539 - 下注資訊 or 天天樂 - 下注資訊 / 二三四星 / 連碰 / a
-    # genuine 01~39 number board -- both games share the same page
-    # template). A frame that merely happens to contain the target selector
-    # text is never enough on its own -- the frame must independently look
-    # like the real betting page before we trust it.
-    content_matches = [frame for frame in frames if _frame_looks_like_betting_frame(_frame_rendered_text(frame))]
+    # 3) Rendered-content markers unique to the real betting page (539 -
+    # 下注資訊 or 天天樂 - 下注資訊 / 二三四星 / 連碰 / a genuine 01~39 number
+    # board -- both games share the same page template). A frame that merely
+    # happens to contain the target selector text is never enough on its own
+    # -- the frame must independently look like the real betting page before
+    # we trust it. Frames whose URL contains the generic /Front/Shared/Index
+    # path are excluded here on purpose -- that path is used by many pages on
+    # this site, so text markers alone are not enough for it; those frames
+    # are only trusted via step 4's stricter combined check below.
+    content_matches = [
+        frame
+        for frame in frames
+        if SHARED_INDEX_URL_MARKER not in _frame_attr(frame, "url")
+        and _frame_looks_like_betting_frame(_frame_rendered_text(frame))
+    ]
     if len(content_matches) == 1:
         return content_matches[0]
     if len(content_matches) > 1:
         raise RuntimeError("ambiguous frame match: multiple frames render betting-page markers")
 
+    # 4) Shared/Index DOM-signature fallback: some live sessions only expose
+    # the bet page through a generically-named /Front/Shared/Index frame,
+    # never recorded as the mapping's frame_url (which points at
+    # /Front/B/B03). Because /Front/Shared/Index is not unique to the bet
+    # page, URL containment alone is never enough here -- the frame must
+    # also independently prove it via rendered text markers *and* a live
+    # re-check of the exact 3-input PengBet.Value row structure.
+    shared_index_matches = [
+        frame
+        for frame in frames
+        if SHARED_INDEX_URL_MARKER in _frame_attr(frame, "url")
+        and _frame_has_strong_shared_index_signature(frame)
+    ]
+    if len(shared_index_matches) == 1:
+        return shared_index_matches[0]
+    if len(shared_index_matches) > 1:
+        raise RuntimeError(
+            "ambiguous frame match: multiple Shared/Index frames show betting-page DOM signature"
+        )
+
     raise RuntimeError(_frame_not_found_message(frames, frame_name_ref, frame_url_ref))
+
+
+def _frame_has_strong_shared_index_signature(frame: Any) -> bool:
+    """True only when a /Front/Shared/Index frame independently proves it is
+    the real bet page: genuine rendered text markers (game name, all three
+    star labels, 連碰, a real 01~39 number board) *and* a live DOM
+    re-verification of exactly three visible PengBet.Value amount inputs in
+    one row -- the same structural fact the offline mapping already
+    required. Read-only: only counts/measures already-rendered elements,
+    never clicks or fills anything.
+    """
+    if not _frame_looks_like_betting_frame(_frame_rendered_text(frame)):
+        return False
+    return _frame_has_verified_amount_triple(frame)
+
+
+def _frame_has_verified_amount_triple(frame: Any) -> bool:
+    try:
+        locator = frame.locator(AMOUNT_FIELD_QUERY_SELECTOR)
+        count = locator.count()
+    except Exception:
+        return False
+    if count != REQUIRED_AMOUNT_FIELD_COUNT:
+        return False
+
+    boxes: list[dict[str, Any]] = []
+    for index in range(count):
+        element = locator.nth(index)
+        try:
+            element_id = element.evaluate("el => el.id || ''")
+        except Exception:
+            return False
+        # Defense-in-depth: even though #GroupSet_Value has no PengBet.Value
+        # data-bind attribute and should never match this query, an explicit
+        # id-based reject keeps this consistent with every other layer that
+        # excludes it (mapping, preflight, execution-action validation).
+        if str(element_id or "") == "GroupSet_Value":
+            return False
+        try:
+            box = element.bounding_box()
+        except Exception:
+            return False
+        if not box:
+            return False
+        boxes.append(box)
+
+    tops = [box.get("y") for box in boxes]
+    if any(top is None for top in tops):
+        return False
+    reference_top = tops[0]
+    if any(abs(top - reference_top) > AMOUNT_ROW_TOP_TOLERANCE for top in tops):
+        return False
+
+    lefts = [box.get("x") for box in boxes]
+    if any(left is None for left in lefts):
+        return False
+    if len(set(lefts)) != REQUIRED_AMOUNT_FIELD_COUNT:
+        return False
+
+    return True
 
 
 def _frame_not_found_message(frames: list[Any], frame_name_ref: str, frame_url_ref: str) -> str:
