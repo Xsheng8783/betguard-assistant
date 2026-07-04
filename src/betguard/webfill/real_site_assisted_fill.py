@@ -531,7 +531,7 @@ def _resolve_first_locator(locator: Any) -> Any:
 # Any ambiguity (more than one candidate frame at a given step) is BLOCKED,
 # not guessed.
 
-BETTING_FRAME_TEXT_MARKER = "539 - 下注資訊"
+BETTING_FRAME_GAME_TEXT_MARKERS = ("539 - 下注資訊", "天天樂 - 下注資訊")
 BETTING_FRAME_STAR_MARKERS = ("二星", "三星", "四星")
 BETTING_FRAME_COMBO_MARKER = "連碰"
 NUMBER_BOARD_TOKEN_PATTERN = re.compile(r"(?<!\d)(0[1-9]|[12]\d|3[0-9])(?!\d)")
@@ -566,10 +566,11 @@ def _resolve_frame(page: Any, action: dict[str, Any]) -> Any:
             )
 
     # 3) Last resort: safe rendered-content markers unique to the real
-    # betting page (539 - 下注資訊 / 二三四星 / 連碰 / a genuine 01~39 number
-    # board). A frame that merely happens to contain the target selector text
-    # is never enough on its own -- the frame must independently look like
-    # the real betting page before we trust it.
+    # betting page (539 - 下注資訊 or 天天樂 - 下注資訊 / 二三四星 / 連碰 / a
+    # genuine 01~39 number board -- both games share the same page
+    # template). A frame that merely happens to contain the target selector
+    # text is never enough on its own -- the frame must independently look
+    # like the real betting page before we trust it.
     content_matches = [frame for frame in frames if _frame_looks_like_betting_frame(_frame_rendered_text(frame))]
     if len(content_matches) == 1:
         return content_matches[0]
@@ -609,9 +610,14 @@ def _frame_url_matches(frame: Any, frame_url_ref: str) -> bool:
 
 
 def _frame_looks_like_betting_frame(text: str) -> bool:
+    """True only for a frame whose rendered text is a genuine 二三四星 bet
+    page -- for *any* supported game (539 or 天天樂 share the same page
+    template). Requires one game-name marker, all three star labels, the
+    連碰 marker, and a real 01~39 number board, never just one weak signal.
+    """
     if not text:
         return False
-    if BETTING_FRAME_TEXT_MARKER not in text:
+    if not any(marker in text for marker in BETTING_FRAME_GAME_TEXT_MARKERS):
         return False
     if not all(marker in text for marker in BETTING_FRAME_STAR_MARKERS):
         return False

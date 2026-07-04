@@ -1440,3 +1440,167 @@ def test_frame_resolution_still_produces_no_submit_no_confirm_no_auto_next() -> 
         "candidate": {"text": TWO_STAR, "value": ""},
     }
     assert validate_real_site_action(groupset_action) is not None
+
+
+# --- Frame resolution v4: Tiantianle rendered-marker compatibility ---
+#
+# Confirmed gap: the rendered-content fallback previously required the
+# literal "539 - 下注資訊" marker, so a genuine Tiantianle frame (whose page
+# reads "天天樂 - 下注資訊") could never be recognized as the betting frame
+# via the content-marker last-resort step -- even though 539 and Tiantianle
+# share the same page template and B03 route. Fixed by accepting either
+# game's name marker while keeping every other requirement (all three star
+# labels, 連碰, a genuine 01~39 number board) exactly as strict as before.
+
+TIANTIANLE_PAGE_RENDERED_TEXT = (
+    "天天樂 - 下注資訊\n二星 三星 四星\n連碰\n"
+    "01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 "
+    "21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39"
+)
+
+
+def test_539_rendered_marker_still_works() -> None:
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "frameX",
+            page,
+            url="https://www.gts362.com/some/other/path",
+            elements={"text=23": {"text": "23", "value": ""}},
+            rendered_text=BETTING_PAGE_RENDERED_TEXT,  # "539 - 下注資訊" flavor
+        )
+    ]
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "23",
+        "selector": "text=23",
+        "frame": "mainFrame",  # name fails
+        "frame_url": "/Front/B/B03",  # url fails (frame's URL doesn't contain it)
+    }
+
+    executed = execute_actions_on_page(page, [action])
+
+    assert executed[0]["executed"] is True
+    assert page.clicked == ["text=23"]
+
+
+def test_tiantianle_rendered_marker_now_works() -> None:
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "frameY",
+            page,
+            url="https://www.gts362.com/some/other/path",
+            elements={"text=23": {"text": "23", "value": ""}},
+            rendered_text=TIANTIANLE_PAGE_RENDERED_TEXT,
+        )
+    ]
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "23",
+        "selector": "text=23",
+        "frame": "mainFrame",  # name fails
+        "frame_url": "/Front/B/B03",  # url fails (frame's URL doesn't contain it)
+    }
+
+    executed = execute_actions_on_page(page, [action])
+
+    assert executed[0]["executed"] is True
+    assert page.clicked == ["text=23"]
+
+
+def test_wrong_or_random_page_marker_still_blocked() -> None:
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "frameZ",
+            page,
+            url="https://www.gts362.com/ads/banner",
+            elements={"text=23": {"text": "23", "value": ""}},
+            rendered_text="這是首頁廣告內容，剛好也有數字 23 但完全不是下注頁",
+        )
+    ]
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "23",
+        "selector": "text=23",
+        "frame": "mainFrame",
+        "frame_url": "/Front/B/B03",
+    }
+
+    with pytest.raises(RuntimeError, match="locator lookup failed"):
+        execute_actions_on_page(page, [action])
+    assert page.clicked == []
+
+
+def test_ambiguous_539_and_tiantianle_frames_both_matching_blocked() -> None:
+    # Two frames each independently look like a genuine betting page (one
+    # 539-flavored, one Tiantianle-flavored) -- neither name nor URL
+    # disambiguates them, so this must BLOCK rather than guess either one.
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "frameA",
+            page,
+            url="https://www.gts362.com/other/a",
+            elements={"text=23": {"text": "23", "value": ""}},
+            rendered_text=BETTING_PAGE_RENDERED_TEXT,
+        ),
+        FakeFrame(
+            "frameB",
+            page,
+            url="https://www.gts362.com/other/b",
+            elements={"text=23": {"text": "23", "value": ""}},
+            rendered_text=TIANTIANLE_PAGE_RENDERED_TEXT,
+        ),
+    ]
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "23",
+        "selector": "text=23",
+        "frame": "mainFrame",
+        "frame_url": "/Front/B/B03",
+    }
+
+    with pytest.raises(RuntimeError, match="ambiguous frame match"):
+        execute_actions_on_page(page, [action])
+    assert page.clicked == []
+
+
+def test_groupset_value_still_rejected_with_tiantianle_frame() -> None:
+    action = {
+        "type": "SET_AMOUNT",
+        "star": TWO_STAR,
+        "amount": 50,
+        "selector": "#GroupSet_Value",
+        "frame": "mainFrame",
+        "frame_url": "/Front/B/B03",
+        "candidate": {"text": TWO_STAR, "value": ""},
+    }
+    error = validate_real_site_action(action)
+    assert error is not None
+    assert "GroupSet_Value" in error
+
+
+def test_danger_selector_still_rejected_inside_tiantianle_fallback_frame() -> None:
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "frameY",
+            page,
+            url="https://www.gts362.com/some/other/path",
+            elements={'button[data-danger="true"]': {"text": "06", "value": ""}},
+            rendered_text=TIANTIANLE_PAGE_RENDERED_TEXT,
+        )
+    ]
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "06",
+        "selector": 'button[data-danger="true"]',
+        "frame": "mainFrame",
+        "frame_url": "/Front/B/B03",
+    }
+
+    with pytest.raises(RuntimeError):
+        execute_actions_on_page(page, [action])
+    assert page.clicked == []
