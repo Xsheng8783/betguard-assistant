@@ -672,6 +672,15 @@ def _shared_index_signature_diagnostics(frame: Any) -> dict[str, Any]:
     }
     diagnostics.update(_amount_triple_diagnostics(frame))
 
+    # When both the rendered text AND the amount query came back empty, the
+    # betting DOM is probably not directly inside this frame at all (it may
+    # be one level deeper, e.g. a frameset/iframe this frame merely hosts).
+    # Add bounded, read-only structural diagnostics to explain why, without
+    # changing whether this frame is accepted -- acceptance logic is
+    # unchanged from before this diagnostic was added.
+    if not diagnostics["rendered_text_available"] and diagnostics["amount_query_count"] == 0:
+        diagnostics["empty_frame_diagnostics"] = _empty_shared_index_diagnostics(frame)
+
     diagnostics["final_shared_index_signature_passed"] = (
         diagnostics["shared_index_url_match"]
         and diagnostics["rendered_text_available"]
@@ -741,6 +750,111 @@ def _amount_triple_diagnostics(frame: Any) -> dict[str, Any]:
     return result
 
 
+MAX_CHILD_FRAME_DIAGNOSTIC_ENTRIES = 10
+DIAGNOSTIC_VALUE_TRUNCATE_LENGTH = 120
+
+# One bounded, read-only round trip: never touches full page HTML, only
+# document.readyState, whether <body> exists, counts of nested frame/iframe
+# tags, and up to 10 of their tag/src/name/id attributes (truncated on the
+# Python side too, in case the DOM contains an unexpectedly long attribute).
+EMPTY_FRAME_DIAGNOSTIC_SCRIPT = (
+    "() => {"
+    " const body = document.body;"
+    " const nested = body ? Array.from(body.querySelectorAll('frame, iframe')) : [];"
+    " return {"
+    " bodyExists: !!body,"
+    " readyState: document.readyState || '',"
+    " frameIframeCount: nested.length,"
+    " framesetFrameTagCount: body ? body.querySelectorAll('frame').length : 0,"
+    " entries: nested.slice(0, 10).map(e => ({"
+    " tag: e.tagName || '',"
+    " src: e.getAttribute('src') || '',"
+    " name: e.getAttribute('name') || '',"
+    " id: e.getAttribute('id') || ''"
+    " }))"
+    " };"
+    " }"
+)
+
+
+def _empty_shared_index_diagnostics(frame: Any) -> dict[str, Any]:
+    """Bounded, read-only diagnostics for why a Shared/Index frame's rendered
+    text and amount query both came back empty.
+
+    Never dumps full HTML or unbounded page text -- only booleans, counts,
+    and up to 10 truncated tag/src/name/id entries for nested frame/iframe
+    elements, plus (when available) Playwright's own ``child_frames``
+    name/url list. This never changes acceptance -- it only explains a
+    failure that the existing checks already produced.
+    """
+    result: dict[str, Any] = {
+        "body_evaluate_raised": False,
+        "body_exists": None,
+        "document_ready_state": None,
+        "frame_iframe_count": None,
+        "frameset_frame_tag_count": None,
+        "child_frame_or_iframe_entries": [],
+        "b03_src_found": False,
+        "front_b_src_found": False,
+        "b03_token_found": False,
+        "shared_index_src_found": False,
+        "child_frames_count": None,
+        "child_frames": [],
+    }
+
+    info: Any = None
+    try:
+        info = frame.evaluate(EMPTY_FRAME_DIAGNOSTIC_SCRIPT)
+    except Exception:
+        result["body_evaluate_raised"] = True
+
+    if isinstance(info, dict):
+        result["body_exists"] = bool(info.get("bodyExists"))
+        result["document_ready_state"] = _truncate_diagnostic_value(str(info.get("readyState") or ""))
+        result["frame_iframe_count"] = info.get("frameIframeCount")
+        result["frameset_frame_tag_count"] = info.get("framesetFrameTagCount")
+
+        entries = info.get("entries") or []
+        bounded_entries = [
+            {
+                "tag": _truncate_diagnostic_value(str(entry.get("tag") or "")),
+                "src": _truncate_diagnostic_value(str(entry.get("src") or "")),
+                "name": _truncate_diagnostic_value(str(entry.get("name") or "")),
+                "id": _truncate_diagnostic_value(str(entry.get("id") or "")),
+            }
+            for entry in list(entries)[:MAX_CHILD_FRAME_DIAGNOSTIC_ENTRIES]
+        ]
+        result["child_frame_or_iframe_entries"] = bounded_entries
+
+        all_srcs = " ".join(entry["src"] for entry in bounded_entries)
+        result["b03_src_found"] = "/Front/B/B03" in all_srcs
+        result["front_b_src_found"] = "/Front/B/" in all_srcs
+        result["b03_token_found"] = "B03" in all_srcs
+        result["shared_index_src_found"] = "Shared/Index" in all_srcs
+
+    child_frames_attr = getattr(frame, "child_frames", None)
+    if child_frames_attr is not None:
+        try:
+            child_frames = child_frames_attr() if callable(child_frames_attr) else child_frames_attr
+            child_frames = list(child_frames)
+        except Exception:
+            child_frames = []
+        result["child_frames_count"] = len(child_frames)
+        result["child_frames"] = [
+            {
+                "name": _truncate_diagnostic_value(_frame_attr(child, "name")),
+                "url": _truncate_diagnostic_value(_frame_attr(child, "url")),
+            }
+            for child in child_frames[:MAX_CHILD_FRAME_DIAGNOSTIC_ENTRIES]
+        ]
+
+    return result
+
+
+def _truncate_diagnostic_value(text: str, limit: int = DIAGNOSTIC_VALUE_TRUNCATE_LENGTH) -> str:
+    return text[:limit]
+
+
 def _frame_not_found_message(
     frames: list[Any],
     frame_name_ref: str,
@@ -771,8 +885,31 @@ def _frame_not_found_message(
     return message
 
 
+EMPTY_FRAME_DIAGNOSTIC_KEYS = (
+    "body_evaluate_raised",
+    "body_exists",
+    "document_ready_state",
+    "frame_iframe_count",
+    "frameset_frame_tag_count",
+    "b03_src_found",
+    "front_b_src_found",
+    "b03_token_found",
+    "shared_index_src_found",
+    "child_frame_or_iframe_entries",
+    "child_frames_count",
+    "child_frames",
+)
+
+
 def _format_shared_index_diagnostics(diagnostics: dict[str, Any]) -> str:
-    return ", ".join(f"{key}={diagnostics.get(key)}" for key in SHARED_INDEX_DIAGNOSTIC_KEYS)
+    base = ", ".join(f"{key}={diagnostics.get(key)}" for key in SHARED_INDEX_DIAGNOSTIC_KEYS)
+    empty_frame_diagnostics = diagnostics.get("empty_frame_diagnostics")
+    if not empty_frame_diagnostics:
+        return base
+    empty_parts = ", ".join(
+        f"{key}={empty_frame_diagnostics.get(key)}" for key in EMPTY_FRAME_DIAGNOSTIC_KEYS
+    )
+    return f"{base}, empty_frame_diagnostics=({empty_parts})"
 
 
 def _frame_url_matches(frame: Any, frame_url_ref: str) -> bool:

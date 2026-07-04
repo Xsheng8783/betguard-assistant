@@ -70,6 +70,9 @@ class FakeFrame:
         elements: dict | None = None,
         rendered_text: str = "",
         amount_field_elements: list[dict] | None = None,
+        empty_frame_diagnostic_data: dict | None = None,
+        empty_frame_diagnostic_raises: bool = False,
+        child_frames: list | None = None,
     ):
         self.name = name
         self.url = url if url is not None else f"https://example.invalid/Front/B/B03?frame={name}"
@@ -77,6 +80,10 @@ class FakeFrame:
         self._page = page
         self._own_elements = elements
         self._amount_field_elements = amount_field_elements
+        self._empty_frame_diagnostic_data = empty_frame_diagnostic_data
+        self._empty_frame_diagnostic_raises = empty_frame_diagnostic_raises
+        if child_frames is not None:
+            self.child_frames = child_frames
 
     def locator(self, selector: str):
         if selector == AMOUNT_FIELD_QUERY_SELECTOR and self._amount_field_elements is not None:
@@ -87,6 +94,17 @@ class FakeFrame:
         if metadata is None:
             raise AssertionError(f"unexpected selector in frame '{self.name}': {selector}")
         return FakeLocator(self._page, selector, metadata)
+
+    def evaluate(self, _script: str):
+        """Used only by the empty-Shared/Index structural diagnostics --
+        distinct from ``.locator(...).evaluate()`` used for rendered text and
+        per-element checks.
+        """
+        if self._empty_frame_diagnostic_raises:
+            raise RuntimeError("simulated frame.evaluate failure")
+        if self._empty_frame_diagnostic_data is not None:
+            return self._empty_frame_diagnostic_data
+        return {}
 
 
 class FakeElementHandle:
@@ -2133,3 +2151,283 @@ def test_shared_index_passing_frame_still_resolves_after_diagnostics_refactor() 
 
     assert executed[0]["executed"] is True
     assert page.clicked == ["text=11"]
+
+
+# --- Empty Shared/Index frame diagnostics v1 ---
+#
+# The live Tiantianle trial hit a Shared/Index frame whose rendered_text was
+# empty AND whose PengBet.Value query found 0 elements -- the previous
+# diagnostics could confirm THAT both were empty but not WHY. These tests
+# lock in the new bounded, read-only structural diagnostics (readyState,
+# body_exists, nested frame/iframe count and truncated src/name/id entries,
+# and Playwright's own child_frames list) that only activate in exactly that
+# situation, and never change acceptance -- the passing-signature test at
+# the bottom proves that.
+
+
+def shared_index_action_for_11() -> dict:
+    return {
+        "type": "SELECT_NUMBER",
+        "number": "11",
+        "selector": "text=11",
+        "frame": "mainFrame",
+        "frame_url": "https://w1.gts362.com/token2/Front/B/B03",
+    }
+
+
+def test_empty_shared_index_reports_body_missing() -> None:
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "",
+            page,
+            url="https://w0.gts362.com/token/Front/Shared/Index",
+            elements={},
+            rendered_text="",
+            amount_field_elements=[],
+            empty_frame_diagnostic_data={
+                "bodyExists": False,
+                "readyState": "loading",
+                "frameIframeCount": 0,
+                "framesetFrameTagCount": 0,
+                "entries": [],
+            },
+        )
+    ]
+
+    with pytest.raises(RuntimeError) as excinfo:
+        execute_actions_on_page(page, [shared_index_action_for_11()])
+
+    message = str(excinfo.value)
+    assert "body_exists=False" in message
+    assert "document_ready_state=loading" in message
+    assert page.clicked == []
+
+
+def test_empty_shared_index_reports_frameset_with_b03_src() -> None:
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "",
+            page,
+            url="https://w0.gts362.com/token/Front/Shared/Index",
+            elements={},
+            rendered_text="",
+            amount_field_elements=[],
+            empty_frame_diagnostic_data={
+                "bodyExists": True,
+                "readyState": "complete",
+                "frameIframeCount": 1,
+                "framesetFrameTagCount": 1,
+                "entries": [
+                    {
+                        "tag": "FRAME",
+                        "src": "https://w1.gts362.com/tok/Front/B/B03",
+                        "name": "mainFrame",
+                        "id": "",
+                    }
+                ],
+            },
+        )
+    ]
+
+    with pytest.raises(RuntimeError) as excinfo:
+        execute_actions_on_page(page, [shared_index_action_for_11()])
+
+    message = str(excinfo.value)
+    assert "frameset_frame_tag_count=1" in message
+    assert "b03_src_found=True" in message
+    assert "front_b_src_found=True" in message
+    assert "b03_token_found=True" in message
+    assert "'name': 'mainFrame'" in message
+    assert page.clicked == []
+
+
+def test_empty_shared_index_reports_iframe_with_b03_src() -> None:
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "",
+            page,
+            url="https://w0.gts362.com/token/Front/Shared/Index",
+            elements={},
+            rendered_text="",
+            amount_field_elements=[],
+            empty_frame_diagnostic_data={
+                "bodyExists": True,
+                "readyState": "complete",
+                "frameIframeCount": 1,
+                "framesetFrameTagCount": 0,
+                "entries": [
+                    {
+                        "tag": "IFRAME",
+                        "src": "/Front/B/B03?x=1",
+                        "name": "",
+                        "id": "betFrame",
+                    }
+                ],
+            },
+        )
+    ]
+
+    with pytest.raises(RuntimeError) as excinfo:
+        execute_actions_on_page(page, [shared_index_action_for_11()])
+
+    message = str(excinfo.value)
+    assert "frame_iframe_count=1" in message
+    assert "b03_src_found=True" in message
+    assert "'tag': 'IFRAME'" in message
+    assert "'id': 'betFrame'" in message
+
+
+def test_empty_shared_index_diagnostics_are_bounded_not_full_html() -> None:
+    huge_src = "https://w0.gts362.com/" + ("x" * 5000) + "/Front/B/B03"
+    many_entries = [
+        {"tag": "IFRAME", "src": f"/some/other/path/{i}", "name": "", "id": ""} for i in range(50)
+    ]
+    many_entries[0]["src"] = huge_src
+
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "",
+            page,
+            url="https://w0.gts362.com/token/Front/Shared/Index",
+            elements={},
+            rendered_text="",
+            amount_field_elements=[],
+            empty_frame_diagnostic_data={
+                "bodyExists": True,
+                "readyState": "complete",
+                "frameIframeCount": 50,
+                "framesetFrameTagCount": 0,
+                "entries": many_entries,
+            },
+            child_frames=[FakeFrame(f"child{i}", page, url=f"/child/{i}") for i in range(30)],
+        )
+    ]
+
+    with pytest.raises(RuntimeError) as excinfo:
+        execute_actions_on_page(page, [shared_index_action_for_11()])
+
+    message = str(excinfo.value)
+    # Full 5000-char src must never appear verbatim; only a bounded prefix.
+    assert huge_src not in message
+    assert len(message) < 8000
+    # At most 10 nested entries and at most 10 child_frames are ever surfaced.
+    assert message.count("'tag':") <= 10
+    assert "child_frames_count=30" in message
+
+
+def test_empty_shared_index_reports_child_frames_when_available() -> None:
+    page = FakePage({})
+    child = FakeFrame("betChildFrame", page, url="https://w1.gts362.com/tok/Front/B/B03")
+    page.frames = [
+        FakeFrame(
+            "",
+            page,
+            url="https://w0.gts362.com/token/Front/Shared/Index",
+            elements={},
+            rendered_text="",
+            amount_field_elements=[],
+            empty_frame_diagnostic_data={
+                "bodyExists": True,
+                "readyState": "complete",
+                "frameIframeCount": 0,
+                "framesetFrameTagCount": 0,
+                "entries": [],
+            },
+            child_frames=[child],
+        )
+    ]
+
+    with pytest.raises(RuntimeError) as excinfo:
+        execute_actions_on_page(page, [shared_index_action_for_11()])
+
+    message = str(excinfo.value)
+    assert "child_frames_count=1" in message
+    assert "betChildFrame" in message
+
+
+def test_empty_shared_index_evaluate_exception_reported_safely() -> None:
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "",
+            page,
+            url="https://w0.gts362.com/token/Front/Shared/Index",
+            elements={},
+            rendered_text="",
+            amount_field_elements=[],
+            empty_frame_diagnostic_raises=True,
+        )
+    ]
+
+    with pytest.raises(RuntimeError) as excinfo:
+        execute_actions_on_page(page, [shared_index_action_for_11()])
+
+    message = str(excinfo.value)
+    assert "body_evaluate_raised=True" in message
+    assert page.clicked == []
+
+
+def test_empty_shared_index_diagnostics_do_not_change_acceptance() -> None:
+    # Same passing scenario as before this diagnostic was added: valid
+    # rendered text + valid amount triple -- must still resolve exactly the
+    # same way regardless of the new (unused, since not empty) diagnostics.
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "",
+            page,
+            url="https://w0.gts362.com/token/Front/Shared/Index",
+            elements={"text=11": {"text": "11", "value": ""}},
+            rendered_text=TIANTIANLE_PAGE_RENDERED_TEXT,
+            amount_field_elements=tiantianle_amount_field_elements(),
+        )
+    ]
+
+    executed = execute_actions_on_page(page, [shared_index_action_for_11()])
+
+    assert executed[0]["executed"] is True
+    assert page.clicked == ["text=11"]
+
+
+def test_danger_selector_still_rejected_with_empty_shared_index_diagnostics() -> None:
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "",
+            page,
+            url="https://w0.gts362.com/token/Front/Shared/Index",
+            elements={'button[data-danger="true"]': {"text": "06", "value": ""}},
+            rendered_text="",
+            amount_field_elements=[],
+        )
+    ]
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "06",
+        "selector": 'button[data-danger="true"]',
+        "frame": "mainFrame",
+        "frame_url": "https://w1.gts362.com/token2/Front/B/B03",
+    }
+
+    with pytest.raises(RuntimeError):
+        execute_actions_on_page(page, [action])
+    assert page.clicked == []
+
+
+def test_groupset_value_still_rejected_with_empty_shared_index_diagnostics() -> None:
+    action = {
+        "type": "SET_AMOUNT",
+        "star": TWO_STAR,
+        "amount": 100,
+        "selector": "#GroupSet_Value",
+        "frame": "mainFrame",
+        "frame_url": "https://w1.gts362.com/token2/Front/B/B03",
+        "candidate": {"text": TWO_STAR, "value": ""},
+    }
+    error = validate_real_site_action(action)
+    assert error is not None
+    assert "GroupSet_Value" in error
