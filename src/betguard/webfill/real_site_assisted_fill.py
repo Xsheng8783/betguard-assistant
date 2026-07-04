@@ -556,47 +556,100 @@ AMOUNT_FIELD_QUERY_SELECTOR = f'input[data-bind*="{AMOUNT_INPUT_DATA_BIND_MARKER
 # pathological frame tree can never hang or loop forever.
 MAX_FRAME_TRAVERSAL = 50
 
+# Maximum number of raw page frames and child frames to record in
+# collector diagnostics so the error message stays bounded.
+MAX_COLLECTOR_DIAGNOSTIC_FRAMES = 10
 
-def _collect_all_frames(page: Any) -> list[Any]:
+
+def _collect_all_frames(page: Any) -> tuple[list[Any], dict[str, Any]]:
     """Bounded, deduplicated, recursive collection of every frame reachable
     from ``page.frames`` plus each frame's own ``child_frames`` (recursively).
 
-    Root cause this fixes: a real live session showed the bet frame
-    (``name=mainFrame``, ``url=.../Front/B/B03``) only under a parent
-    Shared/Index frame's own ``child_frames`` -- it never appeared directly
-    in ``page.frames``. This only enlarges the *candidate pool* the existing
-    name/URL/marker/Shared-Index checks run against; it does not change any
-    acceptance rule, and it never returns the top-level ``page`` itself.
+    Returns (collected_frames, collector_diagnostics).  The diagnostics dict
+    records every seed source, every attempt, and per-frame child counts so a
+    future live-trial error message can pinpoint exactly why a frame was
+    missing from the candidate pool.
 
-    v2: also tries ``page.frame(url=...)`` with a glob pattern to find
-    the B03 betting frame, and falls back to direct attribute access on
-    ``frame.child_frames`` (bypassing ``getattr`` for Playwright objects
-    whose descriptors may behave differently through the generic path).
+    v4: returns collector diagnostics alongside the frame list.  Also uses
+    ``getattr`` (same pattern as the proven diagnostic code) for child-frame
+    access on every frame, and records per-frame child counts.
     """
     collected: list[Any] = []
     seen_ids: set[int] = set()
+    queue: list[Any] = []
+    diag: dict[str, Any] = {
+        "raw_page_frames_count": 0,
+        "raw_page_frames": [],
+        "main_frame_name": None,
+        "main_frame_url": None,
+        "page_frame_method_exists": False,
+        "page_frame_by_name_mainFrame": None,
+        "page_frame_by_url_b03": None,
+        "per_page_frame_diagnostics": [],
+        "collected_frames_count": 0,
+        "collected_frames": [],
+    }
 
-    # Seed: page.frames (may only return the top-level document on frameset pages).
+    # --- record raw page.frames ---
     try:
-        queue: list[Any] = list(page.frames)
+        raw = list(page.frames)
     except Exception:
-        queue = []
+        raw = []
+    diag["raw_page_frames_count"] = len(raw)
+    diag["raw_page_frames"] = [
+        f"{_frame_attr(f, 'name') or '(unnamed)'}|{_frame_attr(f, 'url')}"
+        for f in raw[:MAX_COLLECTOR_DIAGNOSTIC_FRAMES]
+    ]
+    for f in raw:
+        if f not in queue:
+            queue.append(f)
 
-    # Seed: Playwright's ``page.frame(url=...)`` with a URL glob that
-    # matches any B03 betting frame regardless of session token.
+    # --- seed: page.main_frame ---
     try:
-        _page_frame_method = page.frame
-    except AttributeError:
-        _page_frame_method = None
-    if callable(_page_frame_method):
-        for _url_glob in ("**/Front/B/B03",):
-            try:
-                b03 = _page_frame_method(url=_url_glob)
-            except Exception:
-                continue
-            if b03 is not None:
-                queue.append(b03)
+        main = page.main_frame
+    except Exception:
+        main = None
+    if main is not None:
+        diag["main_frame_name"] = _truncate_diagnostic_value(_frame_attr(main, "name"))
+        diag["main_frame_url"] = _truncate_diagnostic_value(_frame_attr(main, "url"))
+        if main not in queue:
+            queue.append(main)
 
+    # --- seed: page.frame(...) ---
+    try:
+        _pfm = page.frame
+    except AttributeError:
+        _pfm = None
+    diag["page_frame_method_exists"] = callable(_pfm)
+    if callable(_pfm):
+        # by name
+        try:
+            named = _pfm(name="mainFrame")
+        except Exception:
+            named = None
+        if named is not None:
+            diag["page_frame_by_name_mainFrame"] = (
+                f"{_frame_attr(named, 'name') or '(unnamed)'}|{_frame_attr(named, 'url')}"
+            )
+            if named not in queue:
+                queue.append(named)
+        else:
+            diag["page_frame_by_name_mainFrame"] = "none"
+        # by url glob
+        try:
+            url_match = _pfm(url="**/Front/B/B03")
+        except Exception:
+            url_match = None
+        if url_match is not None:
+            diag["page_frame_by_url_b03"] = (
+                f"{_frame_attr(url_match, 'name') or '(unnamed)'}|{_frame_attr(url_match, 'url')}"
+            )
+            if url_match not in queue:
+                queue.append(url_match)
+        else:
+            diag["page_frame_by_url_b03"] = "none"
+
+    # --- BFS over the frame tree ---
     while queue and len(collected) < MAX_FRAME_TRAVERSAL:
         frame = queue.pop(0)
         frame_key = id(frame)
@@ -605,16 +658,48 @@ def _collect_all_frames(page: Any) -> list[Any]:
         seen_ids.add(frame_key)
         collected.append(frame)
 
-        # Direct attribute access (not getattr) for child_frames.
-        # On Playwright Frame objects the property descriptor can behave
-        # differently when reached through getattr vs. dot-access.
-        try:
-            children = list(frame.child_frames)
-        except Exception:
-            children = []
-        queue.extend(children)
+        # child_frames via getattr (same pattern as the diagnostic code
+        # that has been *proven* to see 3 children on real Playwright).
+        _cf = getattr(frame, "child_frames", None)
+        if _cf is not None:
+            try:
+                children = _cf() if callable(_cf) else _cf
+                children = list(children)
+            except Exception:
+                children = []
+            for child in children:
+                if child not in queue:
+                    queue.append(child)
 
-    return collected
+    # --- per-raw-page-frame diagnostics ---
+    for f in raw[:MAX_COLLECTOR_DIAGNOSTIC_FRAMES]:
+        entry: dict[str, Any] = {
+            "name": _truncate_diagnostic_value(_frame_attr(f, "name")),
+            "url": _truncate_diagnostic_value(_frame_attr(f, "url")),
+            "child_frames_count": 0,
+            "child_frames": [],
+        }
+        _cf2 = getattr(f, "child_frames", None)
+        if _cf2 is not None:
+            try:
+                _ch2 = _cf2() if callable(_cf2) else _cf2
+                _ch2 = list(_ch2)
+            except Exception:
+                _ch2 = []
+            entry["child_frames_count"] = len(_ch2)
+            entry["child_frames"] = [
+                f"{_frame_attr(c, 'name') or '(unnamed)'}|{_frame_attr(c, 'url')}"
+                for c in _ch2[:MAX_COLLECTOR_DIAGNOSTIC_FRAMES]
+            ]
+        diag["per_page_frame_diagnostics"].append(entry)
+
+    diag["collected_frames_count"] = len(collected)
+    diag["collected_frames"] = [
+        f"{_frame_attr(f, 'name') or '(unnamed)'}|{_frame_attr(f, 'url')}"
+        for f in collected[:MAX_COLLECTOR_DIAGNOSTIC_FRAMES]
+    ]
+
+    return collected, diag
 
 
 def _resolve_frame(page: Any, action: dict[str, Any]) -> Any:
@@ -624,7 +709,30 @@ def _resolve_frame(page: Any, action: dict[str, Any]) -> Any:
     if not frame_name_ref and not frame_url_ref:
         return page
 
-    frames = _collect_all_frames(page)
+    frames, collector_diagnostics = _collect_all_frames(page)
+
+    # 0) Live re-seed with retry: Playwright can populate child_frames
+    # asynchronously, so we try a few times with brief pauses.
+    import time as _time
+    for _attempt in range(3):
+        try:
+            main = page.main_frame
+        except Exception:
+            break
+        if main is None:
+            break
+        _cf = getattr(main, "child_frames", None)
+        if _cf is not None:
+            try:
+                _children = list(_cf() if callable(_cf) else _cf)
+            except Exception:
+                _children = []
+            for child in _children:
+                if not any(child is f for f in frames):
+                    frames.append(child)
+            if _children:
+                break
+        _time.sleep(0.5)
 
     # 1) Exact frame-name match, tried first.
     name_matches = [frame for frame in frames if frame_name_ref and _frame_attr(frame, "name") == frame_name_ref]
@@ -644,15 +752,7 @@ def _resolve_frame(page: Any, action: dict[str, Any]) -> Any:
                 f"ambiguous frame match for url '{frame_url_ref}': {len(url_matches)} frames matched"
             )
 
-    # 3) Rendered-content markers unique to the real betting page (539 -
-    # 下注資訊 or 天天樂 - 下注資訊 / 二三四星 / 連碰 / a genuine 01~39 number
-    # board -- both games share the same page template). A frame that merely
-    # happens to contain the target selector text is never enough on its own
-    # -- the frame must independently look like the real betting page before
-    # we trust it. Frames whose URL contains the generic /Front/Shared/Index
-    # path are excluded here on purpose -- that path is used by many pages on
-    # this site, so text markers alone are not enough for it; those frames
-    # are only trusted via step 4's stricter combined check below.
+    # 3) Rendered-content markers.
     content_matches = [
         frame
         for frame in frames
@@ -664,15 +764,7 @@ def _resolve_frame(page: Any, action: dict[str, Any]) -> Any:
     if len(content_matches) > 1:
         raise RuntimeError("ambiguous frame match: multiple frames render betting-page markers")
 
-    # 4) Shared/Index DOM-signature fallback: some live sessions only expose
-    # the bet page through a generically-named /Front/Shared/Index frame,
-    # never recorded as the mapping's frame_url (which points at
-    # /Front/B/B03). Because /Front/Shared/Index is not unique to the bet
-    # page, URL containment alone is never enough here -- the frame must
-    # also independently prove it via rendered text markers *and* a live
-    # re-check of the exact 3-input PengBet.Value row structure. Every
-    # per-condition result is recorded so a failed live trial's error text
-    # says exactly which check failed, instead of a bare "frame not found".
+    # 4) Shared/Index DOM-signature fallback.
     shared_index_diagnostics: list[dict[str, Any]] = []
     shared_index_matches: list[Any] = []
     for frame in frames:
@@ -690,8 +782,12 @@ def _resolve_frame(page: Any, action: dict[str, Any]) -> Any:
         )
 
     raise RuntimeError(
-        _frame_not_found_message(frames, frame_name_ref, frame_url_ref, shared_index_diagnostics)
+        _frame_not_found_message(
+            frames, frame_name_ref, frame_url_ref,
+            shared_index_diagnostics, collector_diagnostics,
+        )
     )
+
 
 
 SHARED_INDEX_DIAGNOSTIC_KEYS = (
@@ -924,29 +1020,50 @@ def _frame_not_found_message(
     frame_name_ref: str,
     frame_url_ref: str,
     shared_index_diagnostics: list[dict[str, Any]] | None = None,
+    collector_diagnostics: dict[str, Any] | None = None,
 ) -> str:
     """A diagnostic message that names exactly which fallback stages ran.
 
-    A bare "frame not found: mainFrame" cannot tell a future investigation
-    whether frame_url was even present, whether the URL fallback matched
-    zero frames, or which Shared/Index signature condition failed. Bounded
-    (frame count + short name/url list + per-condition booleans/counts only)
-    -- never dumps page text or outerHTML.
+    v4: also includes collector diagnostics from _collect_all_frames so the
+    error text reveals exactly which frames were seen at each stage, whether
+    page.frame(...) returned anything, and what each raw page frame's
+    child_frames looked like.
     """
     seen = [f"{_frame_attr(frame, 'name') or '(unnamed)'}|{_frame_attr(frame, 'url')}" for frame in frames][:10]
-    message = (
-        f"frame not found: name_ref={frame_name_ref or '(none)'}, "
-        f"url_ref={frame_url_ref or '(none)'}, "
-        f"url_fallback_attempted={bool(frame_url_ref)}, "
-        f"frames_seen={len(frames)} {seen}"
-    )
+    parts = [
+        f"frame not found: name_ref={frame_name_ref or '(none)'}",
+        f"url_ref={frame_url_ref or '(none)'}",
+        f"url_fallback_attempted={bool(frame_url_ref)}",
+        f"frames_seen={len(frames)} {seen}",
+    ]
+
+    if collector_diagnostics:
+        cd = collector_diagnostics
+        parts.append(f"raw_page_frames_count={cd.get('raw_page_frames_count')}")
+        parts.append(f"raw_page_frames={cd.get('raw_page_frames')}")
+        parts.append(f"main_frame={cd.get('main_frame_name')}|{cd.get('main_frame_url')}")
+        parts.append(f"page_frame_method_exists={cd.get('page_frame_method_exists')}")
+        parts.append(f"page_frame_by_name_mainFrame={cd.get('page_frame_by_name_mainFrame')}")
+        parts.append(f"page_frame_by_url_b03={cd.get('page_frame_by_url_b03')}")
+        parts.append(f"collected_frames_count={cd.get('collected_frames_count')}")
+        parts.append(f"collected_frames={cd.get('collected_frames')}")
+        per_frame = cd.get("per_page_frame_diagnostics") or []
+        for i, entry in enumerate(per_frame):
+            parts.append(
+                f"raw_frame[{i}]={entry.get('name')}|{entry.get('url')} "
+                f"child_frames_count={entry.get('child_frames_count')} "
+                f"child_frames={entry.get('child_frames')}"
+            )
+
     if shared_index_diagnostics:
         rendered = "; ".join(
             _format_shared_index_diagnostics(diagnostics)
             for diagnostics in shared_index_diagnostics[:3]
         )
-        message += f", shared_index_checks=[{rendered}]"
-    return message
+        parts.append(f"shared_index_checks=[{rendered}]")
+
+    return ", ".join(parts)
+
 
 
 EMPTY_FRAME_DIAGNOSTIC_KEYS = (

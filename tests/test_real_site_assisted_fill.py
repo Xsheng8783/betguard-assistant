@@ -2876,3 +2876,175 @@ def test_page_without_frame_method_still_works_v2() -> None:
     with pytest.raises(RuntimeError, match="locator lookup failed"):
         execute_actions_on_page(page, [action])
     assert page.clicked == []
+
+
+# --- v4 collector diagnostics ---
+#
+# _collect_all_frames now returns (frames, diagnostics_dict) and
+# _frame_not_found_message includes raw_page_frames, collected_frames,
+# page.frame(...) results, and per-raw-frame child_frames counts.
+
+
+def test_collector_diagnostics_show_collected_includes_mainframe() -> None:
+    """When page.frames has only Shared/Index but child_frames contains
+    mainFrame/B03, the error message must show collected_frames includes
+    mainFrame. Frame name must NOT match so resolution fails through
+    all steps and produces collector diagnostics."""
+    page = FakePage({})
+    main_child = FakeFrame(
+        "mainFrame",
+        page,
+        url="https://w0.gts362.com/token/Front/B/B03",
+        elements={},
+    )
+    parent = FakeFrame(
+        "",
+        page,
+        url="https://w0.gts362.com/token/Front/Shared/Index",
+        elements={},
+        rendered_text="",
+        amount_field_elements=[],
+        child_frames=[main_child],
+    )
+    page.frames = [parent]
+
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "11",
+        "selector": "text=11",
+        "frame": "nonexistentFrame",  # deliberate wrong name
+        "frame_url": "https://w1.gts362.com/badtoken/Front/NotB03",  # deliberate non-B03 URL
+    }
+
+    with pytest.raises(RuntimeError) as excinfo:
+        execute_actions_on_page(page, [action])
+
+    message = str(excinfo.value)
+    assert "raw_page_frames_count=1" in message
+    assert "collected_frames_count=2" in message  # parent + main_child
+    assert "mainFrame|" in message
+    assert "/Front/B/B03" in message
+    assert "child_frames_count=1" in message
+    assert page.clicked == []
+
+
+def test_collector_diagnostics_show_page_frame_by_name_result() -> None:
+    """page.frame(name='mainFrame') result is included in diagnostics.
+    Use a non-matching frame name so resolution fails and diagnostics appear."""
+    page = FakePage({})
+    page.frames = []
+
+    def _fake_frame(name=None, url=None):
+        if name == "mainFrame":
+            return FakeFrame("mainFrame", page, url="https://w0.gts362.com/token/Front/B/B03")
+        return None
+    page.frame = _fake_frame
+
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "11",
+        "selector": "text=11",
+        "frame": "nonexistentFrame",
+        "frame_url": "",
+    }
+
+    with pytest.raises(RuntimeError) as excinfo:
+        execute_actions_on_page(page, [action])
+
+    message = str(excinfo.value)
+    assert "page_frame_by_name_mainFrame=mainFrame|" in message
+    assert "page_frame_method_exists=True" in message
+    assert page.clicked == []
+
+
+def test_collector_diagnostics_show_page_frame_by_url_result() -> None:
+    """page.frame(url='**/Front/B/B03') result is included."""
+    page = FakePage({})
+    page.frames = []
+
+    b03 = FakeFrame("b03frame", page, url="https://w0.gts362.com/token/Front/B/B03")
+    def _fake_frame(name=None, url=None):
+        if url and "B/B03" in url:
+            return b03
+        return None
+    page.frame = _fake_frame
+
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "11",
+        "selector": "text=11",
+        "frame": "nonexistentFrame",
+        "frame_url": "",
+    }
+
+    with pytest.raises(RuntimeError) as excinfo:
+        execute_actions_on_page(page, [action])
+
+    message = str(excinfo.value)
+    assert "page_frame_by_url_b03=b03frame|" in message
+    assert page.clicked == []
+
+
+def test_collector_diagnostics_show_raw_frame_child_frames() -> None:
+    """Per-raw-frame diagnostics show child_frames for each page frame.
+    Use non-matching frame name so resolution fails through all steps."""
+    page = FakePage({})
+    child = FakeFrame("mainFrame", page, url="https://w0.gts362.com/token/Front/B/B03")
+    parent = FakeFrame(
+        "",
+        page,
+        url="https://w0.gts362.com/token/Front/Shared/Index",
+        elements={},
+        rendered_text="",
+        amount_field_elements=[],
+        child_frames=[child],
+    )
+    page.frames = [parent]
+
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "11",
+        "selector": "text=11",
+        "frame": "nonexistentFrame",
+        "frame_url": "https://w1.gts362.com/bad/token/Front/NotB03",
+    }
+
+    with pytest.raises(RuntimeError) as excinfo:
+        execute_actions_on_page(page, [action])
+
+    message = str(excinfo.value)
+    assert "raw_frame[0]=" in message
+    assert "child_frames_count=1" in message
+    assert "mainFrame|" in message
+    assert "/Front/B/B03" in message
+    assert page.clicked == []
+
+
+def test_collector_diagnostics_with_fake_page_no_frame_method() -> None:
+    """A page without .frame() method shows page_frame_method_exists=False."""
+    page = FakePage({})
+    parent = FakeFrame(
+        "",
+        page,
+        url="https://w0.gts362.com/Front/Shared/Index",
+        elements={},
+        rendered_text="",
+        amount_field_elements=[],
+    )
+    page.frames = [parent]
+    # No page.frame attribute
+
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "11",
+        "selector": "text=11",
+        "frame": "mainFrame",
+        "frame_url": "https://w1.gts362.com/6u_rmq1xO0G6m4bNfwLvsQ/Front/B/B03",
+    }
+
+    with pytest.raises(RuntimeError) as excinfo:
+        execute_actions_on_page(page, [action])
+
+    message = str(excinfo.value)
+    assert "page_frame_method_exists=False" in message
+    assert page.clicked == []
