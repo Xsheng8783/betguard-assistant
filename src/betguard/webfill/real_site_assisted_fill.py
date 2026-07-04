@@ -567,10 +567,35 @@ def _collect_all_frames(page: Any) -> list[Any]:
     in ``page.frames``. This only enlarges the *candidate pool* the existing
     name/URL/marker/Shared-Index checks run against; it does not change any
     acceptance rule, and it never returns the top-level ``page`` itself.
+
+    v2: also tries ``page.frame(url=...)`` with a glob pattern to find
+    the B03 betting frame, and falls back to direct attribute access on
+    ``frame.child_frames`` (bypassing ``getattr`` for Playwright objects
+    whose descriptors may behave differently through the generic path).
     """
     collected: list[Any] = []
     seen_ids: set[int] = set()
-    queue: list[Any] = list(getattr(page, "frames", []) or [])
+
+    # Seed: page.frames (may only return the top-level document on frameset pages).
+    try:
+        queue: list[Any] = list(page.frames)
+    except Exception:
+        queue = []
+
+    # Seed: Playwright's ``page.frame(url=...)`` with a URL glob that
+    # matches any B03 betting frame regardless of session token.
+    try:
+        _page_frame_method = page.frame
+    except AttributeError:
+        _page_frame_method = None
+    if callable(_page_frame_method):
+        for _url_glob in ("**/Front/B/B03",):
+            try:
+                b03 = _page_frame_method(url=_url_glob)
+            except Exception:
+                continue
+            if b03 is not None:
+                queue.append(b03)
 
     while queue and len(collected) < MAX_FRAME_TRAVERSAL:
         frame = queue.pop(0)
@@ -580,12 +605,11 @@ def _collect_all_frames(page: Any) -> list[Any]:
         seen_ids.add(frame_key)
         collected.append(frame)
 
-        child_frames_attr = getattr(frame, "child_frames", None)
-        if child_frames_attr is None:
-            continue
+        # Direct attribute access (not getattr) for child_frames.
+        # On Playwright Frame objects the property descriptor can behave
+        # differently when reached through getattr vs. dot-access.
         try:
-            children = child_frames_attr() if callable(child_frames_attr) else child_frames_attr
-            children = list(children)
+            children = list(frame.child_frames)
         except Exception:
             children = []
         queue.extend(children)

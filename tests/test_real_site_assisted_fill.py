@@ -2761,3 +2761,118 @@ def test_recursive_traversal_deduplicates_and_is_bounded() -> None:
     with pytest.raises(RuntimeError, match="locator lookup failed"):
         execute_actions_on_page(page, [action])
     assert page.clicked == []
+
+
+# --- page.frame(url=...) B03 glob fallback v2 ---
+#
+# Live Tiantianle trials showed that on certain frameset layouts neither
+# page.frames nor frame.child_frames expose the betting frame through
+# the getattr path. _collect_all_frames now uses direct attribute access
+# (frame.child_frames) and also seeds the queue via page.frame(url="**/Front/B/B03").
+
+
+def test_page_frame_url_glob_resolves_b03() -> None:
+    """Frame reachable via page.frame(url='**/Front/B/B03'), not in page.frames."""
+    page = FakePage({})
+    b03_frame = FakeFrame(
+        "mainFrame",
+        page,
+        url="https://w1.gts362.com/6u_rmq1xO0G6m4bNfwLvsQ/Front/B/B03",
+        elements={"text=11": {"text": "11", "value": ""}},
+    )
+    # page.frames has only a stub parent; b03 is only via page.frame(url=...)
+    parent = FakeFrame(
+        "",
+        page,
+        url="https://w1.gts362.com/6u_rmq1xO0G6m4bNfwLvsQ/Front/Shared/Index",
+        elements={},
+        rendered_text="",
+        amount_field_elements=[],
+    )
+    page.frames = [parent]
+
+    # page.frame(url="**/Front/B/B03") returns b03_frame
+    page.frame = lambda name=None, url=None: b03_frame if url and "B/B03" in url else None
+
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "11",
+        "selector": "text=11",
+        "frame": "mainFrame",
+        "frame_url": "https://w1.gts362.com/6u_rmq1xO0G6m4bNfwLvsQ/Front/B/B03",
+    }
+
+    executed = execute_actions_on_page(page, [action])
+
+    assert executed[0]["executed"] is True
+    assert page.clicked == ["text=11"]
+
+
+def test_page_frame_url_glob_returns_none_gracefully() -> None:
+    """page.frame(url=...) returns None -- should not crash."""
+    page = FakePage({})
+    page.frames = []
+
+    page.frame = lambda name=None, url=None: None
+
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "11",
+        "selector": "text=11",
+        "frame": "mainFrame",
+        "frame_url": "https://w1.gts362.com/6u_rmq1xO0G6m4bNfwLvsQ/Front/B/B03",
+    }
+
+    with pytest.raises(RuntimeError, match="locator lookup failed"):
+        execute_actions_on_page(page, [action])
+    assert page.clicked == []
+
+
+def test_page_frame_url_glob_survives_exception() -> None:
+    """page.frame(url=...) raises -- should not crash."""
+    page = FakePage({})
+    page.frames = []
+
+    def _raiser(name=None, url=None):
+        raise RuntimeError("boom")
+
+    page.frame = _raiser
+
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "11",
+        "selector": "text=11",
+        "frame": "mainFrame",
+        "frame_url": "https://w1.gts362.com/6u_rmq1xO0G6m4bNfwLvsQ/Front/B/B03",
+    }
+
+    with pytest.raises(RuntimeError, match="locator lookup failed"):
+        execute_actions_on_page(page, [action])
+    assert page.clicked == []
+
+
+def test_page_without_frame_method_still_works_v2() -> None:
+    """Pages without a .frame() method (e.g. mocks) should not crash."""
+    page = FakePage({})
+    parent = FakeFrame(
+        "",
+        page,
+        url="https://w0.gts362.com/Front/Shared/Index",
+        elements={},
+        rendered_text="",
+        amount_field_elements=[],
+    )
+    page.frames = [parent]
+    # No page.frame attribute at all.
+
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "11",
+        "selector": "text=11",
+        "frame": "mainFrame",
+        "frame_url": "https://w1.gts362.com/6u_rmq1xO0G6m4bNfwLvsQ/Front/B/B03",
+    }
+
+    with pytest.raises(RuntimeError, match="locator lookup failed"):
+        execute_actions_on_page(page, [action])
+    assert page.clicked == []
