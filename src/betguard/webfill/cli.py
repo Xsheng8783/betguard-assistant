@@ -40,7 +40,11 @@ from betguard.webfill.batch_mock_queue import (
     save_queue_state,
 )
 from betguard.webfill.fill_preview import PREVIEW_SAFETY, build_fill_preview, format_pretty_fill_preview
-from betguard.webfill.fill_mapping_report import build_mapping_report, format_pretty_mapping_report
+from betguard.webfill.fill_mapping_report import (
+    build_mapping_report,
+    format_concise_mapping_report,
+    format_pretty_mapping_report,
+)
 from betguard.webfill.fill_mapping import build_b03_selector_mapping, format_pretty_b03_selector_mapping
 from betguard.webfill.fill_plan import to_numbers_only_plan
 from betguard.webfill.inspector import run_dry_run_inspector
@@ -133,6 +137,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out-dir", dest="output_dir", help="Output directory for demo packs")
     parser.add_argument("--overwrite", action="store_true", help="Allow overwriting an existing queue output file")
     parser.add_argument("--pretty", action="store_true", help="Print a human-readable report")
+    parser.add_argument(
+        "--concise",
+        action="store_true",
+        help="With --map-dry-run, print a short safety summary instead of the full candidate dump",
+    )
     parser.add_argument("--map-b03-selectors", action="store_true", help="Build a read-only B03 selector mapping report")
     parser.add_argument(
         "--discover-selectors",
@@ -495,7 +504,9 @@ def main() -> None:
         else:
             selector_report = json.loads(Path(args.selector_report).read_text(encoding="utf-8"))
         report = build_mapping_report(fill_plan, selector_report)
-        if args.pretty:
+        if args.concise:
+            print(format_concise_mapping_report(report))
+        elif args.pretty:
             print(format_pretty_mapping_report(report))
         else:
             print(json.dumps(report, ensure_ascii=False, indent=2))

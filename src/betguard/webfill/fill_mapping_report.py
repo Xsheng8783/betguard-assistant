@@ -197,6 +197,114 @@ def format_pretty_mapping_report(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+AMOUNT_STAR_DISPLAY_ORDER = {"二星": 0, "三星": 1, "四星": 2}
+
+
+def format_concise_mapping_report(report: dict[str, Any]) -> str:
+    """A short, human-scannable summary of a mapping report.
+
+    Never prints raw page text, outerHTML, dialog HTML, or full candidate
+    dumps -- only the already-computed selector/confidence/uniqueness facts
+    that decided SAFE/BLOCKED. Read-only formatting; does not recompute or
+    alter any safety decision made by build_mapping_report.
+    """
+    lines = [
+        "Assisted Fill Dry-run Mapping (concise)",
+        f"Status: {report.get('status', 'BLOCKED')}",
+        "",
+        "Market:",
+    ]
+    market = report.get("market", {})
+    lines.append(f"- current_game: {market.get('current_game') or ''}")
+    lines.append(f"- can_probe_bet_page: {str(market.get('can_probe_bet_page')).lower()}")
+
+    actions = report.get("actions", [])
+    number_actions = [a for a in actions if a.get("plan_step", {}).get("type") == "select_number"]
+    if number_actions:
+        lines.append("")
+        lines.append("Numbers:")
+        for action in number_actions:
+            label = action.get("plan_step", {}).get("label")
+            lines.append(f"- {label}: {_concise_action_line(action)}")
+
+    amount_actions = [a for a in actions if a.get("plan_step", {}).get("type") == "set_amount"]
+    if amount_actions:
+        lines.append("")
+        lines.append("Amounts:")
+        ordered = sorted(
+            amount_actions,
+            key=lambda a: AMOUNT_STAR_DISPLAY_ORDER.get(a.get("plan_step", {}).get("star"), 99),
+        )
+        for action in ordered:
+            star = action.get("plan_step", {}).get("star")
+            verified = str(_action_position_verified(action)).lower()
+            lines.append(f"- {star}: {_concise_action_line(action)}, position_verified: {verified}")
+
+    if report.get("amount_manual_required"):
+        lines.append("")
+        lines.append("Amounts (manual entry required):")
+        lines.append("- amount_manual_required: true")
+        for step in report.get("amount_steps_removed", []):
+            lines.append(f"  - {step.get('star')}: {step.get('amount')} (enter manually)")
+
+    # "Excluded" means GroupSet_Value was never accepted as a trusted amount
+    # selector -- it may still appear as a candidate that got correctly
+    # BLOCKED (selector_unsafe=True); only an *unsafe-cleared* GroupSet_Value
+    # selector would mean it was wrongly forced SAFE.
+    groupset_forced_safe = any(
+        "GroupSet_Value" in str(action.get("selector") or "") and not action.get("selector_unsafe")
+        for action in amount_actions
+    )
+    groupset_excluded = not groupset_forced_safe
+    danger_check = report.get("danger_check", {})
+    lines.append("")
+    lines.append("Safety:")
+    lines.append(f"- GroupSet_Value_excluded: {'yes' if groupset_excluded else 'no'}")
+    lines.append(
+        f"- danger_candidates_detected: {'yes' if danger_check.get('danger_candidates_found') else 'no'}"
+    )
+    lines.append("- danger_buttons_clicked: none")
+    lines.append("- submit_clicked: false")
+    lines.append("- confirm_clicked: false")
+
+    if report.get("missing"):
+        lines.append("")
+        lines.append("Missing:")
+        for item in report["missing"]:
+            lines.append(f"- {_format_missing(item)}")
+
+    if report.get("errors"):
+        lines.append("")
+        lines.append("Errors:")
+        for error in report["errors"]:
+            lines.append(f"- {error}")
+
+    final_decision = report.get("final_decision", {})
+    lines.append("")
+    lines.append("Final Decision:")
+    lines.append(f"- executable: {str(final_decision.get('executable')).lower()}")
+    lines.append(f"- reason: {final_decision.get('reason')}")
+    return "\n".join(lines)
+
+
+def _concise_action_line(action: dict[str, Any]) -> str:
+    selector = action.get("selector") or "(none)"
+    confidence = action.get("confidence") or "low"
+    unique = str(action.get("unique_selector")).lower()
+    return f"{selector} (confidence: {confidence}, unique: {unique})"
+
+
+def _action_position_verified(action: dict[str, Any]) -> bool:
+    """Peek at the single boolean flag on the underlying candidate.
+
+    Only reads ``position_verified``; never surfaces the rest of the
+    candidate (outerHTML, raw text, box) into the concise report.
+    """
+    candidates = action.get("selector_candidates") or []
+    first = candidates[0] if candidates else {}
+    return bool(first.get("position_verified"))
+
+
 def _action_from_mapped_step(item: dict[str, Any]) -> dict[str, Any]:
     candidates = list(item.get("selector_candidates") or [])
     first = candidates[0] if candidates else {}

@@ -4,7 +4,11 @@ from betguard.webfill.fill_mapping import (
     _b03_amount_diagnostic_candidate,
     build_dry_run_mapping,
 )
-from betguard.webfill.fill_mapping_report import build_mapping_report, format_pretty_mapping_report
+from betguard.webfill.fill_mapping_report import (
+    build_mapping_report,
+    format_concise_mapping_report,
+    format_pretty_mapping_report,
+)
 from betguard.webfill.fill_plan import build_fill_plan, to_numbers_only_plan
 
 
@@ -813,3 +817,137 @@ def test_numbers_only_plan_does_not_change_danger_or_forbidden_steps() -> None:
     assert report["danger_check"]["dangerous_buttons_detected"] == ["送出注單", "確認"]
     assert report["forbidden_steps"] == ["submit", "confirm", "send_bet", "click_danger_button"]
     assert report["final_decision"]["executable"] is False
+
+
+# --- Concise Map-dry-run Report v1 ---
+
+
+def test_concise_report_includes_status_and_market() -> None:
+    plan = normal_fill_plan()
+    report = build_mapping_report(plan, selector_report_for(plan))
+
+    concise = format_concise_mapping_report(report)
+
+    assert "Assisted Fill Dry-run Mapping (concise)" in concise
+    assert "Status: SAFE" in concise
+    assert "Market:" in concise
+    assert "current_game: 539" in concise
+    assert "can_probe_bet_page: true" in concise
+
+
+def test_concise_report_includes_number_selectors() -> None:
+    plan = normal_fill_plan()
+    report = build_mapping_report(plan, selector_report_for(plan))
+
+    concise = format_concise_mapping_report(report)
+
+    assert "Numbers:" in concise
+    for number in plan["numbers"]:
+        assert f"- {number}: text={number} (confidence: high, unique: true)" in concise
+
+
+def test_concise_report_includes_amount_selectors() -> None:
+    plan = normal_fill_plan()
+    selector_report = selector_report_for(plan)
+    star_selectors = {}
+    for index, star in enumerate(plan["stars"]):
+        selector = f"#Amount_{index}"
+        star_selectors[star] = selector
+        selector_report["amount_field_candidates"][star] = [unique_amount_candidate(star, selector)]
+
+    report = build_mapping_report(plan, selector_report)
+    concise = format_concise_mapping_report(report)
+
+    assert "Amounts:" in concise
+    for star, selector in star_selectors.items():
+        assert f"- {star}: {selector} (confidence: high, unique: true), position_verified: false" in concise
+
+
+def test_concise_report_includes_groupset_excluded_status() -> None:
+    plan = normal_fill_plan()
+    selector_report = selector_report_for(plan)
+    for star in plan["stars"][:2]:
+        selector_report["amount_field_candidates"][star] = [shared_group_set_candidate(star)]
+
+    report = build_mapping_report(plan, selector_report)
+    concise = format_concise_mapping_report(report)
+
+    assert "Safety:" in concise
+    assert "GroupSet_Value_excluded: yes" in concise
+    assert "danger_candidates_detected: yes" in concise
+    assert "danger_buttons_clicked: none" in concise
+    assert "submit_clicked: false" in concise
+    assert "confirm_clicked: false" in concise
+
+
+def test_concise_report_groupset_excluded_yes_even_when_blocked_as_candidate() -> None:
+    """GroupSet_Value showing up as a rejected/BLOCKED candidate still counts
+    as 'excluded' -- only an unsafe-cleared GroupSet_Value selector would not."""
+    plan = normal_fill_plan()
+    selector_report = selector_report_for(plan)
+    for star in plan["stars"]:
+        selector_report["amount_field_candidates"][star] = [shared_group_set_candidate(star)]
+
+    report = build_mapping_report(plan, selector_report)
+    concise = format_concise_mapping_report(report)
+
+    assert "Status: BLOCKED" in concise
+    assert "GroupSet_Value_excluded: yes" in concise
+
+
+def test_concise_report_does_not_leak_raw_outer_html_or_dialog_content() -> None:
+    plan = normal_fill_plan()
+    selector_report = selector_report_for(plan)
+    for star in plan["stars"][:2]:
+        selector_report["amount_field_candidates"][star] = [shared_group_set_candidate(star)]
+    # Broad html candidate carries huge page-text-like content for one number.
+    selector_report["number_candidates"]["06"] = [
+        broad_html_candidate("06"),
+        precise_number_candidate("06"),
+    ]
+
+    report = build_mapping_report(plan, selector_report)
+    concise = format_concise_mapping_report(report)
+
+    assert "outerHTML" not in concise
+    assert "<input" not in concise
+    assert "$Global" not in concise
+    assert "GroupSet_Value" in concise  # only as the excluded-status label, not raw HTML
+    assert "<" not in concise
+    assert "koDialog" not in concise
+
+
+def test_concise_report_does_not_dump_large_candidate_lists() -> None:
+    plan = normal_fill_plan()
+    report = build_mapping_report(plan, selector_report_for(plan))
+
+    concise = format_concise_mapping_report(report)
+
+    assert "快速輸入" not in concise
+    assert concise.count("01") == 0  # no page-wide 01~39 number dump, only this plan's numbers
+    assert len(concise.splitlines()) < 40
+
+
+def test_concise_numbers_only_report_shows_amount_manual_required() -> None:
+    plan = normal_fill_plan()
+    numbers_only = to_numbers_only_plan(plan)
+    selector_report = shared_group_set_selector_report(plan)
+
+    report = build_mapping_report(numbers_only, selector_report)
+    concise = format_concise_mapping_report(report)
+
+    assert "Status: SAFE" in concise
+    assert "amount_manual_required: true" in concise
+    for star in plan["stars"]:
+        assert f"{star}: 50 (enter manually)" in concise
+    assert "Amounts:" not in concise  # no set_amount action was ever attempted
+
+
+def test_pretty_report_still_available_and_unchanged_by_default() -> None:
+    plan = normal_fill_plan()
+    report = build_mapping_report(plan, selector_report_for(plan))
+
+    pretty = format_pretty_mapping_report(report)
+
+    assert "Assisted Fill Dry-run Mapping" in pretty
+    assert "(concise)" not in pretty
