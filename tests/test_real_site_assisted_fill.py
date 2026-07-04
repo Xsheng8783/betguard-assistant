@@ -60,9 +60,18 @@ class FakeFrame:
     case this fix targets).
     """
 
-    def __init__(self, name: str, page: "FakePage", *, url: str | None = None, elements: dict | None = None):
+    def __init__(
+        self,
+        name: str,
+        page: "FakePage",
+        *,
+        url: str | None = None,
+        elements: dict | None = None,
+        rendered_text: str = "",
+    ):
         self.name = name
-        self.url = url or f"https://example.invalid/Front/B/B03?frame={name}"
+        self.url = url if url is not None else f"https://example.invalid/Front/B/B03?frame={name}"
+        self.rendered_text = rendered_text
         self._page = page
         self._own_elements = elements
 
@@ -118,12 +127,16 @@ def approved_queue_for(text: str) -> dict:
     return queue
 
 
+B03_FRAME_URL = "https://www.gts362.com/Front/B/B03"
+
+
 def candidate(selector: str, text: str = "", *, frame: str = "mainFrame") -> dict:
     return {
         "tag": "button",
         "text": text,
         "candidate_selectors": [selector],
         "frame_name": frame,
+        "frame_url": B03_FRAME_URL,
     }
 
 
@@ -156,6 +169,7 @@ def pengbet_candidate(left: float) -> dict:
         "box": {"top": 245, "left": left, "w": 60, "h": 20},
         "candidate_selectors": [],
         "frame_name": "mainFrame",
+        "frame_url": B03_FRAME_URL,
     }
 
 
@@ -969,6 +983,255 @@ def test_full_run_with_child_frame_still_has_no_auto_submit_or_auto_next() -> No
         FakeFrame(
             "mainFrame",
             page,
+            elements={
+                'button[data-number="06"]': {"text": "06", "value": ""},
+                'button[data-number="13"]': {"text": "13", "value": ""},
+                'button[data-number="23"]': {"text": "23", "value": ""},
+                'button[data-number="22"]': {"text": "22", "value": ""},
+                'input[data-bind*="PengBet.Value"] >> nth=0': {"text": TWO_STAR, "value": ""},
+                'input[data-bind*="PengBet.Value"] >> nth=1': {"text": THREE_STAR, "value": ""},
+            },
+        )
+    ]
+
+    report = run_real_site_assisted_fill_with_page(
+        approved_queue_for(text),
+        clean_profile(),
+        page,
+        item_index=0,
+        risk_acknowledged=True,
+    )
+
+    assert report["status"] == WAITING_FOR_HUMAN_CONFIRM
+    assert report["queue"]["items"][1]["status"] == PENDING
+    assert report["final_decision"]["real_site_auto_submit"] is False
+    assert report["danger_buttons_clicked"] == []
+    assert page.clicked == [
+        'button[data-number="06"]',
+        'button[data-number="13"]',
+        'button[data-number="23"]',
+        'button[data-number="22"]',
+    ]
+    assert page.filled == {
+        'input[data-bind*="PengBet.Value"] >> nth=0': "50",
+        'input[data-bind*="PengBet.Value"] >> nth=1': "50",
+    }
+
+
+# --- Frame resolution v2: exact name -> URL/path -> rendered-content markers ---
+#
+# Root cause of the second live BLOCKED trial: real Playwright's live frame
+# ``name`` did not match the recorded "mainFrame" name, so exact-name
+# matching alone always failed with "frame not found: mainFrame" -- even
+# though the previous fix (frame threading v1) was otherwise working. The
+# resolver now falls back to frame URL/path metadata, then (only as a last
+# resort) genuine rendered betting-page content -- never to the top-level
+# page, and never just because a frame happens to contain the selector text.
+
+BETTING_PAGE_RENDERED_TEXT = (
+    "539 - 下注資訊\n二星 三星 四星\n連碰\n"
+    "01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 "
+    "21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39"
+)
+
+
+def test_exact_frame_name_still_works() -> None:
+    page = FakePage({})
+    page.frames = [
+        FakeFrame("mainFrame", page, elements={"text=23": {"text": "23", "value": ""}})
+    ]
+    action = {"type": "SELECT_NUMBER", "number": "23", "selector": "text=23", "frame": "mainFrame"}
+
+    executed = execute_actions_on_page(page, [action])
+
+    assert executed[0]["executed"] is True
+    assert page.clicked == ["text=23"]
+
+
+def test_frame_name_missing_but_url_contains_b03_route_works() -> None:
+    page = FakePage({})
+    # Runtime frame name is unstable/different ("frame3"), but its URL is the
+    # known B03 betting route -- must be found via URL/path fallback.
+    page.frames = [
+        FakeFrame(
+            "frame3",
+            page,
+            url="https://www.gts362.com/Front/B/B03?x=1",
+            elements={"text=23": {"text": "23", "value": ""}},
+        )
+    ]
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "23",
+        "selector": "text=23",
+        "frame": "mainFrame",  # exact-name match will fail
+        "frame_url": "https://www.gts362.com/Front/B/B03",
+    }
+
+    executed = execute_actions_on_page(page, [action])
+
+    assert executed[0]["executed"] is True
+    assert page.clicked == ["text=23"]
+
+
+def test_frame_name_and_url_missing_but_rendered_markers_identify_betting_frame() -> None:
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "frame7",
+            page,
+            url="https://www.gts362.com/some/other/path",
+            elements={"text=23": {"text": "23", "value": ""}},
+            rendered_text=BETTING_PAGE_RENDERED_TEXT,
+        )
+    ]
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "23",
+        "selector": "text=23",
+        "frame": "mainFrame",  # name fails
+        "frame_url": "/Front/B/B03",  # url fails (frame's URL doesn't contain it)
+    }
+
+    executed = execute_actions_on_page(page, [action])
+
+    assert executed[0]["executed"] is True
+    assert page.clicked == ["text=23"]
+
+
+def test_selector_present_in_wrong_frame_alone_is_not_enough() -> None:
+    # A decoy frame contains "text=23" but is neither name/URL matched nor
+    # rendered-content matched as the real betting frame -- it must never be
+    # picked just because the selector text happens to exist there.
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "decoyFrame",
+            page,
+            url="https://www.gts362.com/ads/banner",
+            elements={"text=23": {"text": "23", "value": ""}},
+            rendered_text="這是廣告 frame，剛好也有文字 23 但不是下注頁",
+        )
+    ]
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "23",
+        "selector": "text=23",
+        "frame": "mainFrame",
+        "frame_url": "/Front/B/B03",
+    }
+
+    with pytest.raises(RuntimeError, match="locator lookup failed"):
+        execute_actions_on_page(page, [action])
+    assert page.clicked == []
+
+
+def test_ambiguous_multiple_betting_like_frames_blocked() -> None:
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "frameA",
+            page,
+            url="https://www.gts362.com/other/a",
+            elements={"text=23": {"text": "23", "value": ""}},
+            rendered_text=BETTING_PAGE_RENDERED_TEXT,
+        ),
+        FakeFrame(
+            "frameB",
+            page,
+            url="https://www.gts362.com/other/b",
+            elements={"text=23": {"text": "23", "value": ""}},
+            rendered_text=BETTING_PAGE_RENDERED_TEXT,
+        ),
+    ]
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "23",
+        "selector": "text=23",
+        "frame": "mainFrame",  # neither frame matches by name
+        "frame_url": "/Front/B/B03",  # neither frame matches by url
+    }
+
+    with pytest.raises(RuntimeError, match="ambiguous frame match"):
+        execute_actions_on_page(page, [action])
+    assert page.clicked == []
+
+
+def test_no_matching_frame_at_all_blocked() -> None:
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "unrelatedFrame",
+            page,
+            url="https://www.gts362.com/unrelated",
+            elements={},
+            rendered_text="首頁廣告內容，與下注頁無關",
+        )
+    ]
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "23",
+        "selector": "text=23",
+        "frame": "mainFrame",
+        "frame_url": "/Front/B/B03",
+    }
+
+    with pytest.raises(RuntimeError, match="locator lookup failed"):
+        execute_actions_on_page(page, [action])
+    assert page.clicked == []
+
+
+def test_danger_selector_still_rejected_inside_fallback_frame() -> None:
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "frame3",
+            page,
+            url="https://www.gts362.com/Front/B/B03?x=1",
+            elements={'button[data-danger="true"]': {"text": "06", "value": ""}},
+        )
+    ]
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "06",
+        "selector": 'button[data-danger="true"]',
+        "frame": "mainFrame",
+        "frame_url": "/Front/B/B03",
+    }
+
+    with pytest.raises(RuntimeError):
+        execute_actions_on_page(page, [action])
+    assert page.clicked == []
+
+
+def test_groupset_value_still_rejected_inside_fallback_frame() -> None:
+    action = {
+        "type": "SET_AMOUNT",
+        "star": TWO_STAR,
+        "amount": 50,
+        "selector": "#GroupSet_Value",
+        "frame": "mainFrame",
+        "frame_url": "/Front/B/B03",
+        "candidate": {"text": TWO_STAR, "value": ""},
+    }
+    error = validate_real_site_action(action)
+    assert error is not None
+    assert "GroupSet_Value" in error
+
+
+def test_full_run_via_url_fallback_frame_still_one_item_no_auto_submit_no_auto_next() -> None:
+    text = "\n".join(
+        [
+            f"06.13.23.22 {TWO_THREE}50",
+            f"08.09.10.11 {TWO_THREE}100",
+        ]
+    )
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "frame3",  # runtime name does not match recorded "mainFrame"
+            page,
+            url="https://www.gts362.com/Front/B/B03?x=1",
             elements={
                 'button[data-number="06"]': {"text": "06", "value": ""},
                 'button[data-number="13"]': {"text": "13", "value": ""},

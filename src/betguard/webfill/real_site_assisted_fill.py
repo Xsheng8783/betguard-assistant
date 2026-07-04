@@ -5,6 +5,7 @@ from copy import deepcopy
 from typing import Any
 
 from betguard.webfill.batch_queue import WAITING_FOR_HUMAN_CONFIRM, mark_item_waiting_for_human
+from betguard.webfill.fill_mapping import B03_FRAME_MARKER
 from betguard.webfill.real_site_fill_plan import build_real_site_assisted_fill_plan
 from betguard.webfill.real_site_fill_preflight import (
     build_execution_actions_from_preflight,
@@ -500,7 +501,7 @@ def _contains_danger_text(text: Any) -> bool:
 
 
 def _locator_for_action(page: Any, action: dict[str, Any]) -> Any:
-    context = _frame_context(page, str(action.get("frame") or ""))
+    context = _resolve_frame(page, action)
     return _resolve_first_locator(context.locator(str(action["selector"])))
 
 
@@ -518,15 +519,104 @@ def _resolve_first_locator(locator: Any) -> Any:
     return first
 
 
-def _frame_context(page: Any, frame_ref: str) -> Any:
-    if not frame_ref:
+# --- Frame resolution v2: exact name -> URL/path -> rendered-content markers ---
+#
+# Frame Fix v1 threaded a discovered ``frame`` name into every execution
+# action, but a real Playwright page's live frame ``name`` is not guaranteed
+# to match what was recorded during selector discovery, or to stay stable
+# across page loads. This resolver never blindly falls back to the top-level
+# page and never picks a frame merely because it happens to contain the
+# target selector -- the frame must be identified by name, then URL/path,
+# then (only as a last resort) by genuine rendered betting-page content.
+# Any ambiguity (more than one candidate frame at a given step) is BLOCKED,
+# not guessed.
+
+BETTING_FRAME_TEXT_MARKER = "539 - 下注資訊"
+BETTING_FRAME_STAR_MARKERS = ("二星", "三星", "四星")
+BETTING_FRAME_COMBO_MARKER = "連碰"
+NUMBER_BOARD_TOKEN_PATTERN = re.compile(r"(?<!\d)(0[1-9]|[12]\d|3[0-9])(?!\d)")
+MIN_NUMBER_BOARD_TOKENS = 10
+
+
+def _resolve_frame(page: Any, action: dict[str, Any]) -> Any:
+    frame_name_ref = str(action.get("frame") or "")
+    frame_url_ref = str(action.get("frame_url") or "")
+
+    if not frame_name_ref and not frame_url_ref:
         return page
-    for frame in list(getattr(page, "frames", []) or []):
-        name = _frame_attr(frame, "name")
-        url = _frame_attr(frame, "url")
-        if frame_ref in {name, url} or (url and frame_ref in url):
-            return frame
-    raise RuntimeError(f"frame not found: {frame_ref}")
+
+    frames = list(getattr(page, "frames", []) or [])
+
+    # 1) Exact frame-name match, tried first.
+    name_matches = [frame for frame in frames if frame_name_ref and _frame_attr(frame, "name") == frame_name_ref]
+    if len(name_matches) == 1:
+        return name_matches[0]
+    if len(name_matches) > 1:
+        raise RuntimeError(f"ambiguous frame match for name '{frame_name_ref}': {len(name_matches)} frames matched")
+
+    # 2) Frame URL / path metadata (e.g. the B03 route), if the exact name
+    # wasn't found or the runtime name is unstable.
+    if frame_url_ref:
+        url_matches = [frame for frame in frames if _frame_url_matches(frame, frame_url_ref)]
+        if len(url_matches) == 1:
+            return url_matches[0]
+        if len(url_matches) > 1:
+            raise RuntimeError(
+                f"ambiguous frame match for url '{frame_url_ref}': {len(url_matches)} frames matched"
+            )
+
+    # 3) Last resort: safe rendered-content markers unique to the real
+    # betting page (539 - 下注資訊 / 二三四星 / 連碰 / a genuine 01~39 number
+    # board). A frame that merely happens to contain the target selector text
+    # is never enough on its own -- the frame must independently look like
+    # the real betting page before we trust it.
+    content_matches = [frame for frame in frames if _frame_looks_like_betting_frame(_frame_rendered_text(frame))]
+    if len(content_matches) == 1:
+        return content_matches[0]
+    if len(content_matches) > 1:
+        raise RuntimeError("ambiguous frame match: multiple frames render betting-page markers")
+
+    raise RuntimeError(f"frame not found: {frame_name_ref or frame_url_ref}")
+
+
+def _frame_url_matches(frame: Any, frame_url_ref: str) -> bool:
+    frame_url = _frame_attr(frame, "url")
+    if not frame_url:
+        return False
+    if B03_FRAME_MARKER in frame_url_ref and B03_FRAME_MARKER in frame_url:
+        return True
+    return frame_url_ref in frame_url or frame_url in frame_url_ref
+
+
+def _frame_looks_like_betting_frame(text: str) -> bool:
+    if not text:
+        return False
+    if BETTING_FRAME_TEXT_MARKER not in text:
+        return False
+    if not all(marker in text for marker in BETTING_FRAME_STAR_MARKERS):
+        return False
+    if BETTING_FRAME_COMBO_MARKER not in text:
+        return False
+    number_tokens = set(NUMBER_BOARD_TOKEN_PATTERN.findall(text))
+    return len(number_tokens) >= MIN_NUMBER_BOARD_TOKENS
+
+
+def _frame_rendered_text(frame: Any) -> str:
+    """Read-only rendered text for a frame, never clicking/filling anything.
+
+    Prefers an explicit ``rendered_text`` attribute (used by fakes in tests);
+    falls back to evaluating ``document.body`` the same read-only way
+    ``_read_element_safety_info`` already does for elements. Any failure
+    yields an empty string, which never matches ``_frame_looks_like_betting_frame``.
+    """
+    rendered_text = getattr(frame, "rendered_text", None)
+    if rendered_text is not None:
+        return str(rendered_text() if callable(rendered_text) else rendered_text)
+    try:
+        text = frame.locator("body").evaluate("el => el.innerText || el.textContent || ''")
+    except Exception:
+        return ""
+    return str(text or "")
 
 
 def _frame_attr(frame: Any, attr: str) -> str:
