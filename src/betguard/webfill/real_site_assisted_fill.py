@@ -734,23 +734,39 @@ def _resolve_frame(page: Any, action: dict[str, Any]) -> Any:
                 break
         _time.sleep(0.5)
 
-    # 1) Exact frame-name match, tried first.
-    name_matches = [frame for frame in frames if frame_name_ref and _frame_attr(frame, "name") == frame_name_ref]
-    if len(name_matches) == 1:
-        return name_matches[0]
-    if len(name_matches) > 1:
-        raise RuntimeError(f"ambiguous frame match for name '{frame_name_ref}': {len(name_matches)} frames matched")
+    # --- authoritative candidate list helpers ---
+    # Every modification to ``frames`` after this point must also update
+    # ``collector_diagnostics`` so the error message stays consistent.
+    def _refresh_collector_diag() -> None:
+        collector_diagnostics["collected_frames_count"] = len(frames)
+        collector_diagnostics["collected_frames"] = [
+            f"{_frame_attr(f, 'name') or '(unnamed)'}|{_frame_attr(f, 'url')}"
+            for f in frames[:MAX_COLLECTOR_DIAGNOSTIC_FRAMES]
+        ]
 
-    # 2) Frame URL / path metadata (e.g. the B03 route), if the exact name
-    # wasn't found or the runtime name is unstable.
-    if frame_url_ref:
-        url_matches = [frame for frame in frames if _frame_url_matches(frame, frame_url_ref)]
-        if len(url_matches) == 1:
-            return url_matches[0]
-        if len(url_matches) > 1:
-            raise RuntimeError(
-                f"ambiguous frame match for url '{frame_url_ref}': {len(url_matches)} frames matched"
-            )
+    def _try_name_or_url_match() -> Any | None:
+        """Return the unique matched frame, or None.  Raise on ambiguity."""
+        # 1) name
+        name_matches = [f for f in frames if frame_name_ref and _frame_attr(f, "name") == frame_name_ref]
+        if len(name_matches) == 1:
+            return name_matches[0]
+        if len(name_matches) > 1:
+            raise RuntimeError(f"ambiguous frame match for name '{frame_name_ref}': {len(name_matches)} frames matched")
+        # 2) url
+        if frame_url_ref:
+            url_matches = [f for f in frames if _frame_url_matches(f, frame_url_ref)]
+            if len(url_matches) == 1:
+                return url_matches[0]
+            if len(url_matches) > 1:
+                raise RuntimeError(
+                    f"ambiguous frame match for url '{frame_url_ref}': {len(url_matches)} frames matched"
+                )
+        return None
+
+    # --- first attempt ---
+    result = _try_name_or_url_match()
+    if result is not None:
+        return result
 
     # 3) Rendered-content markers.
     content_matches = [
@@ -764,9 +780,14 @@ def _resolve_frame(page: Any, action: dict[str, Any]) -> Any:
     if len(content_matches) > 1:
         raise RuntimeError("ambiguous frame match: multiple frames render betting-page markers")
 
-    # 4) Shared/Index DOM-signature fallback.
+    # 4) Shared/Index DOM-signature fallback.  If the diagnostics reveal
+    # child_frames that we missed during collection (e.g. mainFrame/B03),
+    # merge them into the authoritative candidate list and retry the name
+    # and URL match before giving up.
     shared_index_diagnostics: list[dict[str, Any]] = []
     shared_index_matches: list[Any] = []
+    discovered_child_frames: list[Any] = []
+
     for frame in frames:
         if SHARED_INDEX_URL_MARKER not in _frame_attr(frame, "url"):
             continue
@@ -774,6 +795,54 @@ def _resolve_frame(page: Any, action: dict[str, Any]) -> Any:
         shared_index_diagnostics.append(diagnostics)
         if diagnostics["final_shared_index_signature_passed"]:
             shared_index_matches.append(frame)
+
+        # 4a) Harvest child_frames the diagnostic code already found.
+        # These are frames that _collect_all_frames should have seen but
+        # didn't (Playwright async population race).  Merge them now so
+        # the name/URL retry can find mainFrame/B03.
+        _ecd = diagnostics.get("empty_frame_diagnostics") or {}
+        _cf_list = _ecd.get("child_frames") or []
+        for cf_entry in _cf_list:
+            cf_name = str(cf_entry.get("name") or "")
+            cf_url = str(cf_entry.get("url") or "")
+            if not cf_name and not cf_url:
+                continue
+            # Check whether we already have this frame in the candidate list.
+            already_present = any(
+                _frame_attr(f, "name") == cf_name and _frame_attr(f, "url") == cf_url
+                for f in frames
+            )
+            if already_present:
+                continue
+            # Try to get the real Playwright Frame object via page.frame().
+            found: Any = None
+            try:
+                _pfm = page.frame
+            except AttributeError:
+                _pfm = None
+            if callable(_pfm):
+                if cf_name:
+                    try:
+                        found = _pfm(name=cf_name)
+                    except Exception:
+                        found = None
+                if found is None and cf_url:
+                    try:
+                        found = _pfm(url=cf_url)
+                    except Exception:
+                        found = None
+            if found is not None:
+                frames.append(found)
+                discovered_child_frames.append(found)
+
+    # 4b) If we discovered child frames, retry name/URL match.
+    if discovered_child_frames:
+        _refresh_collector_diag()
+        result = _try_name_or_url_match()
+        if result is not None:
+            return result
+
+    # 4c) Shared/Index strong signature itself.
     if len(shared_index_matches) == 1:
         return shared_index_matches[0]
     if len(shared_index_matches) > 1:
@@ -781,6 +850,8 @@ def _resolve_frame(page: Any, action: dict[str, Any]) -> Any:
             "ambiguous frame match: multiple Shared/Index frames show betting-page DOM signature"
         )
 
+    # Keep diagnostics consistent before raising.
+    _refresh_collector_diag()
     raise RuntimeError(
         _frame_not_found_message(
             frames, frame_name_ref, frame_url_ref,

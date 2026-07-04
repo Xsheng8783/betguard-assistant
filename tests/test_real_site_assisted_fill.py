@@ -3048,3 +3048,263 @@ def test_collector_diagnostics_with_fake_page_no_frame_method() -> None:
     message = str(excinfo.value)
     assert "page_frame_method_exists=False" in message
     assert page.clicked == []
+
+
+# --- v5 discovered-child-frame resolution ---
+#
+# When Shared/Index diagnostics reveals child_frames that were missed
+# by _collect_all_frames (e.g. mainFrame/B03), _resolve_frame now merges
+# them into the authoritative candidate list and retries name/URL match.
+
+
+def test_diagnostic_child_frames_discovered_and_used_for_name_match() -> None:
+    """Shared/Index diag finds mainFrame/B03 in child_frames; resolver adds it
+    and clicks SELECT_NUMBER via name match."""
+    page = FakePage({})
+    main_child = FakeFrame(
+        "mainFrame",
+        page,
+        url="https://w0.gts362.com/token/Front/B/B03",
+        elements={"text=11": {"text": "11", "value": ""}},
+    )
+    parent = FakeFrame(
+        "",
+        page,
+        url="https://w0.gts362.com/token/Front/Shared/Index",
+        elements={},
+        rendered_text="",
+        amount_field_elements=[],
+        empty_frame_diagnostic_data={
+            "bodyExists": True,
+            "readyState": "complete",
+            "frameIframeCount": 3,
+            "framesetFrameTagCount": 3,
+            "entries": [
+                {"tag": "FRAME", "src": "/token/Front/Shared/Menu", "name": "gmenu", "id": "gmenu"},
+                {"tag": "FRAME", "src": "about:blank", "name": "gprint", "id": "gprint"},
+                {"tag": "FRAME", "src": "/token/Front/Shared/Lobby", "name": "mainFrame", "id": "mainFrame"},
+            ],
+        },
+        child_frames=[main_child],
+    )
+    page.frames = [parent]
+
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "11",
+        "selector": "text=11",
+        "frame": "mainFrame",
+        "frame_url": "https://w1.gts362.com/6u_rmq1xO0G6m4bNfwLvsQ/Front/B/B03",
+    }
+
+    executed = execute_actions_on_page(page, [action])
+
+    assert executed[0]["executed"] is True
+    assert page.clicked == ["text=11"]
+
+
+def test_diagnostic_child_frames_discovered_and_used_for_url_match() -> None:
+    """Shared/Index diag finds mainFrame/B03; resolver adds it and matches
+    by URL (name is different at runtime)."""
+    page = FakePage({})
+    main_child = FakeFrame(
+        "frameXYZ",  # runtime name differs from recorded "mainFrame"
+        page,
+        url="https://w0.gts362.com/token/Front/B/B03",
+        elements={"text=33": {"text": "33", "value": ""}},
+    )
+    parent = FakeFrame(
+        "",
+        page,
+        url="https://w0.gts362.com/token/Front/Shared/Index",
+        elements={},
+        rendered_text="",
+        amount_field_elements=[],
+        empty_frame_diagnostic_data={
+            "bodyExists": True,
+            "readyState": "complete",
+            "frameIframeCount": 1,
+            "framesetFrameTagCount": 1,
+            "entries": [
+                {"tag": "FRAME", "src": "/token/Front/B/B03", "name": "frameXYZ", "id": "frameXYZ"},
+            ],
+        },
+        child_frames=[main_child],
+    )
+    page.frames = [parent]
+
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "33",
+        "selector": "text=33",
+        "frame": "mainFrame",  # recorded name, won't match runtime "frameXYZ"
+        "frame_url": "https://w1.gts362.com/6u_rmq1xO0G6m4bNfwLvsQ/Front/B/B03",
+    }
+
+    executed = execute_actions_on_page(page, [action])
+
+    assert executed[0]["executed"] is True
+    assert page.clicked == ["text=33"]
+
+
+def test_multiple_discovered_b03_frames_blocked_as_ambiguous() -> None:
+    """If Shared/Index diag reveals two frames both matching B03, BLOCKED."""
+    page = FakePage({})
+    child_a = FakeFrame("frameA", page, url="https://w0.gts362.com/token/Front/B/B03")
+    child_b = FakeFrame("frameB", page, url="https://w0.gts362.com/token/Front/B/B03")
+    parent = FakeFrame(
+        "",
+        page,
+        url="https://w0.gts362.com/token/Front/Shared/Index",
+        elements={},
+        rendered_text="",
+        amount_field_elements=[],
+        empty_frame_diagnostic_data={
+            "bodyExists": True,
+            "readyState": "complete",
+            "frameIframeCount": 2,
+            "framesetFrameTagCount": 2,
+            "entries": [],
+        },
+        child_frames=[child_a, child_b],
+    )
+    page.frames = [parent]
+
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "11",
+        "selector": "text=11",
+        "frame": "mainFrame",
+        "frame_url": "https://w1.gts362.com/6u_rmq1xO0G6m4bNfwLvsQ/Front/B/B03",
+    }
+
+    with pytest.raises(RuntimeError, match="ambiguous frame match"):
+        execute_actions_on_page(page, [action])
+    assert page.clicked == []
+
+
+def test_top_level_only_no_shared_index_child_frames_blocked() -> None:
+    """Only top-level gts362 page, no Shared/Index, no child frames -> BLOCKED."""
+    page = FakePage({})
+    top = FakeFrame(
+        "",
+        page,
+        url="https://www.gts362.com/",
+        elements={},
+        rendered_text="",
+        amount_field_elements=[],
+    )
+    page.frames = [top]
+
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "11",
+        "selector": "text=11",
+        "frame": "mainFrame",
+        "frame_url": "https://w1.gts362.com/6u_rmq1xO0G6m4bNfwLvsQ/Front/B/B03",
+    }
+
+    with pytest.raises(RuntimeError) as excinfo:
+        execute_actions_on_page(page, [action])
+
+    message = str(excinfo.value)
+    assert "collected_frames_count=1" in message
+    assert "frames_seen=1" in message
+    assert "www.gts362.com" in message
+    assert page.clicked == []
+
+
+def test_danger_selector_still_rejected_after_discovered_child_frame() -> None:
+    """Even when child frame is discovered via Shared/Index diag, danger
+    selectors are still rejected."""
+    page = FakePage({})
+    child = FakeFrame(
+        "mainFrame",
+        page,
+        url="https://w0.gts362.com/token/Front/B/B03",
+        elements={'button[data-danger="true"]': {"text": "06", "value": ""}},
+    )
+    parent = FakeFrame(
+        "",
+        page,
+        url="https://w0.gts362.com/token/Front/Shared/Index",
+        elements={},
+        rendered_text="",
+        amount_field_elements=[],
+        empty_frame_diagnostic_data={
+            "bodyExists": True, "readyState": "complete",
+            "frameIframeCount": 1, "framesetFrameTagCount": 1,
+            "entries": [
+                {"tag": "FRAME", "src": "/token/Front/B/B03", "name": "mainFrame", "id": "mainFrame"},
+            ],
+        },
+        child_frames=[child],
+    )
+    page.frames = [parent]
+
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "06",
+        "selector": 'button[data-danger="true"]',
+        "frame": "mainFrame",
+        "frame_url": "https://w1.gts362.com/6u_rmq1xO0G6m4bNfwLvsQ/Front/B/B03",
+    }
+
+    with pytest.raises(RuntimeError):
+        execute_actions_on_page(page, [action])
+    assert page.clicked == []
+
+
+def test_groupset_value_still_rejected_after_discovered_child_frame() -> None:
+    """#GroupSet_Value still rejected even after discovered child frame resolution."""
+    action = {
+        "type": "SET_AMOUNT",
+        "star": TWO_STAR,
+        "amount": 100,
+        "selector": "#GroupSet_Value",
+        "frame": "mainFrame",
+        "frame_url": "https://w1.gts362.com/6u_rmq1xO0G6m4bNfwLvsQ/Front/B/B03",
+        "candidate": {"text": TWO_STAR, "value": ""},
+    }
+    error = validate_real_site_action(action)
+    assert error is not None
+    assert "GroupSet_Value" in error
+
+
+def test_frames_seen_and_collected_frames_are_consistent() -> None:
+    """After discovery and retry, frames_seen count must equal collected_frames count."""
+    page = FakePage({})
+    child = FakeFrame("mainFrame", page, url="https://w0.gts362.com/token/Front/B/B03")
+    parent = FakeFrame(
+        "",
+        page,
+        url="https://w0.gts362.com/token/Front/Shared/Index",
+        elements={},
+        rendered_text="",
+        amount_field_elements=[],
+        empty_frame_diagnostic_data={
+            "bodyExists": True, "readyState": "complete",
+            "frameIframeCount": 1, "framesetFrameTagCount": 1,
+            "entries": [],
+        },
+        child_frames=[child],
+    )
+    page.frames = [parent]
+
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "11",
+        "selector": "text=11",
+        "frame": "nonexistentFrame",  # won't match
+        "frame_url": "https://w1.gts362.com/bad/token/Front/NotB03",  # won't match
+    }
+
+    with pytest.raises(RuntimeError) as excinfo:
+        execute_actions_on_page(page, [action])
+
+    message = str(excinfo.value)
+    # Extract both counts from the error message
+    assert "collected_frames_count=" in message
+    assert "frames_seen=" in message
+    # They should be the same number because _refresh_collector_diag runs before raise
+    assert page.clicked == []
