@@ -63,6 +63,11 @@ from betguard.webfill.real_site_assisted_fill import (
     format_pretty_real_site_assisted_fill,
     run_real_site_assisted_fill,
 )
+from betguard.webfill.real_site_fill_preflight import (
+    build_real_site_fill_preflight_report,
+    format_concise_real_site_fill_preflight,
+    format_pretty_real_site_fill_preflight,
+)
 from betguard.webfill.review_console import (
     build_review_console_model,
     format_pretty_review_console,
@@ -113,6 +118,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--new-batch-from-stdin", action="store_true", help="Create a batch queue from stdin")
     parser.add_argument("--review-package", action="store_true", help="Generate review.html, audit.json, and summary.txt for a queue")
     parser.add_argument("--real-site-fill-plan", action="store_true", help="Plan the next real-site assisted fill item without operating the site")
+    parser.add_argument("--real-site-fill-preflight", action="store_true", help="Local-only safety preflight for one approved_fill_queue item; never opens a browser")
+    parser.add_argument("--item-index", dest="item_index", type=int, help="approved_fill_queue item index for --real-site-fill-preflight")
     parser.add_argument("--real-site-assisted-fill", action="store_true", help="Safely fill the current batch queue item on the real site")
     parser.add_argument(
         "--i-understand-real-site-fill-risk",
@@ -389,6 +396,24 @@ def main() -> None:
         report = build_real_site_assisted_fill_plan(queue, selector_report)
         if args.pretty:
             print(format_pretty_real_site_fill_plan(report))
+        else:
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+        return
+
+    if args.real_site_fill_preflight:
+        if not args.queue_path or not args.profile_path:
+            parser.error("--real-site-fill-preflight requires --queue and --profile")
+        queue = json.loads(Path(args.queue_path).read_text(encoding="utf-8"))
+        profile = load_site_profile(args.profile_path)
+        report = build_real_site_fill_preflight_report(
+            queue,
+            profile,
+            item_index=args.item_index if args.item_index is not None else 0,
+        )
+        if args.concise:
+            print(format_concise_real_site_fill_preflight(report))
+        elif args.pretty:
+            print(format_pretty_real_site_fill_preflight(report))
         else:
             print(json.dumps(report, ensure_ascii=False, indent=2))
         return
