@@ -52,6 +52,48 @@ If the real page has no distinct, unique amount field per star, there is no safe
 selector to choose. Reporting BLOCKED — and explaining *why* via the diagnostics —
 is the safe outcome. Forcing it SAFE would risk filling the wrong field.
 
+## Verified-position amount mapping (539 and 天天樂)
+
+Both 539 and 天天樂 (Tiantianle) render the same underlying bet page template:
+exactly three visible amount inputs (`input[data-bind*="PengBet.Value"]`) on
+one row, with no distinguishing id/name — only their left-to-right screen
+position tells 二星 / 三星 / 四星 apart. When mapping finds exactly three such
+inputs in one row, it resolves each star to a `>> nth=` selector by position
+and marks the action `position_verified: true`, e.g.:
+
+```
+二星: input[data-bind*="PengBet.Value"] >> nth=0 (confidence: high, unique: true), position_verified: true
+三星: input[data-bind*="PengBet.Value"] >> nth=1 (confidence: high, unique: true), position_verified: true
+```
+
+`#GroupSet_Value` is a 分組序號 (grouping/sequence number) field, not an
+amount field, and is always excluded from this candidate pool — even though it
+may look shared/unique-ish, it must never be chosen as an amount target. If
+the exactly-three-in-one-row condition is not met (missing, duplicated, wrong
+row), mapping falls back to the older ranking, which correctly stays BLOCKED
+on ambiguity — see "What '二星 / 三星 share `#GroupSet_Value`'" above for why
+BLOCKED remains the right answer in that case.
+
+## Concise report (`--map-dry-run --concise`)
+
+`--concise` prints a short, human-focused summary instead of the full JSON or
+pretty report: Status, Market, Numbers, Amounts (or "amount_manual_required"
+for numbers-only plans), Safety, and Final Decision. It never recomputes or
+changes SAFE/BLOCKED — it only re-displays fields the mapping already decided,
+and it never prints raw candidate lists, `outerHTML`, or page text. Use it for
+a quick read; use the full report when you need diagnostics for a BLOCKED
+result.
+
+## Multi-game captures and stale `current_game`
+
+A selector report's `Market: current_game` field is set once at page load and
+does not update when the user switches games in-page. When reviewing a
+report or dry-run for 天天樂, do not conclude the capture is wrong just
+because this field still reads `"539"` — instead check the rendered
+`mainFrame` text (see `SAFETY_INVARIANTS.md`) for the actual game name and
+game-specific numbers (e.g. bet limits) to confirm which game the data really
+belongs to.
+
 ## Using diagnostics after a 539 market-open scan
 
 1. Run the read-only site profile + `map-dry-run` for the open 539 market.

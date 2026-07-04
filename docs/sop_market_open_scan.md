@@ -115,3 +115,33 @@ SAFE 只代表「selector 對照成功，資料可留作下一階段人工評估
 **map-dry-run 跑完 = 本階段結束。**
 
 得到 SAFE 之後停下、回報結果，等下一次明確授權才進入任何後續階段。
+
+## 13. 簡潔輸出（--concise）
+
+第 8 節的 `map-dry-run` 可加 `--concise`，只印 Status / Market / Numbers /
+Amounts / Safety / Final Decision 摘要，不印原始 candidate 清單或頁面文字：
+
+```powershell
+python -m betguard.webfill.cli --map-dry-run --fill-plan fill_plan.json --profile site_profile.json --concise
+```
+
+判斷 SAFE/BLOCKED 的邏輯不變；需要看完整診斷（例如 BLOCKED 原因）時，拿掉
+`--concise` 改用 `--pretty` 或預設 JSON。
+
+## 14. 天天樂補充事項
+
+天天樂 (Tiantianle) 走同一套流程（第 1–13 節），但有以下差異：
+
+1. **進頁前務必親眼確認畫面已切到天天樂**——不是只看終端機殘留文字或
+   `game_id`，因為同一分頁切換遊戲時 `$Global` 設定不會即時更新。切換後
+   `market_state.current_game_name` / `global_config.game_id` 仍可能停留在
+   `"539"`，這是已知的過期欄位，不代表掃描抓錯遊戲。
+2. **判斷依據改用渲染後的 mainFrame 文字**，例如畫面／`sample_text` 裡出現
+   「天天樂 - 下注資訊」等天天樂專屬字樣，以及與 539 不同的單碰上限數字。
+   `game_id` 過期時，這段文字才是可信依據。
+3. 其餘步驟（`--save-site-profile` / `--site-profile-report` /
+   `--map-dry-run --concise`）與 539 完全相同，只換輸入檔與 `--page-name`。
+4. 金額欄位同樣是三個同一列的 `input[data-bind*="PengBet.Value"]`，
+   `#GroupSet_Value` 一樣要排除（見 `SAFETY_INVARIANTS.md`）。
+5. 預期結果：SAFE，號碼與 二星/三星/四星 金額都能唯一對應，`executable`
+   仍為 `false`。

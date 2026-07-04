@@ -51,6 +51,45 @@ Invalid fragments are not deleted when valid candidates are accepted.
   is a correct, expected safety outcome, not a failure to fix.
 - Selector safety guards must not be weakened to make a report look "greener".
 
+## Amount field position verification (v1)
+
+- The site renders exactly three visible amount inputs
+  (`input[data-bind*="PengBet.Value"]`) sharing one row (`top` within
+  `AMOUNT_ROW_TOP_TOLERANCE`). No id/name distinguishes them — only ascending
+  `left` position does. Sorted left-to-right they are 二星 / 三星 / 四星, in
+  that fixed order.
+- Mapping only accepts this shortcut when there are **exactly three** eligible
+  candidates in one row. Any other count (missing, duplicated, wrong row)
+  falls back to the old ranking, which stays BLOCKED on ambiguity as above.
+- `#GroupSet_Value` is a 分組序號 (grouping/sequence number) field, not an
+  amount field. It is explicitly excluded from the eligible-candidate pool —
+  it must never be selected as an amount target even if it happens to look
+  unique.
+- Hidden `#ta_*` / `#tb_*` fields and quick-bet-preset inputs are excluded from
+  the eligible-candidate pool for the same reason: they are not the visible
+  per-star amount inputs a human would actually see and fill.
+- This position-based rule has been validated against real captured data for
+  both 539 and 天天樂 (Tiantianle) — both share the same underlying page
+  template, so the same three-input, same-row, left-to-right logic resolves
+  SAFE on both games without any game-specific code.
+
+## Stale `current_game` / `game_id` after in-page game switch
+
+- The site's top-level `$Global` config (reflected as
+  `global_config.game_id` / `market_state.current_game_id` /
+  `current_game_name`) is set once at initial page load and is **not**
+  refreshed when a user switches games via the in-page AJAX menu. A selector
+  report captured after switching from 539 to 天天樂 can still show these
+  fields as `"539"` even though the rendered page is genuinely 天天樂.
+- Do not trust these fields alone to identify which game a capture belongs
+  to. The reliable signal is the **rendered page text**, e.g.
+  `diagnostics.live_frames[].sample_text` for `mainFrame` (look for literal
+  game-name text such as "天天樂 - 下注資訊" and game-specific limit numbers
+  that differ from 539's).
+- This means a `map-dry-run --concise` report's `Market: current_game: 539`
+  line can be stale and must not be read as proof the dry-run ran against 539
+  data — check which selector report / site profile was actually fed in.
+
 ## Numbers-only assisted plan (local only, v1)
 
 - `fill_plan.to_numbers_only_plan()` is a pure transform: `set_amount` steps are
