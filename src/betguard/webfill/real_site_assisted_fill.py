@@ -216,6 +216,11 @@ def validate_real_site_action(action: dict[str, Any]) -> str | None:
         return f"selector missing for {action_label(action)}"
     if _contains_danger_text(selector):
         return f"unsafe selector blocked for {action_label(action)}"
+    if _targets_groupset_value(selector, action.get("candidate") or {}):
+        return (
+            f"unsafe selector blocked for {action_label(action)}: "
+            "GroupSet_Value must never be used as an amount target"
+        )
     if not _metadata_is_safe(action.get("candidate") or {}):
         return f"unsafe selector candidate blocked for {action_label(action)}"
 
@@ -421,6 +426,20 @@ def _metadata_is_safe(metadata: dict[str, Any]) -> bool:
     selectors = metadata.get("candidate_selectors") or []
     values.extend(str(selector) for selector in selectors)
     return not any(_contains_danger_text(value) for value in values)
+
+
+def _targets_groupset_value(selector: str, candidate: dict[str, Any]) -> bool:
+    """Explicit, independent reject for GroupSet_Value (a 分組序號 field, not an
+    amount field). Defense-in-depth: does not rely on upstream mapping having
+    already excluded it -- checks the literal selector text, candidate id, and
+    any candidate_selectors regardless of danger-word content.
+    """
+    if "GroupSet_Value" in str(selector or ""):
+        return True
+    if str(candidate.get("id") or "") == "GroupSet_Value":
+        return True
+    selectors = candidate.get("candidate_selectors") or []
+    return any("GroupSet_Value" in str(item) for item in selectors)
 
 
 def _contains_danger_text(text: Any) -> bool:

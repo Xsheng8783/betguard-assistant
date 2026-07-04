@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import copy
 
+import pytest
+
 from betguard.review import build_report
 from betguard.webfill.real_site_fill_preflight import (
     BLOCKED,
     READY_FOR_HUMAN_REVIEW,
+    build_execution_actions_from_preflight,
     build_real_site_fill_preflight_report,
     contains_forbidden_steps,
     format_concise_real_site_fill_preflight,
@@ -266,3 +269,104 @@ def test_pretty_output_renders_gates_and_final_decision() -> None:
     assert "Gates:" in output
     assert "Final Decision:" in output
     assert "executable: false" in output
+
+
+# --- Real-site Execution Path Hardening v1a: build_execution_actions_from_preflight ---
+
+
+def ready_report() -> dict:
+    queue = approved_queue([approved_entry()])
+    report = build_real_site_fill_preflight_report(queue, clean_profile(), item_index=0)
+    assert report["status"] == READY_FOR_HUMAN_REVIEW
+    return report
+
+
+def test_execution_actions_rejects_blocked_report() -> None:
+    blocked = build_real_site_fill_preflight_report({}, clean_profile(), item_index=0)
+    assert blocked["status"] == BLOCKED
+    with pytest.raises(ValueError, match="READY_FOR_HUMAN_REVIEW"):
+        build_execution_actions_from_preflight(blocked)
+
+
+def test_execution_actions_rejects_missing_status() -> None:
+    with pytest.raises(ValueError, match="READY_FOR_HUMAN_REVIEW"):
+        build_execution_actions_from_preflight({})
+
+
+def test_execution_actions_rejects_false_final_decision_flags() -> None:
+    report = ready_report()
+
+    for field, bad_value in (
+        ("real_site_execute", True),
+        ("auto_submit", True),
+        ("executable", True),
+        ("human_required_each_item", False),
+    ):
+        tampered = copy.deepcopy(report)
+        tampered["final_decision"][field] = bad_value
+        with pytest.raises(ValueError, match=field):
+            build_execution_actions_from_preflight(tampered)
+
+
+def test_execution_actions_rejects_missing_final_decision_flag() -> None:
+    report = ready_report()
+    tampered = copy.deepcopy(report)
+    del tampered["final_decision"]["executable"]
+    with pytest.raises(ValueError, match="executable"):
+        build_execution_actions_from_preflight(tampered)
+
+
+def test_execution_actions_rejects_amount_without_position_verified() -> None:
+    report = ready_report()
+    tampered = copy.deepcopy(report)
+    tampered["amounts"][0]["position_verified"] = False
+    with pytest.raises(ValueError, match="position_verified"):
+        build_execution_actions_from_preflight(tampered)
+
+
+def test_execution_actions_rejects_selector_containing_groupset_value() -> None:
+    report = ready_report()
+    tampered = copy.deepcopy(report)
+    tampered["amounts"][0]["selector"] = "#GroupSet_Value"
+    tampered["amounts"][0]["position_verified"] = True
+    with pytest.raises(ValueError, match="GroupSet_Value"):
+        build_execution_actions_from_preflight(tampered)
+
+
+def test_execution_actions_rejects_groupset_value_in_number_selector_too() -> None:
+    report = ready_report()
+    tampered = copy.deepcopy(report)
+    tampered["numbers"][0]["selector"] = "#GroupSet_Value"
+    with pytest.raises(ValueError, match="GroupSet_Value"):
+        build_execution_actions_from_preflight(tampered)
+
+
+def test_execution_actions_rejects_forbidden_step_type_embedded() -> None:
+    report = ready_report()
+    for forbidden in ("submit", "confirm", "send_bet", "click_danger_button"):
+        tampered = copy.deepcopy(report)
+        tampered["amounts"][0]["type"] = forbidden
+        with pytest.raises(ValueError, match=forbidden):
+            build_execution_actions_from_preflight(tampered)
+
+
+def test_execution_actions_returns_actions_for_clean_ready_report() -> None:
+    report = ready_report()
+    actions = build_execution_actions_from_preflight(report)
+
+    number_actions = [action for action in actions if action["type"] == "SELECT_NUMBER"]
+    amount_actions = [action for action in actions if action["type"] == "SET_AMOUNT"]
+
+    assert len(number_actions) == 4
+    assert len(amount_actions) == 3
+    assert all(action["selector"] for action in actions)
+    assert {action["star"] for action in amount_actions} == {"二星", "三星", "四星"}
+    assert all(action["amount"] == 50 for action in amount_actions)
+    assert all("GroupSet_Value" not in action["selector"] for action in actions)
+
+
+def test_execution_actions_is_pure_and_does_not_mutate_report() -> None:
+    report = ready_report()
+    before = copy.deepcopy(report)
+    build_execution_actions_from_preflight(report)
+    assert report == before

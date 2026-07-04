@@ -164,6 +164,88 @@ def build_real_site_fill_preflight_report(
     return report
 
 
+ALLOWED_EXECUTION_ACTION_TYPES = {"SELECT_NUMBER", "SET_AMOUNT"}
+
+
+def build_execution_actions_from_preflight(report: dict[str, Any]) -> list[dict[str, Any]]:
+    """Pure, read-only converter: preflight report -> execution action objects.
+
+    This is the only sanctioned way to turn an already-verified
+    ``real_site_assisted_fill_preflight_v1`` report into concrete
+    SELECT_NUMBER/SET_AMOUNT actions for a future real-site execution layer.
+    It never clicks, fills, or touches a browser -- it only reshapes data the
+    preflight already decided. There is no partial/best-effort mode: any
+    report that is not unambiguously ready raises ``ValueError`` instead of
+    returning a degraded action list.
+    """
+    if report.get("status") != READY_FOR_HUMAN_REVIEW:
+        raise ValueError(
+            f"preflight report is not READY_FOR_HUMAN_REVIEW: {report.get('status')!r}"
+        )
+
+    final_decision = report.get("final_decision") or {}
+    if final_decision.get("real_site_execute") is not False:
+        raise ValueError("final_decision.real_site_execute must be false")
+    if final_decision.get("auto_submit") is not False:
+        raise ValueError("final_decision.auto_submit must be false")
+    if final_decision.get("executable") is not False:
+        raise ValueError("final_decision.executable must be false")
+    if final_decision.get("human_required_each_item") is not True:
+        raise ValueError("final_decision.human_required_each_item must be true")
+
+    actions: list[dict[str, Any]] = []
+
+    for number in report.get("numbers", []):
+        _reject_forbidden_step_type(number)
+        selector = str(number.get("selector") or "")
+        if not selector:
+            raise ValueError(f"number {number.get('number')} has no selector")
+        _reject_groupset_value(selector)
+        actions.append(
+            {
+                "type": "SELECT_NUMBER",
+                "number": number.get("number"),
+                "selector": selector,
+            }
+        )
+
+    for amount in report.get("amounts", []):
+        _reject_forbidden_step_type(amount)
+        selector = str(amount.get("selector") or "")
+        if not selector:
+            raise ValueError(f"amount {amount.get('star')} has no selector")
+        _reject_groupset_value(selector)
+        if amount.get("position_verified") is not True:
+            raise ValueError(f"amount {amount.get('star')} is not position_verified")
+        actions.append(
+            {
+                "type": "SET_AMOUNT",
+                "star": amount.get("star"),
+                "amount": amount.get("amount"),
+                "selector": selector,
+            }
+        )
+
+    for action in actions:
+        if action["type"] not in ALLOWED_EXECUTION_ACTION_TYPES:
+            raise ValueError(f"unsupported execution action type: {action['type']}")
+
+    return actions
+
+
+def _reject_groupset_value(selector: str) -> None:
+    if "GroupSet_Value" in selector:
+        raise ValueError(
+            f"selector '{selector}' targets GroupSet_Value; refusing to build execution action"
+        )
+
+
+def _reject_forbidden_step_type(item: dict[str, Any]) -> None:
+    step_type = str(item.get("type") or "")
+    if step_type in FORBIDDEN_STEPS:
+        raise ValueError(f"forbidden step type present: {step_type}")
+
+
 def format_pretty_real_site_fill_preflight(report: dict[str, Any]) -> str:
     item = report.get("item") or {}
     lines = [
@@ -383,6 +465,7 @@ def _extract_amounts(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
         amounts.append(
             {
                 "star": step.get("star"),
+                "amount": step.get("amount"),
                 "selector": action.get("selector") or "",
                 "confidence": action.get("confidence") or "low",
                 "unique": bool(action.get("unique_selector")),

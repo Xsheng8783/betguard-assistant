@@ -437,6 +437,56 @@ def test_queue_does_not_advance_on_execution_failure() -> None:
     assert queue["status"] != WAITING_FOR_HUMAN_CONFIRM
 
 
+def test_validate_real_site_action_rejects_groupset_value_selector_even_without_danger_words() -> None:
+    action = {
+        "type": "SET_AMOUNT",
+        "star": TWO_STAR,
+        "amount": 50,
+        "selector": "#GroupSet_Value",
+        "candidate": {"text": TWO_STAR, "value": ""},
+    }
+    error = validate_real_site_action(action)
+    assert error is not None
+    assert "GroupSet_Value" in error
+
+
+def test_validate_real_site_action_rejects_groupset_value_via_candidate_id() -> None:
+    action = {
+        "type": "SET_AMOUNT",
+        "star": TWO_STAR,
+        "amount": 50,
+        "selector": 'input[data-bind*="PengBet.Value"] >> nth=0',
+        "candidate": {"id": "GroupSet_Value", "text": TWO_STAR},
+    }
+    error = validate_real_site_action(action)
+    assert error is not None
+    assert "GroupSet_Value" in error
+
+
+def test_validate_real_site_action_rejects_groupset_value_via_candidate_selectors_list() -> None:
+    action = {
+        "type": "SET_AMOUNT",
+        "star": TWO_STAR,
+        "amount": 50,
+        "selector": 'input[data-bind*="PengBet.Value"] >> nth=0',
+        "candidate": {"candidate_selectors": ["#GroupSet_Value"], "text": TWO_STAR},
+    }
+    error = validate_real_site_action(action)
+    assert error is not None
+    assert "GroupSet_Value" in error
+
+
+def test_validate_real_site_action_allows_safe_amount_selector() -> None:
+    action = {
+        "type": "SET_AMOUNT",
+        "star": TWO_STAR,
+        "amount": 50,
+        "selector": 'input[data-bind*="PengBet.Value"] >> nth=0',
+        "candidate": {"text": TWO_STAR, "value": ""},
+    }
+    assert validate_real_site_action(action) is None
+
+
 def test_execution_failure_never_submits_or_auto_confirms() -> None:
     report = run_real_site_assisted_fill_with_page(
         queue_for(f"06.13.23.22 {TWO_THREE}50"),
