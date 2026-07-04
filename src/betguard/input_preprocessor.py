@@ -6,6 +6,17 @@ from typing import Any
 
 
 REPEATED_DOT_SPLIT_PATTERN = re.compile(r"\.{2,}")
+# Tiantianle 住碰 header (天天[樂] + x-joined 3-4 digit groups) and its bare tail
+# such as "2-3-100". A tail after such a header is a 住碰 continuation and must be
+# merged into it (never emitted as an independent Valid bet).
+TIANTIAN_ZHUPENG_HEADER_PATTERN = re.compile(r"天天(?:樂)?\s*\d{3,4}(?:\s*[xX×ｘ]\s*\d{3,4})+")
+ZHUPENG_TAIL_PATTERN = re.compile(r"\d{1,2}(?:[-.]\d{1,2})*[-.]\d{2,4}")
+# A single grouped normal bet written with ".." between number groups, ending in a
+# star.amount tail (e.g. 06.01.32..08.05.02..234.100). The parser already handles
+# the joined form, so it must NOT be split on ".." into separate fragments.
+DOTDOT_GROUPED_BET_PATTERN = re.compile(
+    r"\d{1,2}(?:\.\d{1,2})*(?:\.\.\d{1,2}(?:\.\d{1,2})*)*\.\.\d{2,4}\.\d{2,4}"
+)
 UNIT_WORD_SAFE = "\u652f"
 STAR_AMOUNT_CONTINUATION_PATTERN = re.compile(
     r"^(?:"
@@ -44,6 +55,23 @@ BET_SYMBOLS = set("./-、,，xX*×=()（）")
 MULTIPLIER_TRANSLATION = str.maketrans({"＊": "*", "Ｘ": "X", "ｘ": "x", "乘": "x", "✖": "x", "️": None})
 NUMERIC_STAR_WORDS = {"2": "二", "3": "三", "4": "四"}
 GAME_LABEL_TOKENS = {"今彩", "六和", "六合", "539", "天天樂", "天天", "港", "hk", "HK", "大", "大樂"}
+
+
+def _looks_like_tiantian_zhupeng_header(raw: str) -> bool:
+    return bool(TIANTIAN_ZHUPENG_HEADER_PATTERN.search(raw))
+
+
+def _looks_like_zhupeng_tail(cleaned: str) -> bool:
+    return bool(ZHUPENG_TAIL_PATTERN.fullmatch(cleaned.replace(" ", "")))
+
+
+def _is_dotdot_grouped_number_bet(raw: str) -> bool:
+    return bool(DOTDOT_GROUPED_BET_PATTERN.fullmatch(raw.strip()))
+
+
+def _join_dotdot_grouped_bet(raw: str) -> str:
+    parts = REPEATED_DOT_SPLIT_PATTERN.split(raw.strip())
+    return f"{'.'.join(parts[:-1])} {parts[-1]}".strip()
 
 
 def preprocess_batch_input(text_or_lines: str | Iterable[str]) -> dict[str, Any]:
@@ -130,6 +158,17 @@ def preprocess_batch_input(text_or_lines: str | Iterable[str]) -> dict[str, Any]
             pending["preprocessing_notes"].append("merged decimal amount line")
             continue
 
+        if (
+            pending is not None
+            and _looks_like_tiantian_zhupeng_header(pending["raw"])
+            and _looks_like_zhupeng_tail(cleaned)
+        ):
+            pending["raw"] = f"{pending['raw'].rstrip(' .')} {cleaned}"
+            pending["original_lines"].append(line)
+            pending["preprocessing_notes"].extend(notes)
+            pending["preprocessing_notes"].append("merged 住碰 continuation")
+            continue
+
         if pending is not None:
             logical_lines.append(pending)
         pending = entry
@@ -139,13 +178,20 @@ def preprocess_batch_input(text_or_lines: str | Iterable[str]) -> dict[str, Any]
 
     candidate_bet_lines: list[dict[str, Any]] = []
     for logical_index, logical in enumerate(logical_lines, start=1):
-        raw_fragments = [
-            final_fragment.strip()
-            for fragment in REPEATED_DOT_SPLIT_PATTERN.split(logical["raw"])
-            for split_fragment in _split_after_embedded_star_amount(fragment)
-            for broken_split in _split_broken_prefix_star_fragment(split_fragment)
-            for final_fragment in _split_normal_and_car_fragment(broken_split)
-        ]
+        if _is_dotdot_grouped_number_bet(logical["raw"]):
+            # One grouped normal bet written with ".." between number groups. Join
+            # the number groups and keep the trailing star.amount so the parser
+            # reads a single bet (e.g. 06.01.32..08.05.02..234.100 ->
+            # "06.01.32.08.05.02 234.100") instead of broken fragments.
+            raw_fragments = [_join_dotdot_grouped_bet(logical["raw"])]
+        else:
+            raw_fragments = [
+                final_fragment.strip()
+                for fragment in REPEATED_DOT_SPLIT_PATTERN.split(logical["raw"])
+                for split_fragment in _split_after_embedded_star_amount(fragment)
+                for broken_split in _split_broken_prefix_star_fragment(split_fragment)
+                for final_fragment in _split_normal_and_car_fragment(broken_split)
+            ]
         fragments, inline_notes = _merge_inline_star_amount_fragments(raw_fragments)
         for fragment_index, fragment in enumerate(fragments, start=1):
             fragment = _trim_fragment(fragment)

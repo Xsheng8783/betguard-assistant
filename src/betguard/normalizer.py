@@ -57,6 +57,14 @@ def normalize_for_parser(text: str) -> NormalizationResult:
         notes.append("normalized whitespace")
     value = updated
 
+    # Strip only trailing Chinese punctuation (，。、) so an otherwise-parseable
+    # line is not blocked by a stray full-stop/comma. Deliberately end-anchored
+    # and limited to these marks so it never changes inner delimiters or amounts.
+    updated = re.sub(r"[、。，]+$", "", value).strip()
+    if updated != value:
+        notes.append("stripped trailing punctuation")
+    value = updated
+
     return NormalizationResult(
         original_text=original,
         normalized_text=value,

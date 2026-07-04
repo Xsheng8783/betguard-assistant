@@ -33,6 +33,12 @@ FULL_CLOSE_PAREN = "\uff09"
 MULTIPLY_SIGN = "\u00d7"
 ALLOWED_CHINESE_CHARS = set("二三四兩星元塊支車尾碰今彩天天樂港六合大两")
 GAME_MARKER_PATTERN = re.compile(r"\u4eca\u5f69|(?<!\d)539(?!\d)")
+# Tiantianle \u4f4f\u78b0 header: \u5929\u5929[\u6a02] followed by x-joined 3-4 digit groups such as
+# 1019x2333x2637. This is not yet parseable, so it (and any continuation merged
+# onto it) must stay Needs Review \u2014 never an independent Valid bet.
+TIANTIAN_ZHUPENG_PATTERN = re.compile(
+    r"\u5929\u5929(?:\u6a02)?\s*\d{3,4}(?:\s*[xX\u00d7\uff58]\s*\d{3,4})+"
+)
 NUMBER_DELIMITERS = set(f"./-{COMMA_WORD},{FULL_COMMA} \t\r\n")
 COLUMN_INNER_DELIMITERS = set(f".-{COMMA_WORD},{FULL_COMMA} \t\r\n")
 AMOUNT_KIND_PATTERN = f"{UNIT_WORD}|{YUAN_WORD}|{BLOCK_WORD}"
@@ -64,6 +70,8 @@ class ParseError(ValueError):
 def parse_line(text: str, *, default_game: str = "539") -> ParsedBet:
     normalized = normalize_for_parser(text)
     raw = normalized.normalized_text
+    if TIANTIAN_ZHUPENG_PATTERN.search(raw):
+        raise ParseError("Tiantianle 住碰 continuation requires manual review")
     if _is_standalone_star_amount_line(raw):
         raise ParseError("standalone star amount line requires manual review")
     diagnostics = _input_diagnostics(raw)
