@@ -1894,3 +1894,242 @@ def test_full_run_via_shared_index_fallback_one_item_no_auto_submit_no_auto_next
         'input[data-bind*="PengBet.Value"] >> nth=0': "50",
         'input[data-bind*="PengBet.Value"] >> nth=1': "50",
     }
+
+
+# --- Shared/Index signature diagnostics v1 ---
+#
+# The live Tiantianle trial BLOCKED again even after the Shared/Index
+# fallback landed: the single /Front/Shared/Index frame did not pass the
+# strong DOM signature, but the error text could not say WHICH condition
+# failed. These tests lock in the new per-condition diagnostics: when a
+# Shared/Index frame fails the signature, the "frame not found" message now
+# lists every check result (booleans/counts only -- never page text), so
+# the next live BLOCKED run is self-diagnosing. Pass criteria are unchanged
+# and exactly as strict as before.
+
+
+def shared_index_action() -> dict:
+    return {
+        "type": "SELECT_NUMBER",
+        "number": "11",
+        "selector": "text=11",
+        "frame": "mainFrame",
+        "frame_url": "https://w1.gts362.com/token2/Front/B/B03",
+    }
+
+
+def test_shared_index_failure_message_lists_every_diagnostic_field() -> None:
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "",
+            page,
+            url="https://w0.gts362.com/token/Front/Shared/Index",
+            elements={},
+            rendered_text="",
+            amount_field_elements=None,
+        )
+    ]
+
+    with pytest.raises(RuntimeError) as excinfo:
+        execute_actions_on_page(page, [shared_index_action()])
+
+    message = str(excinfo.value)
+    for key in (
+        "shared_index_url_match",
+        "rendered_text_available",
+        "game_marker_found",
+        "star_markers_found",
+        "lianpeng_marker_found",
+        "number_board_token_count",
+        "amount_query_count",
+        "amount_visible_count",
+        "amount_non_groupset_count",
+        "amount_same_row_result",
+        "amount_x_positions_count",
+        "final_shared_index_signature_passed",
+    ):
+        assert f"{key}=" in message, key
+    assert "final_shared_index_signature_passed=False" in message
+    assert page.clicked == []
+
+
+def test_shared_index_diagnostics_show_missing_rendered_text() -> None:
+    # Amount triple is perfect, but the rendered text is empty -- the message
+    # must point at the text checks, not the amount checks.
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "",
+            page,
+            url="https://w0.gts362.com/token/Front/Shared/Index",
+            elements={},
+            rendered_text="",
+            amount_field_elements=tiantianle_amount_field_elements(),
+        )
+    ]
+
+    with pytest.raises(RuntimeError) as excinfo:
+        execute_actions_on_page(page, [shared_index_action()])
+
+    message = str(excinfo.value)
+    assert "rendered_text_available=False" in message
+    assert "amount_query_count=3" in message
+    assert "amount_visible_count=3" in message
+    assert "amount_same_row_result=True" in message
+
+
+def test_shared_index_diagnostics_show_wrong_amount_count() -> None:
+    # Text markers are all present, but only 2 PengBet.Value inputs exist --
+    # the message must point at amount_query_count.
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "",
+            page,
+            url="https://w0.gts362.com/token/Front/Shared/Index",
+            elements={},
+            rendered_text=TIANTIANLE_PAGE_RENDERED_TEXT,
+            amount_field_elements=tiantianle_amount_field_elements()[:2],
+        )
+    ]
+
+    with pytest.raises(RuntimeError) as excinfo:
+        execute_actions_on_page(page, [shared_index_action()])
+
+    message = str(excinfo.value)
+    assert "game_marker_found=True" in message
+    assert "star_markers_found=True" in message
+    assert "amount_query_count=2" in message
+    assert "final_shared_index_signature_passed=False" in message
+
+
+def test_shared_index_diagnostics_show_not_same_row() -> None:
+    elements = tiantianle_amount_field_elements()
+    elements[2]["box"]["y"] = 400  # third input on a different row
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "",
+            page,
+            url="https://w0.gts362.com/token/Front/Shared/Index",
+            elements={},
+            rendered_text=TIANTIANLE_PAGE_RENDERED_TEXT,
+            amount_field_elements=elements,
+        )
+    ]
+
+    with pytest.raises(RuntimeError) as excinfo:
+        execute_actions_on_page(page, [shared_index_action()])
+
+    message = str(excinfo.value)
+    assert "amount_query_count=3" in message
+    assert "amount_same_row_result=False" in message
+
+
+def test_shared_index_diagnostics_show_groupset_value_contamination() -> None:
+    elements = tiantianle_amount_field_elements()
+    elements[0]["id"] = "GroupSet_Value"
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "",
+            page,
+            url="https://w0.gts362.com/token/Front/Shared/Index",
+            elements={},
+            rendered_text=TIANTIANLE_PAGE_RENDERED_TEXT,
+            amount_field_elements=elements,
+        )
+    ]
+
+    with pytest.raises(RuntimeError) as excinfo:
+        execute_actions_on_page(page, [shared_index_action()])
+
+    message = str(excinfo.value)
+    assert "amount_non_groupset_count=2" in message
+    assert "final_shared_index_signature_passed=False" in message
+    assert page.clicked == []
+
+
+def test_shared_index_diagnostics_show_invisible_amount_field() -> None:
+    elements = tiantianle_amount_field_elements()
+    elements[1]["box"] = None  # not rendered -> no bounding box
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "",
+            page,
+            url="https://w0.gts362.com/token/Front/Shared/Index",
+            elements={},
+            rendered_text=TIANTIANLE_PAGE_RENDERED_TEXT,
+            amount_field_elements=elements,
+        )
+    ]
+
+    with pytest.raises(RuntimeError) as excinfo:
+        execute_actions_on_page(page, [shared_index_action()])
+
+    message = str(excinfo.value)
+    assert "amount_query_count=3" in message
+    assert "amount_visible_count=2" in message
+
+
+def test_shared_index_diagnostics_never_dump_page_text() -> None:
+    secret_text = "天天樂 - 下注資訊 SECRET-PAGE-CONTENT-MUST-NOT-LEAK"
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "",
+            page,
+            url="https://w0.gts362.com/token/Front/Shared/Index",
+            elements={},
+            rendered_text=secret_text,  # fails star/連碰/board checks
+            amount_field_elements=None,
+        )
+    ]
+
+    with pytest.raises(RuntimeError) as excinfo:
+        execute_actions_on_page(page, [shared_index_action()])
+
+    message = str(excinfo.value)
+    assert "SECRET-PAGE-CONTENT-MUST-NOT-LEAK" not in message
+    assert "game_marker_found=True" in message
+    assert "star_markers_found=False" in message
+
+
+def test_no_shared_index_frames_means_no_shared_index_checks_in_message() -> None:
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "unrelatedFrame",
+            page,
+            url="https://www.gts362.com/unrelated/path",
+            elements={},
+        )
+    ]
+
+    with pytest.raises(RuntimeError) as excinfo:
+        execute_actions_on_page(page, [shared_index_action()])
+
+    message = str(excinfo.value)
+    assert "shared_index_checks" not in message
+    assert "frames_seen=1" in message
+
+
+def test_shared_index_passing_frame_still_resolves_after_diagnostics_refactor() -> None:
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "",
+            page,
+            url="https://w0.gts362.com/token/Front/Shared/Index",
+            elements={"text=11": {"text": "11", "value": ""}},
+            rendered_text=TIANTIANLE_PAGE_RENDERED_TEXT,
+            amount_field_elements=tiantianle_amount_field_elements(),
+        )
+    ]
+
+    executed = execute_actions_on_page(page, [shared_index_action()])
+
+    assert executed[0]["executed"] is True
+    assert page.clicked == ["text=11"]

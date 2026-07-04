@@ -606,13 +606,18 @@ def _resolve_frame(page: Any, action: dict[str, Any]) -> Any:
     # /Front/B/B03). Because /Front/Shared/Index is not unique to the bet
     # page, URL containment alone is never enough here -- the frame must
     # also independently prove it via rendered text markers *and* a live
-    # re-check of the exact 3-input PengBet.Value row structure.
-    shared_index_matches = [
-        frame
-        for frame in frames
-        if SHARED_INDEX_URL_MARKER in _frame_attr(frame, "url")
-        and _frame_has_strong_shared_index_signature(frame)
-    ]
+    # re-check of the exact 3-input PengBet.Value row structure. Every
+    # per-condition result is recorded so a failed live trial's error text
+    # says exactly which check failed, instead of a bare "frame not found".
+    shared_index_diagnostics: list[dict[str, Any]] = []
+    shared_index_matches: list[Any] = []
+    for frame in frames:
+        if SHARED_INDEX_URL_MARKER not in _frame_attr(frame, "url"):
+            continue
+        diagnostics = _shared_index_signature_diagnostics(frame)
+        shared_index_diagnostics.append(diagnostics)
+        if diagnostics["final_shared_index_signature_passed"]:
+            shared_index_matches.append(frame)
     if len(shared_index_matches) == 1:
         return shared_index_matches[0]
     if len(shared_index_matches) > 1:
@@ -620,85 +625,154 @@ def _resolve_frame(page: Any, action: dict[str, Any]) -> Any:
             "ambiguous frame match: multiple Shared/Index frames show betting-page DOM signature"
         )
 
-    raise RuntimeError(_frame_not_found_message(frames, frame_name_ref, frame_url_ref))
+    raise RuntimeError(
+        _frame_not_found_message(frames, frame_name_ref, frame_url_ref, shared_index_diagnostics)
+    )
 
 
-def _frame_has_strong_shared_index_signature(frame: Any) -> bool:
-    """True only when a /Front/Shared/Index frame independently proves it is
-    the real bet page: genuine rendered text markers (game name, all three
-    star labels, 連碰, a real 01~39 number board) *and* a live DOM
-    re-verification of exactly three visible PengBet.Value amount inputs in
-    one row -- the same structural fact the offline mapping already
-    required. Read-only: only counts/measures already-rendered elements,
-    never clicks or fills anything.
+SHARED_INDEX_DIAGNOSTIC_KEYS = (
+    "shared_index_url_match",
+    "rendered_text_available",
+    "game_marker_found",
+    "star_markers_found",
+    "lianpeng_marker_found",
+    "number_board_token_count",
+    "amount_query_count",
+    "amount_visible_count",
+    "amount_non_groupset_count",
+    "amount_same_row_result",
+    "amount_x_positions_count",
+    "final_shared_index_signature_passed",
+)
+
+# Bound the per-element DOM reads even if the PengBet.Value query matches an
+# unexpectedly large number of elements (e.g. hidden template copies).
+MAX_AMOUNT_DIAGNOSTIC_ELEMENTS = 12
+
+
+def _shared_index_signature_diagnostics(frame: Any) -> dict[str, Any]:
+    """Per-condition results for the Shared/Index betting-page signature.
+
+    Same acceptance criteria as before, just recorded condition-by-condition:
+    the frame passes only when *every* rendered-text marker check and the
+    live 3-input PengBet.Value row re-verification all hold. Purely
+    read-only (counts, ids, bounding boxes); never clicks or fills; only
+    booleans/counts are recorded -- never page text or outerHTML.
     """
-    if not _frame_looks_like_betting_frame(_frame_rendered_text(frame)):
-        return False
-    return _frame_has_verified_amount_triple(frame)
+    text = _frame_rendered_text(frame)
+    number_tokens = set(NUMBER_BOARD_TOKEN_PATTERN.findall(text)) if text else set()
+
+    diagnostics: dict[str, Any] = {
+        "shared_index_url_match": SHARED_INDEX_URL_MARKER in _frame_attr(frame, "url"),
+        "rendered_text_available": bool(text),
+        "game_marker_found": any(marker in text for marker in BETTING_FRAME_GAME_TEXT_MARKERS),
+        "star_markers_found": all(marker in text for marker in BETTING_FRAME_STAR_MARKERS),
+        "lianpeng_marker_found": BETTING_FRAME_COMBO_MARKER in text,
+        "number_board_token_count": len(number_tokens),
+    }
+    diagnostics.update(_amount_triple_diagnostics(frame))
+
+    diagnostics["final_shared_index_signature_passed"] = (
+        diagnostics["shared_index_url_match"]
+        and diagnostics["rendered_text_available"]
+        and diagnostics["game_marker_found"]
+        and diagnostics["star_markers_found"]
+        and diagnostics["lianpeng_marker_found"]
+        and diagnostics["number_board_token_count"] >= MIN_NUMBER_BOARD_TOKENS
+        and diagnostics["amount_query_count"] == REQUIRED_AMOUNT_FIELD_COUNT
+        and diagnostics["amount_visible_count"] == REQUIRED_AMOUNT_FIELD_COUNT
+        and diagnostics["amount_non_groupset_count"] == REQUIRED_AMOUNT_FIELD_COUNT
+        and diagnostics["amount_same_row_result"] is True
+        and diagnostics["amount_x_positions_count"] == REQUIRED_AMOUNT_FIELD_COUNT
+    )
+    return diagnostics
 
 
-def _frame_has_verified_amount_triple(frame: Any) -> bool:
+def _amount_triple_diagnostics(frame: Any) -> dict[str, Any]:
+    """Read-only condition-by-condition check of the PengBet.Value triple.
+
+    ``amount_query_count`` is -1 when the query itself failed. Visibility is
+    Playwright semantics: an element with no bounding box is not rendered.
+    #GroupSet_Value is counted out via ``amount_non_groupset_count`` --
+    defense-in-depth consistent with every other layer that excludes it.
+    """
+    result: dict[str, Any] = {
+        "amount_query_count": -1,
+        "amount_visible_count": 0,
+        "amount_non_groupset_count": 0,
+        "amount_same_row_result": False,
+        "amount_x_positions_count": 0,
+    }
     try:
         locator = frame.locator(AMOUNT_FIELD_QUERY_SELECTOR)
         count = locator.count()
     except Exception:
-        return False
-    if count != REQUIRED_AMOUNT_FIELD_COUNT:
-        return False
+        return result
+    result["amount_query_count"] = count
 
     boxes: list[dict[str, Any]] = []
-    for index in range(count):
+    for index in range(min(count, MAX_AMOUNT_DIAGNOSTIC_ELEMENTS)):
         element = locator.nth(index)
         try:
             element_id = element.evaluate("el => el.id || ''")
         except Exception:
-            return False
-        # Defense-in-depth: even though #GroupSet_Value has no PengBet.Value
-        # data-bind attribute and should never match this query, an explicit
-        # id-based reject keeps this consistent with every other layer that
-        # excludes it (mapping, preflight, execution-action validation).
-        if str(element_id or "") == "GroupSet_Value":
-            return False
+            element_id = None
+        if element_id is not None and str(element_id or "") != "GroupSet_Value":
+            result["amount_non_groupset_count"] += 1
         try:
             box = element.bounding_box()
         except Exception:
-            return False
-        if not box:
-            return False
-        boxes.append(box)
+            box = None
+        if box:
+            result["amount_visible_count"] += 1
+            boxes.append(box)
 
     tops = [box.get("y") for box in boxes]
-    if any(top is None for top in tops):
-        return False
-    reference_top = tops[0]
-    if any(abs(top - reference_top) > AMOUNT_ROW_TOP_TOLERANCE for top in tops):
-        return False
+    if boxes and all(top is not None for top in tops):
+        reference_top = tops[0]
+        result["amount_same_row_result"] = all(
+            abs(top - reference_top) <= AMOUNT_ROW_TOP_TOLERANCE for top in tops
+        )
 
     lefts = [box.get("x") for box in boxes]
-    if any(left is None for left in lefts):
-        return False
-    if len(set(lefts)) != REQUIRED_AMOUNT_FIELD_COUNT:
-        return False
+    if boxes and all(left is not None for left in lefts):
+        result["amount_x_positions_count"] = len(set(lefts))
 
-    return True
+    return result
 
 
-def _frame_not_found_message(frames: list[Any], frame_name_ref: str, frame_url_ref: str) -> str:
+def _frame_not_found_message(
+    frames: list[Any],
+    frame_name_ref: str,
+    frame_url_ref: str,
+    shared_index_diagnostics: list[dict[str, Any]] | None = None,
+) -> str:
     """A diagnostic message that names exactly which fallback stages ran.
 
     A bare "frame not found: mainFrame" cannot tell a future investigation
     whether frame_url was even present, whether the URL fallback matched
-    zero frames, or whether rendered-content markers were tried at all.
-    Bounded (frame count + short name/url list only) -- never dumps page
-    text or outerHTML.
+    zero frames, or which Shared/Index signature condition failed. Bounded
+    (frame count + short name/url list + per-condition booleans/counts only)
+    -- never dumps page text or outerHTML.
     """
     seen = [f"{_frame_attr(frame, 'name') or '(unnamed)'}|{_frame_attr(frame, 'url')}" for frame in frames][:10]
-    return (
+    message = (
         f"frame not found: name_ref={frame_name_ref or '(none)'}, "
         f"url_ref={frame_url_ref or '(none)'}, "
         f"url_fallback_attempted={bool(frame_url_ref)}, "
         f"frames_seen={len(frames)} {seen}"
     )
+    if shared_index_diagnostics:
+        rendered = "; ".join(
+            _format_shared_index_diagnostics(diagnostics)
+            for diagnostics in shared_index_diagnostics[:3]
+        )
+        message += f", shared_index_checks=[{rendered}]"
+    return message
+
+
+def _format_shared_index_diagnostics(diagnostics: dict[str, Any]) -> str:
+    return ", ".join(f"{key}={diagnostics.get(key)}" for key in SHARED_INDEX_DIAGNOSTIC_KEYS)
 
 
 def _frame_url_matches(frame: Any, frame_url_ref: str) -> bool:
