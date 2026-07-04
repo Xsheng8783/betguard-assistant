@@ -552,6 +552,46 @@ MIN_NUMBER_BOARD_TOKENS = 10
 SHARED_INDEX_URL_MARKER = "/Front/Shared/Index"
 AMOUNT_FIELD_QUERY_SELECTOR = f'input[data-bind*="{AMOUNT_INPUT_DATA_BIND_MARKER}"]'
 
+# Bounds the recursive frame-tree traversal below so a cyclic or
+# pathological frame tree can never hang or loop forever.
+MAX_FRAME_TRAVERSAL = 50
+
+
+def _collect_all_frames(page: Any) -> list[Any]:
+    """Bounded, deduplicated, recursive collection of every frame reachable
+    from ``page.frames`` plus each frame's own ``child_frames`` (recursively).
+
+    Root cause this fixes: a real live session showed the bet frame
+    (``name=mainFrame``, ``url=.../Front/B/B03``) only under a parent
+    Shared/Index frame's own ``child_frames`` -- it never appeared directly
+    in ``page.frames``. This only enlarges the *candidate pool* the existing
+    name/URL/marker/Shared-Index checks run against; it does not change any
+    acceptance rule, and it never returns the top-level ``page`` itself.
+    """
+    collected: list[Any] = []
+    seen_ids: set[int] = set()
+    queue: list[Any] = list(getattr(page, "frames", []) or [])
+
+    while queue and len(collected) < MAX_FRAME_TRAVERSAL:
+        frame = queue.pop(0)
+        frame_key = id(frame)
+        if frame_key in seen_ids:
+            continue
+        seen_ids.add(frame_key)
+        collected.append(frame)
+
+        child_frames_attr = getattr(frame, "child_frames", None)
+        if child_frames_attr is None:
+            continue
+        try:
+            children = child_frames_attr() if callable(child_frames_attr) else child_frames_attr
+            children = list(children)
+        except Exception:
+            children = []
+        queue.extend(children)
+
+    return collected
+
 
 def _resolve_frame(page: Any, action: dict[str, Any]) -> Any:
     frame_name_ref = str(action.get("frame") or "")
@@ -560,7 +600,7 @@ def _resolve_frame(page: Any, action: dict[str, Any]) -> Any:
     if not frame_name_ref and not frame_url_ref:
         return page
 
-    frames = list(getattr(page, "frames", []) or [])
+    frames = _collect_all_frames(page)
 
     # 1) Exact frame-name match, tried first.
     name_matches = [frame for frame in frames if frame_name_ref and _frame_attr(frame, "name") == frame_name_ref]

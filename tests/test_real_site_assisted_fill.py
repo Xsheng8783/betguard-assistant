@@ -2320,8 +2320,13 @@ def test_empty_shared_index_diagnostics_are_bounded_not_full_html() -> None:
 
 
 def test_empty_shared_index_reports_child_frames_when_available() -> None:
+    # child_frames is now also part of the real candidate pool (recursive
+    # traversal), so this child must be a plain, non-matching sibling frame
+    # (not named mainFrame, no B03 in its URL, no rendered signature) --
+    # otherwise it would legitimately resolve instead of staying BLOCKED,
+    # which is a different test (see test_child_frame_* below).
     page = FakePage({})
-    child = FakeFrame("betChildFrame", page, url="https://w1.gts362.com/tok/Front/B/B03")
+    child = FakeFrame("gmenu", page, url="https://w1.gts362.com/tok/Front/Shared/Menu")
     page.frames = [
         FakeFrame(
             "",
@@ -2346,7 +2351,7 @@ def test_empty_shared_index_reports_child_frames_when_available() -> None:
 
     message = str(excinfo.value)
     assert "child_frames_count=1" in message
-    assert "betChildFrame" in message
+    assert "gmenu" in message
 
 
 def test_empty_shared_index_evaluate_exception_reported_safely() -> None:
@@ -2431,3 +2436,328 @@ def test_groupset_value_still_rejected_with_empty_shared_index_diagnostics() -> 
     error = validate_real_site_action(action)
     assert error is not None
     assert "GroupSet_Value" in error
+
+
+# --- Recursive child_frames traversal v1 ---
+#
+# Root cause of the live Tiantianle BLOCKED trial: page.frames only listed
+# the parent /Front/Shared/Index frame. The real bet frame (name=mainFrame,
+# url=.../Front/B/B03) only appeared under that parent frame's own
+# child_frames -- never directly in page.frames. _resolve_frame() now
+# collects page.frames plus every frame's child_frames recursively (bounded,
+# deduplicated) before running the exact same name/URL/marker/Shared-Index
+# checks. No acceptance rule changed; only the candidate pool got deeper.
+
+
+def test_child_frame_mainframe_b03_resolves_and_clicks() -> None:
+    # Exact live shape: page.frames has only the unnamed parent Shared/Index
+    # frame; the real mainFrame/B03 frame is only reachable via its
+    # child_frames.
+    page = FakePage({})
+    main_child = FakeFrame(
+        "mainFrame",
+        page,
+        url="https://w0.gts362.com/P755session/Front/B/B03",
+        elements={"text=11": {"text": "11", "value": ""}},
+    )
+    menu_child = FakeFrame("gmenu", page, url="https://w0.gts362.com/P755session/Front/Shared/Menu")
+    parent = FakeFrame(
+        "",
+        page,
+        url="https://w0.gts362.com/P755session/Front/Shared/Index",
+        elements={},
+        rendered_text="",
+        amount_field_elements=[],
+        child_frames=[menu_child, main_child],
+    )
+    page.frames = [parent]
+
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "11",
+        "selector": "text=11",
+        "frame": "mainFrame",
+        "frame_url": "https://w1.gts362.com/6u_rmq1xO0G6m4bNfwLvsQ/Front/B/B03",
+    }
+
+    executed = execute_actions_on_page(page, [action])
+
+    assert executed[0]["executed"] is True
+    assert page.clicked == ["text=11"]
+
+
+def test_child_frame_exact_name_match_works() -> None:
+    page = FakePage({})
+    child = FakeFrame(
+        "mainFrame",
+        page,
+        url="https://w0.gts362.com/whatever/unrelated/path",  # deliberately not B03-shaped
+        elements={"text=22": {"text": "22", "value": ""}},
+    )
+    parent = FakeFrame(
+        "",
+        page,
+        url="https://w0.gts362.com/P755session/Front/Shared/Index",
+        elements={},
+        rendered_text="",
+        amount_field_elements=[],
+        child_frames=[child],
+    )
+    page.frames = [parent]
+
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "22",
+        "selector": "text=22",
+        "frame": "mainFrame",  # exact name match against the child
+        "frame_url": "",
+    }
+
+    executed = execute_actions_on_page(page, [action])
+
+    assert executed[0]["executed"] is True
+    assert page.clicked == ["text=22"]
+
+
+def test_child_frame_url_b03_path_match_survives_different_token_and_subdomain() -> None:
+    page = FakePage({})
+    child = FakeFrame(
+        "frame9",  # runtime name unstable/different from recorded "mainFrame"
+        page,
+        url="https://w3.gts362.com/CompletelyDifferentToken/Front/B/B03?ts=1",
+        elements={"text=33": {"text": "33", "value": ""}},
+    )
+    parent = FakeFrame(
+        "",
+        page,
+        url="https://w0.gts362.com/P755session/Front/Shared/Index",
+        elements={},
+        rendered_text="",
+        amount_field_elements=[],
+        child_frames=[child],
+    )
+    page.frames = [parent]
+
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "33",
+        "selector": "text=33",
+        "frame": "mainFrame",
+        "frame_url": "https://w1.gts362.com/6u_rmq1xO0G6m4bNfwLvsQ/Front/B/B03",
+    }
+
+    executed = execute_actions_on_page(page, [action])
+
+    assert executed[0]["executed"] is True
+    assert page.clicked == ["text=33"]
+
+
+def test_ambiguous_multiple_child_b03_frames_blocked() -> None:
+    page = FakePage({})
+    child_a = FakeFrame(
+        "frameA",
+        page,
+        url="https://w0.gts362.com/tokenA/Front/B/B03",
+        elements={"text=11": {"text": "11", "value": ""}},
+    )
+    child_b = FakeFrame(
+        "frameB",
+        page,
+        url="https://w0.gts362.com/tokenB/Front/B/B03",
+        elements={"text=11": {"text": "11", "value": ""}},
+    )
+    parent = FakeFrame(
+        "",
+        page,
+        url="https://w0.gts362.com/P755session/Front/Shared/Index",
+        elements={},
+        rendered_text="",
+        amount_field_elements=[],
+        child_frames=[child_a, child_b],
+    )
+    page.frames = [parent]
+
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "11",
+        "selector": "text=11",
+        "frame": "mainFrame",  # neither child named mainFrame
+        "frame_url": "https://w1.gts362.com/6u_rmq1xO0G6m4bNfwLvsQ/Front/B/B03",
+    }
+
+    with pytest.raises(RuntimeError, match="ambiguous frame match"):
+        execute_actions_on_page(page, [action])
+    assert page.clicked == []
+
+
+def test_no_child_b03_frame_blocked_with_diagnostics() -> None:
+    page = FakePage({})
+    menu_child = FakeFrame("gmenu", page, url="https://w0.gts362.com/P755session/Front/Shared/Menu")
+    print_child = FakeFrame("gprint", page, url="https://w0.gts362.com/P755session/Front/Shared/BetList")
+    parent = FakeFrame(
+        "",
+        page,
+        url="https://w0.gts362.com/P755session/Front/Shared/Index",
+        elements={},
+        rendered_text="",
+        amount_field_elements=[],
+        empty_frame_diagnostic_data={
+            "bodyExists": True,
+            "readyState": "complete",
+            "frameIframeCount": 2,
+            "framesetFrameTagCount": 2,
+            "entries": [
+                {"tag": "FRAME", "src": "/P755session/Front/Shared/Menu", "name": "gmenu", "id": "gmenu"},
+                {"tag": "FRAME", "src": "/P755session/Front/Shared/BetList", "name": "gprint", "id": "gprint"},
+            ],
+        },
+        child_frames=[menu_child, print_child],
+    )
+    page.frames = [parent]
+
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "11",
+        "selector": "text=11",
+        "frame": "mainFrame",
+        "frame_url": "https://w1.gts362.com/6u_rmq1xO0G6m4bNfwLvsQ/Front/B/B03",
+    }
+
+    with pytest.raises(RuntimeError) as excinfo:
+        execute_actions_on_page(page, [action])
+
+    message = str(excinfo.value)
+    assert "final_shared_index_signature_passed=False" in message
+    assert "child_frames_count=2" in message
+    assert "gmenu" in message
+    assert page.clicked == []
+
+
+def test_danger_selector_still_rejected_in_child_frame() -> None:
+    page = FakePage({})
+    child = FakeFrame(
+        "mainFrame",
+        page,
+        url="https://w0.gts362.com/P755session/Front/B/B03",
+        elements={'button[data-danger="true"]': {"text": "06", "value": ""}},
+    )
+    parent = FakeFrame(
+        "",
+        page,
+        url="https://w0.gts362.com/P755session/Front/Shared/Index",
+        elements={},
+        rendered_text="",
+        amount_field_elements=[],
+        child_frames=[child],
+    )
+    page.frames = [parent]
+
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "06",
+        "selector": 'button[data-danger="true"]',
+        "frame": "mainFrame",
+        "frame_url": "https://w1.gts362.com/6u_rmq1xO0G6m4bNfwLvsQ/Front/B/B03",
+    }
+
+    with pytest.raises(RuntimeError):
+        execute_actions_on_page(page, [action])
+    assert page.clicked == []
+
+
+def test_groupset_value_still_rejected_in_child_frame_context() -> None:
+    action = {
+        "type": "SET_AMOUNT",
+        "star": TWO_STAR,
+        "amount": 100,
+        "selector": "#GroupSet_Value",
+        "frame": "mainFrame",
+        "frame_url": "https://w1.gts362.com/6u_rmq1xO0G6m4bNfwLvsQ/Front/B/B03",
+        "candidate": {"text": TWO_STAR, "value": ""},
+    }
+    error = validate_real_site_action(action)
+    assert error is not None
+    assert "GroupSet_Value" in error
+
+
+def test_full_run_through_child_frame_one_item_no_auto_submit_no_auto_next() -> None:
+    text = "\n".join(
+        [
+            f"06.13.23.22 {TWO_THREE}50",
+            f"08.09.10.11 {TWO_THREE}100",
+        ]
+    )
+    page = FakePage({})
+    main_child = FakeFrame(
+        "mainFrame",
+        page,
+        url="https://w0.gts362.com/P755session/Front/B/B03",
+        elements={
+            'button[data-number="06"]': {"text": "06", "value": ""},
+            'button[data-number="13"]': {"text": "13", "value": ""},
+            'button[data-number="23"]': {"text": "23", "value": ""},
+            'button[data-number="22"]': {"text": "22", "value": ""},
+            'input[data-bind*="PengBet.Value"] >> nth=0': {"text": TWO_STAR, "value": ""},
+            'input[data-bind*="PengBet.Value"] >> nth=1': {"text": THREE_STAR, "value": ""},
+        },
+    )
+    parent = FakeFrame(
+        "",
+        page,
+        url="https://w0.gts362.com/P755session/Front/Shared/Index",
+        elements={},
+        rendered_text="",
+        amount_field_elements=[],
+        child_frames=[main_child],
+    )
+    page.frames = [parent]
+
+    report = run_real_site_assisted_fill_with_page(
+        approved_queue_for(text),
+        clean_profile(),
+        page,
+        item_index=0,
+        risk_acknowledged=True,
+    )
+
+    assert report["status"] == WAITING_FOR_HUMAN_CONFIRM
+    assert report["queue"]["items"][1]["status"] == PENDING
+    assert report["final_decision"]["real_site_auto_submit"] is False
+    assert report["danger_buttons_clicked"] == []
+    assert page.clicked == [
+        'button[data-number="06"]',
+        'button[data-number="13"]',
+        'button[data-number="23"]',
+        'button[data-number="22"]',
+    ]
+    assert page.filled == {
+        'input[data-bind*="PengBet.Value"] >> nth=0': "50",
+        'input[data-bind*="PengBet.Value"] >> nth=1': "50",
+    }
+
+
+def test_recursive_traversal_deduplicates_and_is_bounded() -> None:
+    # A frame that (implausibly) reports itself as its own child must not
+    # cause infinite recursion or duplicate entries in the candidate pool.
+    page = FakePage({})
+    cyclic = FakeFrame(
+        "cyclicFrame",
+        page,
+        url="https://w0.gts362.com/cyclic",
+        elements={},
+    )
+    cyclic.child_frames = [cyclic]  # self-referential
+    page.frames = [cyclic]
+
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "11",
+        "selector": "text=11",
+        "frame": "mainFrame",
+        "frame_url": "https://w1.gts362.com/6u_rmq1xO0G6m4bNfwLvsQ/Front/B/B03",
+    }
+
+    # Must terminate (not hang) and fail safely -- no frame matches.
+    with pytest.raises(RuntimeError, match="locator lookup failed"):
+        execute_actions_on_page(page, [action])
+    assert page.clicked == []
