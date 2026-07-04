@@ -2,6 +2,8 @@ import copy
 import json
 import sys
 
+import pytest
+
 import betguard.webfill.real_site_assisted_fill as real_site_assisted_fill_module
 from betguard.formatter import attach_summaries
 from betguard.review import review_text
@@ -16,6 +18,7 @@ from betguard.webfill.batch_queue import (
 from betguard.webfill.real_site_assisted_fill import (
     RISK_LOCK_MESSAGE,
     build_real_site_assisted_fill_preflight,
+    execute_actions_on_page,
     run_real_site_assisted_fill_with_page,
     validate_real_site_action,
 )
@@ -46,13 +49,40 @@ class FakeLocator:
         self.page.filled[self.selector] = value
 
 
-class FakePage:
-    frames = []
+class FakeFrame:
+    """Minimal Playwright-Frame-like double.
 
+    By default (``elements=None``) a frame delegates straight to the owning
+    page's own ``.locator()`` -- this keeps every pre-existing FakePage-based
+    test working unchanged now that execution actions carry a real ``frame``
+    value. Pass ``elements`` explicitly to model a frame whose document is
+    genuinely distinct from the top-level page (the real gts362 B03 iframe
+    case this fix targets).
+    """
+
+    def __init__(self, name: str, page: "FakePage", *, url: str | None = None, elements: dict | None = None):
+        self.name = name
+        self.url = url or f"https://example.invalid/Front/B/B03?frame={name}"
+        self._page = page
+        self._own_elements = elements
+
+    def locator(self, selector: str):
+        if self._own_elements is None:
+            return self._page.locator(selector)
+        metadata = self._own_elements.get(selector)
+        if metadata is None:
+            raise AssertionError(f"unexpected selector in frame '{self.name}': {selector}")
+        return FakeLocator(self._page, selector, metadata)
+
+
+class FakePage:
     def __init__(self, elements: dict[str, dict]):
         self.elements = elements
         self.clicked: list[str] = []
         self.filled: dict[str, str] = {}
+        # A self-delegating "mainFrame" by default, matching every real
+        # selector_report's frame_name -- see FakeFrame docstring.
+        self.frames = [FakeFrame("mainFrame", self)]
 
     def locator(self, selector: str):
         metadata = self.elements.get(selector)
@@ -88,11 +118,12 @@ def approved_queue_for(text: str) -> dict:
     return queue
 
 
-def candidate(selector: str, text: str = "") -> dict:
+def candidate(selector: str, text: str = "", *, frame: str = "mainFrame") -> dict:
     return {
         "tag": "button",
         "text": text,
         "candidate_selectors": [selector],
+        "frame_name": frame,
     }
 
 
@@ -813,3 +844,161 @@ def test_risk_acknowledgement_still_required_for_v1b_path() -> None:
     assert report["status"] == "BLOCKED"
     assert RISK_LOCK_MESSAGE in " ".join(report["errors"])
     assert page.locator_calls == 0
+
+
+# --- Frame-aware locator resolution v1 ---
+#
+# Root cause of the real BLOCKED trial: execution actions never carried a
+# ``frame`` value, so _locator_for_action always fell back to the top-level
+# page even though the bet controls live inside a child frame (mainFrame /
+# B03 route). build_execution_actions_from_preflight now threads the
+# selector's discovered frame through; these tests prove
+# execute_actions_on_page actually uses it, and that a selector genuinely
+# missing everywhere still fails safely rather than silently guessing.
+
+
+def test_execution_finds_selector_only_present_in_named_child_frame() -> None:
+    page = FakePage({})  # nothing at top-level
+    page.frames = [
+        FakeFrame("mainFrame", page, elements={"text=23": {"text": "23", "value": ""}})
+    ]
+    action = {"type": "SELECT_NUMBER", "number": "23", "selector": "text=23", "frame": "mainFrame"}
+
+    executed = execute_actions_on_page(page, [action])
+
+    assert executed == [{"type": "SELECT_NUMBER", "number": "23", "executed": True}]
+    assert page.clicked == ["text=23"]
+
+
+def test_top_level_missing_selector_no_longer_blocks_when_child_frame_has_it() -> None:
+    # Top-level page carries an unrelated element but NOT "text=23" -- exactly
+    # the shape of the real bug report (page text clearly shows 01~39 etc.,
+    # but the plain top-level locator still can't see it).
+    page = FakePage({"text=99": {"text": "99", "value": ""}})
+    page.frames = [
+        FakeFrame("mainFrame", page, elements={"text=23": {"text": "23", "value": ""}})
+    ]
+    action = {"type": "SELECT_NUMBER", "number": "23", "selector": "text=23", "frame": "mainFrame"}
+
+    executed = execute_actions_on_page(page, [action])
+
+    assert executed[0]["executed"] is True
+    assert page.clicked == ["text=23"]
+
+
+def test_selector_missing_in_every_frame_still_blocked() -> None:
+    page = FakePage({})
+    page.frames = [FakeFrame("mainFrame", page, elements={})]
+    action = {"type": "SELECT_NUMBER", "number": "23", "selector": "text=23", "frame": "mainFrame"}
+
+    with pytest.raises(RuntimeError, match="locator lookup failed"):
+        execute_actions_on_page(page, [action])
+    assert page.clicked == []
+
+
+def test_frame_not_found_fails_safely_not_silently() -> None:
+    page = FakePage({"text=23": {"text": "23", "value": ""}})
+    page.frames = []  # no frames at all, including no mainFrame
+    action = {"type": "SELECT_NUMBER", "number": "23", "selector": "text=23", "frame": "mainFrame"}
+
+    with pytest.raises(RuntimeError, match="locator lookup failed"):
+        execute_actions_on_page(page, [action])
+    assert page.clicked == []
+
+
+def test_frame_scoped_selector_string_danger_still_rejected() -> None:
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "mainFrame",
+            page,
+            elements={'button[data-danger="true"]': {"text": "06", "value": ""}},
+        )
+    ]
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "06",
+        "selector": 'button[data-danger="true"]',
+        "frame": "mainFrame",
+    }
+
+    with pytest.raises(RuntimeError):
+        execute_actions_on_page(page, [action])
+    assert page.clicked == []
+
+
+def test_frame_scoped_element_danger_text_still_blocks_before_click() -> None:
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "mainFrame",
+            page,
+            elements={"text=23": {"text": "送出注單", "value": "確認"}},
+        )
+    ]
+    action = {"type": "SELECT_NUMBER", "number": "23", "selector": "text=23", "frame": "mainFrame"}
+
+    with pytest.raises(RuntimeError, match="danger text detected"):
+        execute_actions_on_page(page, [action])
+    assert page.clicked == []
+
+
+def test_groupset_value_still_rejected_even_with_frame_set() -> None:
+    action = {
+        "type": "SET_AMOUNT",
+        "star": TWO_STAR,
+        "amount": 50,
+        "selector": "#GroupSet_Value",
+        "frame": "mainFrame",
+        "candidate": {"text": TWO_STAR, "value": ""},
+    }
+    error = validate_real_site_action(action)
+    assert error is not None
+    assert "GroupSet_Value" in error
+
+
+def test_full_run_with_child_frame_still_has_no_auto_submit_or_auto_next() -> None:
+    text = "\n".join(
+        [
+            f"06.13.23.22 {TWO_THREE}50",
+            f"08.09.10.11 {TWO_THREE}100",
+        ]
+    )
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "mainFrame",
+            page,
+            elements={
+                'button[data-number="06"]': {"text": "06", "value": ""},
+                'button[data-number="13"]': {"text": "13", "value": ""},
+                'button[data-number="23"]': {"text": "23", "value": ""},
+                'button[data-number="22"]': {"text": "22", "value": ""},
+                'input[data-bind*="PengBet.Value"] >> nth=0': {"text": TWO_STAR, "value": ""},
+                'input[data-bind*="PengBet.Value"] >> nth=1': {"text": THREE_STAR, "value": ""},
+            },
+        )
+    ]
+
+    report = run_real_site_assisted_fill_with_page(
+        approved_queue_for(text),
+        clean_profile(),
+        page,
+        item_index=0,
+        risk_acknowledged=True,
+    )
+
+    assert report["status"] == WAITING_FOR_HUMAN_CONFIRM
+    assert report["queue"]["items"][1]["status"] == PENDING
+    assert report["final_decision"]["real_site_auto_submit"] is False
+    assert report["danger_buttons_clicked"] == []
+    assert page.clicked == [
+        'button[data-number="06"]',
+        'button[data-number="13"]',
+        'button[data-number="23"]',
+        'button[data-number="22"]',
+    ]
+    assert page.filled == {
+        'input[data-bind*="PengBet.Value"] >> nth=0': "50",
+        'input[data-bind*="PengBet.Value"] >> nth=1': "50",
+    }

@@ -177,6 +177,12 @@ def build_execution_actions_from_preflight(report: dict[str, Any]) -> list[dict[
     preflight already decided. There is no partial/best-effort mode: any
     report that is not unambiguously ready raises ``ValueError`` instead of
     returning a degraded action list.
+
+    Each action carries the ``frame`` the selector was discovered in (e.g.
+    ``"mainFrame"``), taken verbatim from the mapping candidate. The site's
+    bet controls live inside a child frame, not the top-level page, so a
+    frame-unaware locator lookup at execution time would silently search the
+    wrong document and time out even though the selector itself is correct.
     """
     if report.get("status") != READY_FOR_HUMAN_REVIEW:
         raise ValueError(
@@ -206,6 +212,7 @@ def build_execution_actions_from_preflight(report: dict[str, Any]) -> list[dict[
                 "type": "SELECT_NUMBER",
                 "number": number.get("number"),
                 "selector": selector,
+                "frame": str(number.get("frame") or ""),
             }
         )
 
@@ -223,6 +230,7 @@ def build_execution_actions_from_preflight(report: dict[str, Any]) -> list[dict[
                 "star": amount.get("star"),
                 "amount": amount.get("amount"),
                 "selector": selector,
+                "frame": str(amount.get("frame") or ""),
             }
         )
 
@@ -447,6 +455,7 @@ def _extract_numbers(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
             {
                 "number": step.get("label"),
                 "selector": action.get("selector") or "",
+                "frame": action.get("frame") or "",
                 "confidence": action.get("confidence") or "low",
                 "unique": bool(action.get("unique_selector")),
             }
@@ -467,6 +476,7 @@ def _extract_amounts(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "star": step.get("star"),
                 "amount": step.get("amount"),
                 "selector": action.get("selector") or "",
+                "frame": action.get("frame") or "",
                 "confidence": action.get("confidence") or "low",
                 "unique": bool(action.get("unique_selector")),
                 "position_verified": bool(first.get("position_verified")),
