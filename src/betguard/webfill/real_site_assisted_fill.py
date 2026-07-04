@@ -576,16 +576,36 @@ def _resolve_frame(page: Any, action: dict[str, Any]) -> Any:
     if len(content_matches) > 1:
         raise RuntimeError("ambiguous frame match: multiple frames render betting-page markers")
 
-    raise RuntimeError(f"frame not found: {frame_name_ref or frame_url_ref}")
+    raise RuntimeError(_frame_not_found_message(frames, frame_name_ref, frame_url_ref))
+
+
+def _frame_not_found_message(frames: list[Any], frame_name_ref: str, frame_url_ref: str) -> str:
+    """A diagnostic message that names exactly which fallback stages ran.
+
+    A bare "frame not found: mainFrame" cannot tell a future investigation
+    whether frame_url was even present, whether the URL fallback matched
+    zero frames, or whether rendered-content markers were tried at all.
+    Bounded (frame count + short name/url list only) -- never dumps page
+    text or outerHTML.
+    """
+    seen = [f"{_frame_attr(frame, 'name') or '(unnamed)'}|{_frame_attr(frame, 'url')}" for frame in frames][:10]
+    return (
+        f"frame not found: name_ref={frame_name_ref or '(none)'}, "
+        f"url_ref={frame_url_ref or '(none)'}, "
+        f"url_fallback_attempted={bool(frame_url_ref)}, "
+        f"frames_seen={len(frames)} {seen}"
+    )
 
 
 def _frame_url_matches(frame: Any, frame_url_ref: str) -> bool:
     frame_url = _frame_attr(frame, "url")
     if not frame_url:
         return False
-    if B03_FRAME_MARKER in frame_url_ref and B03_FRAME_MARKER in frame_url:
+    frame_url_ref_lower = frame_url_ref.lower()
+    frame_url_lower = frame_url.lower()
+    if B03_FRAME_MARKER.lower() in frame_url_ref_lower and B03_FRAME_MARKER.lower() in frame_url_lower:
         return True
-    return frame_url_ref in frame_url or frame_url in frame_url_ref
+    return frame_url_ref_lower in frame_url_lower or frame_url_lower in frame_url_ref_lower
 
 
 def _frame_looks_like_betting_frame(text: str) -> bool:

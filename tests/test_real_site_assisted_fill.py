@@ -1265,3 +1265,178 @@ def test_full_run_via_url_fallback_frame_still_one_item_no_auto_submit_no_auto_n
         'input[data-bind*="PengBet.Value"] >> nth=0': "50",
         'input[data-bind*="PengBet.Value"] >> nth=1': "50",
     }
+
+
+# --- Frame resolution v3: diagnose why 0b08f0b still showed
+# "frame not found: mainFrame" on the live third trial ---
+#
+# Investigation confirmed (via direct build_execution_actions_from_preflight
+# inspection against the real local queue/profile) that the SELECT_NUMBER 23
+# action for item 1 genuinely carries both frame="mainFrame" and a populated
+# frame_url containing /Front/B/B03, and that _resolve_frame's control flow
+# already falls through name -> url -> rendered-markers correctly (it never
+# raises early on a name-match miss). Neither of the two suspected causes
+# reproduced locally. These tests lock in that diagnosis and add two real
+# hardenings found along the way: case-insensitive URL/path matching (the
+# server may assign a different-case or different-subdomain/session-token
+# URL each session) and a diagnostic-rich "frame not found" message so a
+# future BLOCKED trial's error text alone reveals which fallback stage
+# actually failed, instead of requiring another investigation round-trip.
+
+
+def test_execution_action_always_carries_frame_url_when_candidate_has_one() -> None:
+    """Diagnostic assertion (task requirement 5): proves frame_url is not
+    silently dropped anywhere between the mapping candidate and the final
+    execution action -- the exact thing the bug report suspected.
+    """
+    queue = approved_queue_for(f"06.13.23.22 {TWO_THREE}50")
+    v1_report = build_real_site_fill_preflight_report(queue, clean_profile(), item_index=0)
+    assert v1_report["status"] == "READY_FOR_HUMAN_REVIEW"
+
+    actions = real_site_assisted_fill_module.build_execution_actions_from_preflight(v1_report)
+
+    assert actions
+    for action in actions:
+        assert action.get("frame"), action
+        assert action.get("frame_url"), action
+        assert B03_FRAME_URL in action["frame_url"]
+
+
+def test_frame_url_fallback_is_case_insensitive() -> None:
+    # The recorded frame_url uses one case; the live frame's URL happens to
+    # differ in case (a real possibility with server-side URL normalization).
+    # Case must not defeat the B03-path fallback.
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "frame9",
+            page,
+            url="https://W0.GTS362.com/DifferentSessionToken/FRONT/b/B03",
+            elements={"text=23": {"text": "23", "value": ""}},
+        )
+    ]
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "23",
+        "selector": "text=23",
+        "frame": "mainFrame",
+        "frame_url": "https://w0.gts362.com/tUYuf3oHWEqPmxRrmIIFgg/Front/B/B03",
+    }
+
+    executed = execute_actions_on_page(page, [action])
+
+    assert executed[0]["executed"] is True
+    assert page.clicked == ["text=23"]
+
+
+def test_frame_url_fallback_survives_different_session_token_and_subdomain() -> None:
+    # Reproduces the exact real-world shape: the profile was captured on one
+    # session (w0.gts362.com/<tokenA>/Front/B/B03); the live trial runs on a
+    # different load-balanced subdomain and session token
+    # (w3.gts362.com/<tokenB>/Front/B/B03). Only the shared /Front/B/B03
+    # path segment is common -- that must still be enough.
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "frame3",
+            page,
+            url="https://w3.gts362.com/CompletelyDifferentToken99/Front/B/B03?ts=123",
+            elements={"text=23": {"text": "23", "value": ""}},
+        )
+    ]
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "23",
+        "selector": "text=23",
+        "frame": "mainFrame",  # exact name will not be found
+        "frame_url": "https://w0.gts362.com/tUYuf3oHWEqPmxRrmIIFgg/Front/B/B03",
+    }
+
+    executed = execute_actions_on_page(page, [action])
+
+    assert executed[0]["executed"] is True
+    assert page.clicked == ["text=23"]
+
+
+def test_frame_not_found_message_is_diagnostic() -> None:
+    """When every fallback genuinely fails, the error must say what was tried
+    (was frame_url present, how many frames existed, their name/url) instead
+    of a bare, undiagnosable "frame not found: mainFrame".
+    """
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "unrelatedFrame",
+            page,
+            url="https://www.gts362.com/unrelated/path",
+            elements={},
+        )
+    ]
+    action = {
+        "type": "SELECT_NUMBER",
+        "number": "23",
+        "selector": "text=23",
+        "frame": "mainFrame",
+        "frame_url": "https://w0.gts362.com/tUYuf3oHWEqPmxRrmIIFgg/Front/B/B03",
+    }
+
+    with pytest.raises(RuntimeError) as excinfo:
+        execute_actions_on_page(page, [action])
+
+    message = str(excinfo.value)
+    assert "url_ref=" in message
+    assert "url_fallback_attempted=True" in message
+    assert "frames_seen=1" in message
+    assert "unrelatedFrame" in message
+
+
+def test_frame_resolution_still_produces_no_submit_no_confirm_no_auto_next() -> None:
+    """Regression guard: the frame-resolution investigation/fix must not
+    have touched any of the existing forbidden-action or auto-next guards.
+    """
+    text = "\n".join(
+        [
+            f"06.13.23.22 {TWO_THREE}50",
+            f"08.09.10.11 {TWO_THREE}100",
+        ]
+    )
+    page = FakePage({})
+    page.frames = [
+        FakeFrame(
+            "frame3",
+            page,
+            url="https://w3.gts362.com/OtherToken/Front/B/B03",
+            elements={
+                'button[data-number="06"]': {"text": "06", "value": ""},
+                'button[data-number="13"]': {"text": "13", "value": ""},
+                'button[data-number="23"]': {"text": "23", "value": ""},
+                'button[data-number="22"]': {"text": "22", "value": ""},
+                'input[data-bind*="PengBet.Value"] >> nth=0': {"text": TWO_STAR, "value": ""},
+                'input[data-bind*="PengBet.Value"] >> nth=1': {"text": THREE_STAR, "value": ""},
+            },
+        )
+    ]
+
+    report = run_real_site_assisted_fill_with_page(
+        approved_queue_for(text),
+        clean_profile(),
+        page,
+        item_index=0,
+        risk_acknowledged=True,
+    )
+
+    assert report["status"] == WAITING_FOR_HUMAN_CONFIRM
+    assert report["queue"]["items"][1]["status"] == PENDING
+    assert report["final_decision"]["real_site_auto_submit"] is False
+    assert report["danger_buttons_clicked"] == []
+
+    groupset_action = {
+        "type": "SET_AMOUNT",
+        "star": TWO_STAR,
+        "amount": 50,
+        "selector": "#GroupSet_Value",
+        "frame": "mainFrame",
+        "frame_url": "https://w3.gts362.com/OtherToken/Front/B/B03",
+        "candidate": {"text": TWO_STAR, "value": ""},
+    }
+    assert validate_real_site_action(groupset_action) is not None
