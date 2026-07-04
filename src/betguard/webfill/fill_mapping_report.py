@@ -46,18 +46,34 @@ def build_mapping_report(
     )
     status = "BLOCKED" if blocked else "SAFE"
 
+    # Numbers-only plans (see fill_plan.to_numbers_only_plan) never place a
+    # set_amount step into planned_steps, so no amount action is ever mapped
+    # or executed here. amount_manual_required is an echo of the plan's own
+    # flag, never inferred from an empty amount_diagnostics list — a plan
+    # that still contains a real (ambiguous) amount action must keep showing
+    # its actual SAFE/BLOCKED amount_field_status, never a "skipped" label.
+    amount_manual_required = bool(fill_plan.get("amount_manual_required"))
+    amount_steps_removed = list(fill_plan.get("amount_steps_removed") or [])
+    amount_actions_present = any(_is_amount_action(action) for action in actions)
+    if amount_manual_required and not amount_actions_present:
+        amount_field_status = "SKIPPED_BY_DESIGN"
+    else:
+        amount_field_status = amount_diagnostics["status"]
+
     return {
         "mode": "assisted_fill_dry_run_mapping_report",
         "status": status,
         "market": _market_summary(selector_report),
         "actions": actions,
         "actions_summary": [_action_summary(action) for action in actions],
-        "amount_field_status": amount_diagnostics["status"],
+        "amount_field_status": amount_field_status,
         "amount_field_source": amount_diagnostics["source"],
         "amount_field_overrides": {
             "applied": override_result.get("applied", []),
             "rejected": override_result.get("rejected", []),
         },
+        "amount_manual_required": amount_manual_required,
+        "amount_steps_removed": amount_steps_removed,
         "ambiguous_amount_fields": amount_diagnostics["ambiguous"],
         "shared_amount_selectors": amount_diagnostics["shared_selectors"],
         "amount_field_diagnostics": amount_diagnostics["diagnostics"],
@@ -112,6 +128,17 @@ def format_pretty_mapping_report(report: dict[str, Any]) -> str:
     lines.append("- dangerous buttons detected:")
     for label in danger_check.get("dangerous_buttons_detected", []):
         lines.append(f"  - {label}")
+
+    if report.get("amount_manual_required"):
+        lines.append("")
+        lines.append("Amount Fields (manual entry required):")
+        lines.append("- amount_manual_required: true")
+        lines.append("- amount fields skipped by design; human must enter these manually")
+        lines.append("- no amount fill action will be executed")
+        for step in report.get("amount_steps_removed", []):
+            star = step.get("star")
+            amount = step.get("amount")
+            lines.append(f"  - {star}: {amount} (enter manually)")
 
     amount_diagnostics = report.get("amount_field_diagnostics") or []
     if amount_diagnostics:

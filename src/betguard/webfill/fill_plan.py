@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 
@@ -14,6 +15,8 @@ STAR_LABELS = {
     3: "三星",
     4: "四星",
 }
+
+NUMBERS_ONLY_MODE = "assisted_fill_plan_numbers_only_v0"
 
 
 def build_fill_plan(review_result: dict[str, Any]) -> dict[str, Any]:
@@ -154,3 +157,27 @@ def _unsupported_reason(bet_type: Any) -> str:
     if bet_type == "car":
         return "unsupported in v0: car page has no confirmation, fill plan disabled"
     return f"unsupported in v0: {bet_type or 'unknown'}"
+
+
+def to_numbers_only_plan(fill_plan: dict[str, Any]) -> dict[str, Any]:
+    """Pure transform: assisted_fill_plan_v0 -> assisted_fill_plan_numbers_only_v0.
+
+    Only ``select_number`` steps stay in ``planned_steps``; any ``set_amount``
+    step is moved into ``amount_steps_removed`` and can never re-enter
+    ``planned_steps``. Amounts are for human reference only — the caller must
+    display them for manual entry, never fill them. Idempotent: applying this
+    to an already-numbers-only plan returns an equivalent plan unchanged.
+    """
+    plan = deepcopy(fill_plan)
+    planned_steps = list(plan.get("planned_steps") or [])
+    already_removed = list(plan.get("amount_steps_removed") or [])
+
+    kept_steps = [step for step in planned_steps if step.get("type") != "set_amount"]
+    newly_removed = [step for step in planned_steps if step.get("type") == "set_amount"]
+
+    plan["mode"] = NUMBERS_ONLY_MODE
+    plan["executable"] = False
+    plan["planned_steps"] = kept_steps
+    plan["amount_steps_removed"] = already_removed + newly_removed
+    plan["amount_manual_required"] = True
+    return plan

@@ -51,6 +51,21 @@ Invalid fragments are not deleted when valid candidates are accepted.
   is a correct, expected safety outcome, not a failure to fix.
 - Selector safety guards must not be weakened to make a report look "greener".
 
+## Numbers-only assisted plan (local only, v1)
+
+- `fill_plan.to_numbers_only_plan()` is a pure transform: `set_amount` steps are
+  removed from `planned_steps` and moved into `amount_steps_removed`. They can
+  never re-enter `planned_steps`.
+- `amount_manual_required=true` means the human types every amount by hand.
+  This flag is a plan-level fact, not a computed guess — `build_mapping_report`
+  only shows amounts as "skipped by design" when the flag is set **and** no
+  amount action was actually mapped. If a plan is (incorrectly) marked
+  numbers-only while still carrying a real `set_amount` step, that step is
+  still mapped and still subject to every existing selector guard — the flag
+  can never hide or force-pass a real ambiguous amount selector.
+- This v1 covers local plan/report/dry-run only. No real-site execution path
+  reads or acts on `amount_manual_required` yet.
+
 ## Fixed safety flags
 
 The following must always hold in reports and mock output:

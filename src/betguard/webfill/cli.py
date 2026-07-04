@@ -42,6 +42,7 @@ from betguard.webfill.batch_mock_queue import (
 from betguard.webfill.fill_preview import PREVIEW_SAFETY, build_fill_preview, format_pretty_fill_preview
 from betguard.webfill.fill_mapping_report import build_mapping_report, format_pretty_mapping_report
 from betguard.webfill.fill_mapping import build_b03_selector_mapping, format_pretty_b03_selector_mapping
+from betguard.webfill.fill_plan import to_numbers_only_plan
 from betguard.webfill.inspector import run_dry_run_inspector
 from betguard.webfill.live_b03_snapshot import (
     format_pretty_live_b03_selector_mapping,
@@ -86,6 +87,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--mock-assisted-fill", action="store_true", help="Run assisted fill against the local mock page only")
     parser.add_argument("--map-dry-run", action="store_true", help="Build an offline assisted fill mapping report")
+    parser.add_argument(
+        "--numbers-only-fill-plan",
+        action="store_true",
+        help="Convert an assisted_fill_plan_v0 JSON into a numbers-only plan (amounts removed for manual entry)",
+    )
     parser.add_argument("--save-site-profile", action="store_true", help="Convert a local selector_report JSON into a local site_profile JSON")
     parser.add_argument("--site-profile-report", action="store_true", help="Read a local site_profile JSON and print a validation report")
     parser.add_argument("--dry-run-pipeline", action="store_true", help="Run the offline assisted fill dry-run pipeline")
@@ -459,6 +465,21 @@ def main() -> None:
             print(format_pretty_site_profile_validation(profile, validation))
         else:
             print(json.dumps(validation, ensure_ascii=False, indent=2))
+        return
+
+    if args.numbers_only_fill_plan:
+        if not args.fill_plan_path:
+            parser.error("--numbers-only-fill-plan requires --fill-plan")
+        fill_plan = json.loads(Path(args.fill_plan_path).read_text(encoding="utf-8"))
+        numbers_only_plan = to_numbers_only_plan(fill_plan)
+        if args.output_path:
+            Path(args.output_path).write_text(
+                json.dumps(numbers_only_plan, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            print(f"Numbers-only fill plan written: {args.output_path}")
+        else:
+            print(json.dumps(numbers_only_plan, ensure_ascii=False, indent=2))
         return
 
     if args.map_dry_run:

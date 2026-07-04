@@ -5,7 +5,7 @@ from betguard.webfill.fill_mapping import (
     build_dry_run_mapping,
 )
 from betguard.webfill.fill_mapping_report import build_mapping_report, format_pretty_mapping_report
-from betguard.webfill.fill_plan import build_fill_plan
+from betguard.webfill.fill_plan import build_fill_plan, to_numbers_only_plan
 
 
 def normal_fill_plan() -> dict:
@@ -693,3 +693,123 @@ def test_pretty_report_contains_amount_diagnostics_section() -> None:
     assert "Shared selector: #GroupSet_Value" in pretty
     assert "Result: amount fields are not safe for assisted fill" in pretty
     assert "attributes: id=GroupSet_Value" in pretty
+
+
+# --- Numbers-only Assisted Plan v1 ---
+
+
+def shared_group_set_selector_report(plan: dict) -> dict:
+    """The real 539 scenario: numbers resolve cleanly, amounts share #GroupSet_Value."""
+    report = selector_report_for(plan)
+    for star in plan.get("stars", []):
+        report["amount_field_candidates"][star] = [shared_group_set_candidate(star)]
+    return report
+
+
+def test_numbers_only_plan_maps_numbers_but_not_amounts() -> None:
+    plan = normal_fill_plan()
+    numbers_only = to_numbers_only_plan(plan)
+    selector_report = shared_group_set_selector_report(plan)
+
+    report = build_mapping_report(numbers_only, selector_report)
+
+    assert all(a["plan_step"].get("type") != "set_amount" for a in report["actions"])
+    assert any(a["plan_step"].get("type") == "select_number" for a in report["actions"])
+    for number in plan["numbers"]:
+        action = next(a for a in report["actions"] if a["plan_step"].get("label") == number)
+        assert action["selector_found"] is True
+        assert action["confidence"] == "high"
+
+
+def test_numbers_only_plan_is_safe_overall_despite_shared_amount_selector() -> None:
+    plan = normal_fill_plan()
+    numbers_only = to_numbers_only_plan(plan)
+    selector_report = shared_group_set_selector_report(plan)
+
+    report = build_mapping_report(numbers_only, selector_report)
+
+    # Numbers resolve cleanly and no amount action was ever attempted, so the
+    # overall report is SAFE even though #GroupSet_Value would BLOCK a full plan.
+    assert report["status"] == "SAFE"
+
+
+def test_numbers_only_plan_reports_amount_manual_required() -> None:
+    plan = normal_fill_plan()
+    numbers_only = to_numbers_only_plan(plan)
+    selector_report = shared_group_set_selector_report(plan)
+
+    report = build_mapping_report(numbers_only, selector_report)
+
+    assert report["amount_manual_required"] is True
+    assert report["amount_field_status"] == "SKIPPED_BY_DESIGN"
+    assert len(report["amount_steps_removed"]) == 3
+    removed_stars = {step["star"] for step in report["amount_steps_removed"]}
+    assert removed_stars == set(plan["stars"])
+
+
+def test_numbers_only_plan_never_forces_group_set_value_safe() -> None:
+    plan = normal_fill_plan()
+    numbers_only = to_numbers_only_plan(plan)
+    selector_report = shared_group_set_selector_report(plan)
+
+    report = build_mapping_report(numbers_only, selector_report)
+
+    # #GroupSet_Value is never evaluated at all for a true numbers-only plan
+    # (no amount action exists to evaluate it against) -- it must not appear
+    # anywhere as a "safe" or "resolved" selector.
+    assert report["ambiguous_amount_fields"] == []
+    assert report["shared_amount_selectors"] == []
+    assert all(a.get("selector") != "#GroupSet_Value" for a in report["actions"])
+
+
+def test_amount_manual_required_flag_does_not_hide_a_real_shared_amount_action() -> None:
+    """A plan that falsely claims amount_manual_required but still carries a
+    real set_amount step must not have that step hidden or force-passed."""
+    plan = normal_fill_plan()
+    selector_report = shared_group_set_selector_report(plan)
+    plan["amount_manual_required"] = True  # falsely claimed; planned_steps unchanged
+
+    report = build_mapping_report(plan, selector_report)
+
+    assert report["status"] == "BLOCKED"
+    assert report["amount_field_status"] == "BLOCKED"
+    assert report["shared_amount_selectors"] == ["#GroupSet_Value"]
+
+
+def test_pretty_numbers_only_report_shows_manual_amount_section() -> None:
+    plan = normal_fill_plan()
+    numbers_only = to_numbers_only_plan(plan)
+    selector_report = shared_group_set_selector_report(plan)
+
+    report = build_mapping_report(numbers_only, selector_report)
+    pretty = format_pretty_mapping_report(report)
+
+    assert "Amount Fields (manual entry required):" in pretty
+    assert "amount_manual_required: true" in pretty
+    assert "amount fields skipped by design" in pretty
+    assert "no amount fill action will be executed" in pretty
+    for star in plan["stars"]:
+        assert f"{star}: 50 (enter manually)" in pretty
+
+
+def test_pretty_full_plan_does_not_show_manual_amount_section() -> None:
+    plan = normal_fill_plan()
+    report = build_mapping_report(plan, selector_report_for(plan))
+
+    pretty = format_pretty_mapping_report(report)
+
+    assert "Amount Fields (manual entry required):" not in pretty
+    assert report["amount_manual_required"] is False
+
+
+def test_numbers_only_plan_does_not_change_danger_or_forbidden_steps() -> None:
+    plan = normal_fill_plan()
+    numbers_only = to_numbers_only_plan(plan)
+    selector_report = shared_group_set_selector_report(plan)
+
+    report = build_mapping_report(numbers_only, selector_report)
+
+    assert report["danger_check"]["danger_candidates_found"] is True
+    assert report["danger_check"]["dangerous_buttons_detected"] == ["送出注單", "確認"]
+    assert report["forbidden_steps"] == ["submit", "confirm", "send_bet", "click_danger_button"]
+    assert report["final_decision"]["executable"] is False
