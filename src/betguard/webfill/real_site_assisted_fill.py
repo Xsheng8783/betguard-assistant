@@ -6,6 +6,10 @@ from typing import Any
 
 from betguard.webfill.batch_queue import WAITING_FOR_HUMAN_CONFIRM, mark_item_waiting_for_human
 from betguard.webfill.real_site_fill_plan import build_real_site_assisted_fill_plan
+from betguard.webfill.real_site_fill_preflight import (
+    build_execution_actions_from_preflight,
+    build_real_site_fill_preflight_report,
+)
 from betguard.webfill.safety import is_dangerous_action
 
 
@@ -74,50 +78,78 @@ def build_real_site_assisted_fill_preflight(
 
 def run_real_site_assisted_fill_with_page(
     queue: dict[str, Any],
-    selector_report: dict[str, Any],
+    profile: dict[str, Any],
     page: Any,
     *,
+    item_index: int,
     risk_acknowledged: bool,
 ) -> dict[str, Any]:
-    preflight = build_real_site_assisted_fill_preflight(
-        queue,
-        selector_report,
-        risk_acknowledged=risk_acknowledged,
-    )
-    if preflight.get("status") != READY_TO_FILL:
-        return _blocked_runtime_report(preflight)
+    """Execute one ``approved_fill_queue`` item's actions on ``page``.
+
+    Hard gate (v1b): this never builds or runs an execution action unless a
+    fresh ``real_site_fill_preflight`` v1 report for this exact
+    ``(queue, profile, item_index)`` is ``READY_FOR_HUMAN_REVIEW``. Selector
+    truth always comes from ``build_execution_actions_from_preflight`` --
+    the legacy first-candidate path (``build_real_site_assisted_fill_preflight``
+    / ``_execution_action`` / ``_first_candidate``) is never called here.
+    """
+    if not risk_acknowledged:
+        return _risk_locked_runtime_report()
+
+    v1_report = build_real_site_fill_preflight_report(queue, profile, item_index=item_index)
+    if v1_report.get("status") != READY_FOR_HUMAN_REVIEW:
+        return _blocked_runtime_report(v1_report)
 
     try:
-        executed_actions = execute_actions_on_page(page, preflight["execution_actions"])
-    except Exception as exc:
-        blocked = _blocked_runtime_report(preflight)
+        execution_actions = build_execution_actions_from_preflight(v1_report)
+    except ValueError as exc:
+        blocked = _blocked_runtime_report(v1_report)
         blocked["errors"].append(str(exc))
         return blocked
 
-    return build_real_site_assisted_fill_report(queue, preflight, executed_actions)
+    try:
+        executed_actions = execute_actions_on_page(page, execution_actions)
+    except Exception as exc:
+        blocked = _blocked_runtime_report(v1_report)
+        blocked["errors"].append(str(exc))
+        return blocked
+
+    return build_real_site_assisted_fill_report(queue, v1_report, executed_actions)
 
 
 def run_real_site_assisted_fill(
     queue: dict[str, Any],
-    selector_report: dict[str, Any],
+    profile: dict[str, Any],
     *,
+    item_index: int,
     url: str,
     risk_acknowledged: bool,
     headless: bool = False,
     input_func: Any = input,
 ) -> dict[str, Any]:
-    preflight = build_real_site_assisted_fill_preflight(
-        queue,
-        selector_report,
-        risk_acknowledged=risk_acknowledged,
-    )
-    if preflight.get("status") != READY_TO_FILL:
-        return _blocked_runtime_report(preflight)
+    """Same v1 preflight gate as ``run_real_site_assisted_fill_with_page``,
+    but opens a real browser afterward. The preflight + execution-action
+    build happens before any browser is touched, so a BLOCKED preflight never
+    reaches Playwright at all.
+    """
+    if not risk_acknowledged:
+        return _risk_locked_runtime_report()
+
+    v1_report = build_real_site_fill_preflight_report(queue, profile, item_index=item_index)
+    if v1_report.get("status") != READY_FOR_HUMAN_REVIEW:
+        return _blocked_runtime_report(v1_report)
+
+    try:
+        execution_actions = build_execution_actions_from_preflight(v1_report)
+    except ValueError as exc:
+        blocked = _blocked_runtime_report(v1_report)
+        blocked["errors"].append(str(exc))
+        return blocked
 
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:  # pragma: no cover - environment dependent
-        blocked = _blocked_runtime_report(preflight)
+        blocked = _blocked_runtime_report(v1_report)
         blocked["errors"].append(f"Playwright is not installed: {exc}")
         return blocked
 
@@ -127,12 +159,12 @@ def run_real_site_assisted_fill(
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=15000)
             input_func("請在瀏覽器中手動登入並進入正確頁面，完成後回到終端機按 Enter 繼續。")
-            executed_actions = execute_actions_on_page(page, preflight["execution_actions"])
-            report = build_real_site_assisted_fill_report(queue, preflight, executed_actions)
+            executed_actions = execute_actions_on_page(page, execution_actions)
+            report = build_real_site_assisted_fill_report(queue, v1_report, executed_actions)
             input_func("已完成安全帶入，請人工檢查畫面。按 Enter 結束此工具。")
             return report
         except Exception as exc:
-            blocked = _blocked_runtime_report(preflight)
+            blocked = _blocked_runtime_report(v1_report)
             blocked["errors"].append(str(exc))
             return blocked
         finally:
@@ -187,17 +219,18 @@ def execute_actions_on_page(page: Any, actions: list[dict[str, Any]]) -> list[di
 
 def build_real_site_assisted_fill_report(
     queue: dict[str, Any],
-    preflight: dict[str, Any],
+    v1_report: dict[str, Any],
     executed_actions: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    item = preflight.get("item") or {}
+    item = v1_report.get("item") or {}
     updated_queue = mark_item_waiting_for_human(deepcopy(queue), int(item.get("index")))
+    danger_check = v1_report.get("danger_check") or {}
     return {
         "mode": "real_site_assisted_fill",
         "status": WAITING_FOR_HUMAN_CONFIRM,
         "item": item,
         "actions_executed": executed_actions,
-        "danger_buttons_detected": list(preflight.get("danger_buttons_detected", [])),
+        "danger_buttons_detected": list(danger_check.get("dangerous_buttons_detected", [])),
         "danger_buttons_clicked": [],
         "queue_status": updated_queue.get("status"),
         "queue": updated_queue,
@@ -249,7 +282,7 @@ def format_pretty_real_site_assisted_fill(report: dict[str, Any]) -> str:
         f"Status: {report.get('status')}",
         "",
         "Current Item:",
-        f"[{item.get('index', '')}] {item.get('original', '')}".rstrip(),
+        f"[{item.get('index', '')}] {item.get('original_text') or item.get('original', '')}".rstrip(),
     ]
     if item.get("parsed_summary"):
         lines.append(str(item["parsed_summary"]))
@@ -326,19 +359,36 @@ def _base_preflight_report() -> dict[str, Any]:
     }
 
 
-def _blocked_runtime_report(preflight: dict[str, Any]) -> dict[str, Any]:
+def _blocked_runtime_report(v1_report: dict[str, Any]) -> dict[str, Any]:
+    danger_check = v1_report.get("danger_check") or {}
     return {
         "mode": "real_site_assisted_fill",
         "status": BLOCKED,
-        "item": preflight.get("item"),
+        "item": v1_report.get("item"),
         "actions_executed": [],
-        "danger_buttons_detected": list(preflight.get("danger_buttons_detected", [])),
+        "danger_buttons_detected": list(danger_check.get("dangerous_buttons_detected", [])),
         "danger_buttons_clicked": [],
         "queue_status": None,
         "final_decision": dict(FINAL_DECISION),
-        "missing": list(preflight.get("missing", [])),
-        "warnings": list(preflight.get("warnings", [])),
-        "errors": list(preflight.get("errors", [])),
+        "missing": list(v1_report.get("missing", [])),
+        "warnings": list(v1_report.get("warnings", [])),
+        "errors": list(v1_report.get("errors", [])),
+    }
+
+
+def _risk_locked_runtime_report() -> dict[str, Any]:
+    return {
+        "mode": "real_site_assisted_fill",
+        "status": BLOCKED,
+        "item": None,
+        "actions_executed": [],
+        "danger_buttons_detected": [],
+        "danger_buttons_clicked": [],
+        "queue_status": None,
+        "final_decision": dict(FINAL_DECISION),
+        "missing": [],
+        "warnings": [],
+        "errors": [RISK_LOCK_MESSAGE],
     }
 
 

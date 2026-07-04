@@ -422,13 +422,14 @@ def main() -> None:
         if not args.i_understand_real_site_fill_risk:
             print(RISK_LOCK_MESSAGE)
             return
-        if not args.queue_path or not args.selector_report or not args.url:
-            parser.error("--real-site-assisted-fill requires --queue, --selector-report, and --url")
+        if not args.queue_path or not args.profile_path or not args.url:
+            parser.error("--real-site-assisted-fill requires --queue, --profile, and --url")
         queue = json.loads(Path(args.queue_path).read_text(encoding="utf-8"))
-        selector_report = json.loads(Path(args.selector_report).read_text(encoding="utf-8"))
+        profile = load_site_profile(args.profile_path)
         report = run_real_site_assisted_fill(
             queue,
-            selector_report,
+            profile,
+            item_index=args.item_index if args.item_index is not None else 0,
             url=args.url,
             risk_acknowledged=args.i_understand_real_site_fill_risk,
         )

@@ -1,6 +1,8 @@
+import copy
 import json
 import sys
 
+import betguard.webfill.real_site_assisted_fill as real_site_assisted_fill_module
 from betguard.formatter import attach_summaries
 from betguard.review import review_text
 from betguard.webfill import cli as webfill_cli
@@ -17,11 +19,12 @@ from betguard.webfill.real_site_assisted_fill import (
     run_real_site_assisted_fill_with_page,
     validate_real_site_action,
 )
+from betguard.webfill.real_site_fill_preflight import build_real_site_fill_preflight_report
 
 
-TWO_THREE = "\u4e8c\u4e09"
-TWO_STAR = "\u4e8c\u661f"
-THREE_STAR = "\u4e09\u661f"
+TWO_THREE = "二三"
+TWO_STAR = "二星"
+THREE_STAR = "三星"
 
 
 class FakeLocator:
@@ -62,6 +65,29 @@ def queue_for(text: str) -> dict:
     return build_batch_queue(attach_summaries(review_text(text).to_dict()))
 
 
+def approved_queue_for(text: str) -> dict:
+    """A queue that also carries a human-accepted approved_fill_queue.
+
+    This is the shape real_site_fill_preflight (v1) requires as its only
+    source of truth: no bare batch queue without approved_fill_queue can ever
+    reach READY_FOR_HUMAN_REVIEW.
+    """
+    queue = queue_for(text)
+    entries = []
+    for item in queue.get("items", []):
+        entries.append(
+            {
+                "index": item.get("index"),
+                "original_fragment": item.get("original"),
+                "bet_type": (item.get("review_result") or {}).get("type"),
+                "review_result": item.get("review_result"),
+                "accepted_by_human": True,
+            }
+        )
+    queue["approved_fill_queue"] = entries
+    return queue
+
+
 def candidate(selector: str, text: str = "") -> dict:
     return {
         "tag": "button",
@@ -83,9 +109,67 @@ def full_selector_report() -> dict:
             THREE_STAR: [candidate('input[data-amount-field="three"]', THREE_STAR)],
         },
         "danger_candidates": [
-            candidate('button[data-danger="submit"]', "\u9001\u51fa\u6ce8\u55ae"),
-            candidate('button[data-danger="confirm"]', "\u78ba\u8a8d"),
+            candidate('button[data-danger="submit"]', "送出注單"),
+            candidate('button[data-danger="confirm"]', "確認"),
         ],
+    }
+
+
+def pengbet_candidate(left: float) -> dict:
+    return {
+        "tag": "input",
+        "visible": True,
+        "hidden": False,
+        "id": "",
+        "outerHTML": '<input data-bind="value: PengBet.Value" />',
+        "box": {"top": 245, "left": left, "w": 60, "h": 20},
+        "candidate_selectors": [],
+        "frame_name": "mainFrame",
+    }
+
+
+_SPECIFIC_NUMBER_SELECTORS = {
+    "06": 'button[data-number="06"]',
+    "13": 'button[data-number="13"]',
+    "23": 'button[data-number="23"]',
+    "22": 'button[data-number="22"]',
+    "08": 'button[data-number="08"]',
+    "09": 'button[data-number="09"]',
+    "10": 'button[data-number="10"]',
+    "11": 'button[data-number="11"]',
+}
+
+
+def clean_profile() -> dict:
+    """A full site_profile (v1 preflight input): 39 numbers, the verified
+    three-input PengBet.Value row, and danger candidates.
+    """
+    number_candidates = {}
+    for n in range(1, 40):
+        label = f"{n:02d}"
+        selector = _SPECIFIC_NUMBER_SELECTORS.get(label, f"text={label}")
+        number_candidates[label] = [candidate(selector, label)]
+
+    return {
+        "profile_version": 1,
+        "site_name": "gts362",
+        "page_name": "539",
+        "captured_at": "2026-07-05",
+        "number_candidates": number_candidates,
+        "amount_field_candidates": {
+            "二星": [pengbet_candidate(65)],
+            "三星": [pengbet_candidate(138)],
+            "四星": [pengbet_candidate(211)],
+        },
+        "danger_candidates": [
+            candidate('button[data-danger="submit"]', "送出注單"),
+            candidate('button[data-danger="confirm"]', "確認"),
+        ],
+        "market_state": {
+            "can_probe_bet_page": True,
+            "current_game_name": "539",
+            "selected_route": "二三四星",
+        },
     }
 
 
@@ -95,8 +179,8 @@ def fake_page() -> FakePage:
         'button[data-number="13"]': {"text": "13", "value": ""},
         'button[data-number="23"]': {"text": "23", "value": ""},
         'button[data-number="22"]': {"text": "22", "value": ""},
-        'input[data-amount-field="two"]': {"text": TWO_STAR, "value": ""},
-        'input[data-amount-field="three"]': {"text": THREE_STAR, "value": ""},
+        'input[data-bind*="PengBet.Value"] >> nth=0': {"text": TWO_STAR, "value": ""},
+        'input[data-bind*="PengBet.Value"] >> nth=1': {"text": THREE_STAR, "value": ""},
     }
     return FakePage(elements)
 
@@ -124,6 +208,12 @@ def test_cli_without_risk_flag_refuses_to_run(capsys, monkeypatch, tmp_path) -> 
     webfill_cli.main()
 
     assert RISK_LOCK_MESSAGE in capsys.readouterr().out
+
+
+# --- Legacy preflight (build_real_site_assisted_fill_preflight): unchanged,
+# still tested in isolation. run_real_site_assisted_fill_with_page/
+# run_real_site_assisted_fill no longer call this function (see v1b tests
+# below) -- it remains importable/tested on its own merits only. ---
 
 
 def test_danger_candidates_empty_refuses_execution() -> None:
@@ -190,14 +280,22 @@ def test_danger_selector_text_is_blocked_before_click() -> None:
     assert any("unsafe selector" in error for error in preflight["errors"])
 
 
+# --- run_real_site_assisted_fill_with_page: rewired (v1b) to require the v1
+# preflight (real_site_fill_preflight.build_real_site_fill_preflight_report)
+# and to source execution actions only from build_execution_actions_from_preflight.
+# All fixtures below use approved_queue_for()/clean_profile() -- the shapes v1
+# preflight actually requires (approved_fill_queue + a full site profile). ---
+
+
 def test_element_text_or_value_danger_is_blocked_before_operation() -> None:
     page = fake_page()
-    page.elements['button[data-number="06"]'] = {"text": "\u9001\u51fa\u6ce8\u55ae", "value": "\u78ba\u8a8d"}
+    page.elements['button[data-number="06"]'] = {"text": "送出注單", "value": "確認"}
 
     report = run_real_site_assisted_fill_with_page(
-        queue_for(f"06.13.23.22 {TWO_THREE}50"),
-        full_selector_report(),
+        approved_queue_for(f"06.13.23.22 {TWO_THREE}50"),
+        clean_profile(),
         page,
+        item_index=0,
         risk_acknowledged=True,
     )
 
@@ -211,9 +309,10 @@ def test_execution_marks_queue_waiting_for_human_confirm() -> None:
     page = fake_page()
 
     report = run_real_site_assisted_fill_with_page(
-        queue_for(f"06.13.23.22 {TWO_THREE}50"),
-        full_selector_report(),
+        approved_queue_for(f"06.13.23.22 {TWO_THREE}50"),
+        clean_profile(),
         page,
+        item_index=0,
         risk_acknowledged=True,
     )
 
@@ -232,9 +331,10 @@ def test_execution_marks_queue_waiting_for_human_confirm() -> None:
 
 def test_danger_buttons_clicked_and_auto_submit_are_always_false() -> None:
     report = run_real_site_assisted_fill_with_page(
-        queue_for(f"06.13.23.22 {TWO_THREE}50"),
-        full_selector_report(),
+        approved_queue_for(f"06.13.23.22 {TWO_THREE}50"),
+        clean_profile(),
         fake_page(),
+        item_index=0,
         risk_acknowledged=True,
     )
 
@@ -252,9 +352,10 @@ def test_does_not_mark_done_or_advance_to_next_item() -> None:
     )
 
     report = run_real_site_assisted_fill_with_page(
-        queue_for(text),
-        full_selector_report(),
+        approved_queue_for(text),
+        clean_profile(),
         fake_page(),
+        item_index=0,
         risk_acknowledged=True,
     )
 
@@ -328,6 +429,16 @@ class RaisingPage(FakePage):
         return RaisingLocator(self, selector, metadata, self.raise_on)
 
 
+class LocatorCallCountingPage(FakePage):
+    def __init__(self, elements: dict[str, dict]):
+        super().__init__(elements)
+        self.locator_calls = 0
+
+    def locator(self, selector: str):
+        self.locator_calls += 1
+        return super().locator(selector)
+
+
 def property_first_page() -> PropertyFirstPage:
     return PropertyFirstPage(fake_page().elements)
 
@@ -338,9 +449,10 @@ def raising_page(raise_on: str) -> RaisingPage:
 
 def test_locator_first_as_method_still_fills_and_waits() -> None:
     report = run_real_site_assisted_fill_with_page(
-        queue_for(f"06.13.23.22 {TWO_THREE}50"),
-        full_selector_report(),
+        approved_queue_for(f"06.13.23.22 {TWO_THREE}50"),
+        clean_profile(),
         fake_page(),
+        item_index=0,
         risk_acknowledged=True,
     )
 
@@ -352,9 +464,10 @@ def test_locator_first_as_property_also_fills_and_waits() -> None:
     page = property_first_page()
 
     report = run_real_site_assisted_fill_with_page(
-        queue_for(f"06.13.23.22 {TWO_THREE}50"),
-        full_selector_report(),
+        approved_queue_for(f"06.13.23.22 {TWO_THREE}50"),
+        clean_profile(),
         page,
+        item_index=0,
         risk_acknowledged=True,
     )
 
@@ -366,8 +479,8 @@ def test_locator_first_as_property_also_fills_and_waits() -> None:
         'button[data-number="22"]',
     ]
     assert page.filled == {
-        'input[data-amount-field="two"]': "50",
-        'input[data-amount-field="three"]': "50",
+        'input[data-bind*="PengBet.Value"] >> nth=0': "50",
+        'input[data-bind*="PengBet.Value"] >> nth=1': "50",
     }
 
 
@@ -375,9 +488,10 @@ def test_locator_lookup_exception_becomes_safe_blocked() -> None:
     page = LocatorLookupRaisingPage(fake_page().elements)
 
     report = run_real_site_assisted_fill_with_page(
-        queue_for(f"06.13.23.22 {TWO_THREE}50"),
-        full_selector_report(),
+        approved_queue_for(f"06.13.23.22 {TWO_THREE}50"),
+        clean_profile(),
         page,
+        item_index=0,
         risk_acknowledged=True,
     )
 
@@ -392,9 +506,10 @@ def test_click_exception_becomes_safe_blocked() -> None:
     page = raising_page("click")
 
     report = run_real_site_assisted_fill_with_page(
-        queue_for(f"06.13.23.22 {TWO_THREE}50"),
-        full_selector_report(),
+        approved_queue_for(f"06.13.23.22 {TWO_THREE}50"),
+        clean_profile(),
         page,
+        item_index=0,
         risk_acknowledged=True,
     )
 
@@ -409,9 +524,10 @@ def test_fill_exception_becomes_safe_blocked() -> None:
     page = raising_page("fill")
 
     report = run_real_site_assisted_fill_with_page(
-        queue_for(f"06.13.23.22 {TWO_THREE}50"),
-        full_selector_report(),
+        approved_queue_for(f"06.13.23.22 {TWO_THREE}50"),
+        clean_profile(),
         page,
+        item_index=0,
         risk_acknowledged=True,
     )
 
@@ -422,12 +538,13 @@ def test_fill_exception_becomes_safe_blocked() -> None:
 
 
 def test_queue_does_not_advance_on_execution_failure() -> None:
-    queue = queue_for(f"06.13.23.22 {TWO_THREE}50")
+    queue = approved_queue_for(f"06.13.23.22 {TWO_THREE}50")
 
     report = run_real_site_assisted_fill_with_page(
         queue,
-        full_selector_report(),
+        clean_profile(),
         raising_page("click"),
+        item_index=0,
         risk_acknowledged=True,
     )
 
@@ -489,9 +606,10 @@ def test_validate_real_site_action_allows_safe_amount_selector() -> None:
 
 def test_execution_failure_never_submits_or_auto_confirms() -> None:
     report = run_real_site_assisted_fill_with_page(
-        queue_for(f"06.13.23.22 {TWO_THREE}50"),
-        full_selector_report(),
+        approved_queue_for(f"06.13.23.22 {TWO_THREE}50"),
+        clean_profile(),
         raising_page("fill"),
+        item_index=0,
         risk_acknowledged=True,
     )
 
@@ -499,3 +617,199 @@ def test_execution_failure_never_submits_or_auto_confirms() -> None:
     assert report["danger_buttons_clicked"] == []
     assert report["final_decision"]["real_site_auto_submit"] is False
     assert report["final_decision"]["human_required"] is True
+
+
+# --- Real-site Execution Path Hardening v1b: cannot bypass v1 preflight ---
+
+
+def test_execution_refuses_without_v1_preflight_when_approved_fill_queue_missing() -> None:
+    queue = queue_for(f"06.13.23.22 {TWO_THREE}50")  # no approved_fill_queue attached
+    page = LocatorCallCountingPage(fake_page().elements)
+
+    report = run_real_site_assisted_fill_with_page(
+        queue,
+        clean_profile(),
+        page,
+        item_index=0,
+        risk_acknowledged=True,
+    )
+
+    assert report["status"] == "BLOCKED"
+    assert page.locator_calls == 0
+    assert page.clicked == []
+    assert page.filled == {}
+
+
+def test_execution_refuses_blocked_preflight_needs_review_state() -> None:
+    queue = approved_queue_for(f"06.13.23.22 {TWO_THREE}50")
+    queue["approved_fill_queue"][0]["status"] = "NEEDS_REVIEW"
+    page = LocatorCallCountingPage(fake_page().elements)
+
+    report = run_real_site_assisted_fill_with_page(
+        queue,
+        clean_profile(),
+        page,
+        item_index=0,
+        risk_acknowledged=True,
+    )
+
+    assert report["status"] == "BLOCKED"
+    assert page.locator_calls == 0
+
+
+def test_execution_refuses_when_item_not_accepted_by_human() -> None:
+    queue = approved_queue_for(f"06.13.23.22 {TWO_THREE}50")
+    queue["approved_fill_queue"][0]["accepted_by_human"] = False
+    page = LocatorCallCountingPage(fake_page().elements)
+
+    report = run_real_site_assisted_fill_with_page(
+        queue,
+        clean_profile(),
+        page,
+        item_index=0,
+        risk_acknowledged=True,
+    )
+
+    assert report["status"] == "BLOCKED"
+    assert page.locator_calls == 0
+
+
+def test_execution_refuses_unsafe_final_decision_flags(monkeypatch) -> None:
+    queue = approved_queue_for(f"06.13.23.22 {TWO_THREE}50")
+    good_report = build_real_site_fill_preflight_report(queue, clean_profile(), item_index=0)
+    assert good_report["status"] == "READY_FOR_HUMAN_REVIEW"
+    tampered = copy.deepcopy(good_report)
+    tampered["final_decision"]["real_site_execute"] = True
+
+    monkeypatch.setattr(
+        real_site_assisted_fill_module,
+        "build_real_site_fill_preflight_report",
+        lambda *args, **kwargs: tampered,
+    )
+    page = LocatorCallCountingPage(fake_page().elements)
+
+    report = run_real_site_assisted_fill_with_page(
+        queue,
+        clean_profile(),
+        page,
+        item_index=0,
+        risk_acknowledged=True,
+    )
+
+    assert report["status"] == "BLOCKED"
+    assert any("real_site_execute" in error for error in report["errors"])
+    assert page.locator_calls == 0
+
+
+def test_execution_refuses_groupset_value_selector(monkeypatch) -> None:
+    queue = approved_queue_for(f"06.13.23.22 {TWO_THREE}50")
+    good_report = build_real_site_fill_preflight_report(queue, clean_profile(), item_index=0)
+    tampered = copy.deepcopy(good_report)
+    tampered["amounts"][0]["selector"] = "#GroupSet_Value"
+
+    monkeypatch.setattr(
+        real_site_assisted_fill_module,
+        "build_real_site_fill_preflight_report",
+        lambda *args, **kwargs: tampered,
+    )
+    page = LocatorCallCountingPage(fake_page().elements)
+
+    report = run_real_site_assisted_fill_with_page(
+        queue,
+        clean_profile(),
+        page,
+        item_index=0,
+        risk_acknowledged=True,
+    )
+
+    assert report["status"] == "BLOCKED"
+    assert any("GroupSet_Value" in error for error in report["errors"])
+    assert page.locator_calls == 0
+
+
+def test_execution_refuses_amount_without_position_verified(monkeypatch) -> None:
+    queue = approved_queue_for(f"06.13.23.22 {TWO_THREE}50")
+    good_report = build_real_site_fill_preflight_report(queue, clean_profile(), item_index=0)
+    tampered = copy.deepcopy(good_report)
+    tampered["amounts"][0]["position_verified"] = False
+
+    monkeypatch.setattr(
+        real_site_assisted_fill_module,
+        "build_real_site_fill_preflight_report",
+        lambda *args, **kwargs: tampered,
+    )
+    page = LocatorCallCountingPage(fake_page().elements)
+
+    report = run_real_site_assisted_fill_with_page(
+        queue,
+        clean_profile(),
+        page,
+        item_index=0,
+        risk_acknowledged=True,
+    )
+
+    assert report["status"] == "BLOCKED"
+    assert any("position_verified" in error for error in report["errors"])
+    assert page.locator_calls == 0
+
+
+def test_execute_actions_on_page_not_called_unless_preflight_ready(monkeypatch) -> None:
+    queue = queue_for(f"06.13.23.22 {TWO_THREE}50")  # no approved_fill_queue -> BLOCKED
+    calls = []
+    monkeypatch.setattr(
+        real_site_assisted_fill_module,
+        "execute_actions_on_page",
+        lambda *args, **kwargs: (calls.append(args) or []),
+    )
+
+    report = run_real_site_assisted_fill_with_page(
+        queue,
+        clean_profile(),
+        fake_page(),
+        item_index=0,
+        risk_acknowledged=True,
+    )
+
+    assert report["status"] == "BLOCKED"
+    assert calls == []
+
+
+def test_ready_preflight_uses_build_execution_actions_from_preflight(monkeypatch) -> None:
+    queue = approved_queue_for(f"06.13.23.22 {TWO_THREE}50")
+    calls = []
+    real_builder = real_site_assisted_fill_module.build_execution_actions_from_preflight
+
+    def spy(report):
+        calls.append(report)
+        return real_builder(report)
+
+    monkeypatch.setattr(real_site_assisted_fill_module, "build_execution_actions_from_preflight", spy)
+
+    report = run_real_site_assisted_fill_with_page(
+        queue,
+        clean_profile(),
+        fake_page(),
+        item_index=0,
+        risk_acknowledged=True,
+    )
+
+    assert report["status"] == WAITING_FOR_HUMAN_CONFIRM
+    assert len(calls) == 1
+    assert calls[0]["status"] == "READY_FOR_HUMAN_REVIEW"
+
+
+def test_risk_acknowledgement_still_required_for_v1b_path() -> None:
+    queue = approved_queue_for(f"06.13.23.22 {TWO_THREE}50")
+    page = LocatorCallCountingPage(fake_page().elements)
+
+    report = run_real_site_assisted_fill_with_page(
+        queue,
+        clean_profile(),
+        page,
+        item_index=0,
+        risk_acknowledged=False,
+    )
+
+    assert report["status"] == "BLOCKED"
+    assert RISK_LOCK_MESSAGE in " ".join(report["errors"])
+    assert page.locator_calls == 0
