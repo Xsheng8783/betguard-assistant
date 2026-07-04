@@ -926,8 +926,14 @@ def _map_step(step: dict[str, Any], selector_report: dict[str, Any]) -> dict[str
         raw = _number_candidates(selector_report).get(str(step.get("label")), [])
         candidates = _rank_actionable_candidates(raw, step_type, str(step.get("label")))
     elif step_type == "set_amount":
-        raw = _amount_candidates(selector_report).get(str(step.get("star")), [])
-        candidates = _rank_actionable_candidates(raw, step_type, str(step.get("star")))
+        star = str(step.get("star"))
+        verified = _position_verified_amount_map(selector_report).get(star)
+        if verified is not None:
+            raw = [verified]
+            candidates = raw
+        else:
+            raw = _amount_candidates(selector_report).get(star, [])
+            candidates = _rank_actionable_candidates(raw, step_type, star)
     else:
         raw = []
         candidates = []
@@ -936,6 +942,151 @@ def _map_step(step: dict[str, Any], selector_report: dict[str, Any]) -> dict[str
         "selector_candidates": candidates,
         "rejected_candidate_count": len(raw) - len(candidates),
     }
+
+
+# --- Amount Field Discovery Precision v1 ---
+#
+# The site offers no id/name/data attribute that is unique per star for its
+# three 每碰金額 inputs -- every one of them shares the exact same class
+# (input.BDAll). The only site-provided marker that is unique to just these
+# three elements is the knockout data-bind ``PengBet.Value``, and the only way
+# to tell them apart from each other is their pixel position in the same row.
+# This block turns that structural fact into a verified, read-only mapping.
+# #GroupSet_Value (a grouping/sequence-number field, not an amount field) and
+# hidden #ta_*/#tb_* table cells are explicitly excluded regardless of any
+# other signal.
+
+AMOUNT_INPUT_DATA_BIND_MARKER = "PengBet.Value"
+AMOUNT_ROW_TOP_TOLERANCE = 3
+REQUIRED_AMOUNT_FIELD_COUNT = 3
+AMOUNT_STAR_ORDER = ("二星", "三星", "四星")
+
+
+def _position_verified_amount_map(selector_report: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Map 二星/三星/四星 to distinct amount inputs by verified row position.
+
+    Returns ``{}`` (never partially SAFE) unless exactly three visible,
+    eligible ``PengBet.Value`` inputs exist in the same row with distinct
+    left coordinates. Read-only: never clicks/fills, only classifies
+    already-discovered candidates.
+    """
+    eligible = [
+        candidate
+        for candidate in _collect_amount_candidate_pool(selector_report)
+        if _is_eligible_pengbet_amount_input(candidate)
+    ]
+    if len(eligible) != REQUIRED_AMOUNT_FIELD_COUNT:
+        return {}
+
+    tops = [_box_top(candidate) for candidate in eligible]
+    if any(top is None for top in tops):
+        return {}
+    reference_top = tops[0]
+    if any(abs(top - reference_top) > AMOUNT_ROW_TOP_TOLERANCE for top in tops):
+        return {}
+
+    lefts = [_box_left(candidate) for candidate in eligible]
+    if any(left is None for left in lefts):
+        return {}
+    if len(set(lefts)) != REQUIRED_AMOUNT_FIELD_COUNT:
+        return {}
+
+    ordered = [candidate for _, candidate in sorted(zip(lefts, eligible), key=lambda pair: pair[0])]
+
+    result: dict[str, dict[str, Any]] = {}
+    for index, (star, candidate) in enumerate(zip(AMOUNT_STAR_ORDER, ordered)):
+        verified = dict(candidate)
+        verified["candidate_selectors"] = [
+            f'input[data-bind*="{AMOUNT_INPUT_DATA_BIND_MARKER}"] >> nth={index}'
+        ]
+        verified["position_verified"] = True
+        result[star] = verified
+    return result
+
+
+def _collect_amount_candidate_pool(selector_report: dict[str, Any]) -> list[dict[str, Any]]:
+    """Union of every star's raw amount candidates, de-duplicated.
+
+    Discovery sometimes files an element under only one star's list even
+    though the element could equally be any of the three; position
+    verification must consider the full pool, not just one star's list.
+    """
+    seen: set[tuple[Any, ...]] = set()
+    pool: list[dict[str, Any]] = []
+    for candidates in _amount_candidates(selector_report).values():
+        if not isinstance(candidates, list):
+            continue
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            key = _candidate_identity_key(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            pool.append(candidate)
+    return pool
+
+
+def _candidate_identity_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
+    box = candidate.get("box") if isinstance(candidate.get("box"), dict) else {}
+    return (
+        str(candidate.get("tag") or ""),
+        str(candidate.get("id") or ""),
+        str(candidate.get("outerHTML") or ""),
+        box.get("top"),
+        box.get("left"),
+        box.get("w"),
+        box.get("h"),
+        str(candidate.get("frame_url") or ""),
+    )
+
+
+def _is_eligible_pengbet_amount_input(candidate: dict[str, Any]) -> bool:
+    """True only for a visible amount input that cannot be anything else.
+
+    Explicitly rejects #GroupSet_Value (grouping/sequence field, never an
+    amount target), hidden #ta_*/#tb_* table cells, and quick-input /
+    number-submit controls, regardless of any other matching signal.
+    """
+    if str(candidate.get("tag", "")).lower() != "input":
+        return False
+    if candidate.get("visible") is not True:
+        return False
+    if candidate.get("hidden") is True:
+        return False
+
+    element_id = str(candidate.get("id") or "")
+    if element_id == "GroupSet_Value":
+        return False
+    if element_id.startswith("ta_") or element_id.startswith("tb_"):
+        return False
+
+    if AMOUNT_INPUT_DATA_BIND_MARKER not in str(candidate.get("outerHTML") or ""):
+        return False
+
+    context_text = " ".join(
+        str(candidate.get(field) or "") for field in ("parentText", "grandparentText")
+    )
+    if "送出" in context_text or "號碼" in context_text:
+        return False
+
+    return True
+
+
+def _box_top(candidate: dict[str, Any]) -> float | None:
+    return _box_coordinate(candidate, "top")
+
+
+def _box_left(candidate: dict[str, Any]) -> float | None:
+    return _box_coordinate(candidate, "left")
+
+
+def _box_coordinate(candidate: dict[str, Any], key: str) -> float | None:
+    box = candidate.get("box")
+    if not isinstance(box, dict):
+        return None
+    value = box.get(key)
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
 BROAD_CONTAINER_TAGS = {"html", "head", "body", "script", "style"}
@@ -1123,6 +1274,12 @@ def _amount_selector_is_specific(selector: str, star: str) -> bool:
     if text.startswith("#"):
         return True
     if "[" in text and ("id=" in text or "name=" in text):
+        return True
+    if "data-bind*=" in text and ">> nth=" in text:
+        # Synthesized by _position_verified_amount_map: a data-bind attribute
+        # that is unique to exactly the 3 amount inputs on this page, paired
+        # with a verified left-to-right row position. Never synthesized for a
+        # candidate that failed the exactly-3/same-row/distinct-left checks.
         return True
     return _selector_targets_label(text, star)
 
