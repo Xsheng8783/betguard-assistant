@@ -191,11 +191,9 @@ def _human_confirm_current_done(queue: dict[str, Any]) -> dict[str, Any]:
     """Mark the single WAITING_FOR_HUMAN_CONFIRM item as DONE and unlock
     the next PENDING item.  No browser, no fill, no submit.
 
-    Uses ``mark_current_done_by_human`` from batch_queue which enforces:
-    - exactly one WAITING_FOR_HUMAN_CONFIRM item exists
-    - item status goes WAITING_FOR_HUMAN_CONFIRM → DONE
-    - next PENDING item → CURRENT (if any)
-    - queue status → READY (if next item) or COMPLETED (if no items left)
+    Safety gate: rejects if the WAITING item lacks ``fill_completed_at``
+    (a timestamp written by real-site-assisted-fill).  This prevents
+    accidentally marking an item DONE before real-site fill occurred.
     """
     from betguard.webfill.batch_audit import sync_batch_audit
 
@@ -207,6 +205,14 @@ def _human_confirm_current_done(queue: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("no item is WAITING_FOR_HUMAN_CONFIRM")
     if len(waiting) > 1:
         raise ValueError("multiple items are WAITING_FOR_HUMAN_CONFIRM; cannot auto-confirm")
+
+    item = waiting[0]
+    if not item.get("fill_completed_at"):
+        raise ValueError(
+            "item is WAITING_FOR_HUMAN_CONFIRM but has no fill_completed_at. "
+            "Run real-site-assisted-fill first. "
+            "Do NOT mark DONE before real-site fill."
+        )
 
     updated = mark_current_done_by_human(queue)
     sync_batch_audit(updated)

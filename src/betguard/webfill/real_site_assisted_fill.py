@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from copy import deepcopy
+from datetime import datetime, timezone
 from typing import Any
 
 from betguard.webfill.batch_queue import WAITING_FOR_HUMAN_CONFIRM, mark_item_waiting_for_human
@@ -223,6 +224,13 @@ def execute_actions_on_page(page: Any, actions: list[dict[str, Any]]) -> list[di
     return executed
 
 
+def _find_waiting_in_queue(queue: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the single WAITING_FOR_HUMAN_CONFIRM item, or None."""
+    from betguard.webfill.batch_queue import WAITING_FOR_HUMAN_CONFIRM as _W
+    waiting = [i for i in queue.get("items", []) if i.get("status") == _W]
+    return waiting[0] if len(waiting) == 1 else None
+
+
 def build_real_site_assisted_fill_report(
     queue: dict[str, Any],
     v1_report: dict[str, Any],
@@ -230,6 +238,12 @@ def build_real_site_assisted_fill_report(
 ) -> dict[str, Any]:
     item = v1_report.get("item") or {}
     updated_queue = mark_item_waiting_for_human(deepcopy(queue), int(item.get("index")))
+    # Stamp the item so human-confirm-current-done can verify that real-site
+    # fill actually happened before allowing the DONE transition.
+    _waiting_item = _find_waiting_in_queue(updated_queue)
+    if _waiting_item is not None:
+        _waiting_item["fill_completed_at"] = datetime.now(timezone.utc).isoformat()
+        _waiting_item["fill_actions_executed"] = len(executed_actions)
     danger_check = v1_report.get("danger_check") or {}
     return {
         "mode": "real_site_assisted_fill",

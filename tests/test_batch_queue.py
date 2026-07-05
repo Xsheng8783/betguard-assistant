@@ -220,6 +220,7 @@ def test_human_confirm_current_done_marks_done_and_unlocks_next() -> None:
     """WAITING_FOR_HUMAN_CONFIRM → DONE, next PENDING → CURRENT, queue → READY."""
     queue = build_batch_queue(review_result(ok_batch_text()))
     waiting = mark_current_waiting_for_human(queue)
+    waiting["items"][0]["fill_completed_at"] = "2026-01-01T00:00:00Z"
 
     updated = webfill_cli._human_confirm_current_done(waiting)
 
@@ -238,6 +239,7 @@ def test_human_confirm_current_done_completes_when_no_next() -> None:
     """Single item: WAITING → DONE, queue → COMPLETED."""
     queue = build_batch_queue(review_result(f"06.13.23.22 {TWO_THREE}50"))
     waiting = mark_current_waiting_for_human(queue)
+    waiting["items"][0]["fill_completed_at"] = "2026-01-01T00:00:00Z"
 
     updated = webfill_cli._human_confirm_current_done(waiting)
 
@@ -271,6 +273,7 @@ def test_human_confirm_does_not_auto_submit() -> None:
     """auto_submit must always be false after human confirm."""
     queue = build_batch_queue(review_result(ok_batch_text()))
     waiting = mark_current_waiting_for_human(queue)
+    waiting["items"][0]["fill_completed_at"] = "2026-01-01T00:00:00Z"
 
     updated = webfill_cli._human_confirm_current_done(waiting)
 
@@ -282,6 +285,7 @@ def test_human_confirm_does_not_touch_parser() -> None:
     """Parser fields remain unchanged after human confirm."""
     queue = build_batch_queue(review_result(ok_batch_text()))
     waiting = mark_current_waiting_for_human(queue)
+    waiting["items"][0]["fill_completed_at"] = "2026-01-01T00:00:00Z"
     original_parsed = dict(waiting["items"][0].get("parsed", {}))
 
     updated = webfill_cli._human_confirm_current_done(waiting)
@@ -294,6 +298,7 @@ def test_cli_refuses_without_confirmation_flag(capsys, monkeypatch, tmp_path) ->
     queue_path = tmp_path / "queue.json"
     queue = build_batch_queue(review_result(ok_batch_text()))
     wait = mark_current_waiting_for_human(queue)
+    wait["items"][0]["fill_completed_at"] = "2026-01-01T00:00:00Z"
     queue_path.write_text(json.dumps(wait, ensure_ascii=False), encoding="utf-8")
 
     test_args = [
@@ -312,6 +317,7 @@ def test_cli_advances_only_one_item(capsys, monkeypatch, tmp_path) -> None:
     queue_path = tmp_path / "queue.json"
     queue = build_batch_queue(review_result(ok_batch_text()))
     wait = mark_current_waiting_for_human(queue)
+    wait["items"][0]["fill_completed_at"] = "2026-01-01T00:00:00Z"
     queue_path.write_text(json.dumps(wait, ensure_ascii=False), encoding="utf-8")
 
     test_args = [
@@ -373,3 +379,13 @@ def test_multi_item_one_at_a_time_full_flow() -> None:
     # All steps: auto_submit always false
     for q in (queue, waiting, done0, waiting1, done1, waiting2, done2):
         assert q["final_decision"]["real_site_auto_submit"] is False
+
+
+def test_human_confirm_refuses_without_fill_completed_at() -> None:
+    """WAITING_FOR_HUMAN_CONFIRM without fill_completed_at → ValueError."""
+    queue = build_batch_queue(review_result(ok_batch_text()))
+    waiting = mark_current_waiting_for_human(queue)
+    # Deliberately do NOT set fill_completed_at
+
+    with pytest.raises(ValueError, match="fill_completed_at"):
+        webfill_cli._human_confirm_current_done(waiting)
