@@ -127,6 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--real-site-fill-readiness", action="store_true", help="Local-only PASS/BLOCKED readiness checklist for one approved_fill_queue item; never opens a browser")
     parser.add_argument("--item-index", dest="item_index", type=int, help="approved_fill_queue item index for --real-site-fill-preflight")
     parser.add_argument("--real-site-assisted-fill", action="store_true", help="Safely fill the current batch queue item on the real site")
+    parser.add_argument("--real-site-assisted-fill-all", action="store_true", help="Fill ALL items sequentially without closing browser")
     parser.add_argument(
         "--i-understand-real-site-fill-risk",
         action="store_true",
@@ -503,6 +504,22 @@ def main() -> None:
             print(format_pretty_readiness_checklist(report))
         else:
             print(json.dumps(report, ensure_ascii=False, indent=2))
+        return
+
+    if args.real_site_assisted_fill_all:
+        if not args.i_understand_real_site_fill_risk:
+            print(RISK_LOCK_MESSAGE)
+            return
+        if not args.queue_path or not args.profile_path or not args.url:
+            parser.error("--real-site-assisted-fill-all requires --queue, --profile, and --url")
+        from betguard.webfill.batch_fill_all import run_real_site_assisted_fill_all
+        result = run_real_site_assisted_fill_all(
+            queue_path=args.queue_path,
+            profile_path=args.profile_path,
+            url=args.url,
+            risk_acknowledged=args.i_understand_real_site_fill_risk,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
         return
 
     if args.real_site_assisted_fill:

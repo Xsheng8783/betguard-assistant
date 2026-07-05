@@ -166,7 +166,16 @@ def run_real_site_assisted_fill(
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=15000)
             input_func("請在瀏覽器中手動登入並進入正確頁面，完成後回到終端機按 Enter 繼續。")
-            executed_actions = execute_actions_on_page(page, execution_actions)
+            # Fast path: select numbers via knockout (0.05s)
+            _num_actions = [a for a in execution_actions if a["type"] == "SELECT_NUMBER"]
+            _amt_actions = [a for a in execution_actions if a["type"] == "SET_AMOUNT"]
+            _executed_num = []
+            if _num_actions:
+                _numbers = [str(a["number"]) for a in _num_actions]
+                _fast_select_numbers_knockout(page, _numbers)
+                _executed_num = [{"type": "SELECT_NUMBER", "number": a["number"], "executed": True} for a in _num_actions]
+            _executed_amt = _execute_amounts_via_playwright(page, _amt_actions)
+            executed_actions = _executed_num + _executed_amt
             report = build_real_site_assisted_fill_report(queue, v1_report, executed_actions)
             input_func("已完成安全帶入，請人工檢查畫面。按 Enter 結束此工具。")
             return report
@@ -176,6 +185,59 @@ def run_real_site_assisted_fill(
             return blocked
         finally:
             browser.close()
+
+
+
+def _execute_amounts_via_playwright(page: Any, actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Fill amounts via individual Playwright locators (reliable, ~3s each)."""
+    executed: list[dict[str, Any]] = []
+    _frame_cache: dict[tuple, Any] = {}
+    for action in actions:
+        error = validate_real_site_action(action)
+        if error:
+            raise RuntimeError(error)
+        _cache_key = (str(action.get("frame") or ""), str(action.get("frame_url") or ""))
+        if _cache_key not in _frame_cache:
+            try:
+                _frame_cache[_cache_key] = _resolve_frame(page, action)
+            except Exception as exc:
+                raise RuntimeError(f"frame resolution failed for {action_label(action)}: {exc}") from exc
+        frame = _frame_cache[_cache_key]
+        try:
+            locator = _resolve_first_locator(frame.locator(str(action["selector"])))
+        except Exception as exc:
+            raise RuntimeError(f"locator lookup failed for {action_label(action)}: {exc}") from exc
+        try:
+            locator.fill(str(action["amount"]))
+        except Exception as exc:
+            raise RuntimeError(f"fill failed for {action_label(action)}: {exc}") from exc
+        executed.append({"type": "SET_AMOUNT", "star": action.get("star"), "amount": action["amount"], "executed": True})
+    return executed
+
+
+def _fast_select_numbers_knockout(page: Any, numbers: list[str]) -> None:
+    """Select numbers via knockout.js OnSwitchSel — instant, no DOM click."""
+    import json as _json
+    nums_json = _json.dumps(numbers)
+    page.evaluate(
+        "(function() {"
+        " var f = window.frames[2];"
+        " var ko = f.ko;"
+        " if (!ko) return;"
+        " var mo = f.Mo;"
+        " var target = " + nums_json + ";"
+        " var tds = f.document.querySelectorAll('td');"
+        " for (var i = 0; i < tds.length; i++) {"
+        "  var txt = (tds[i].textContent || '').trim();"
+        "  if (target.indexOf(txt) >= 0) {"
+        "   var ctx = ko.contextFor(tds[i]);"
+        "   if (ctx && ctx.$data && typeof ctx.$data.HasSeled === 'function' && !ctx.$data.HasSeled()) {"
+        "    mo.OnSwitchSel(ctx.$data, {});"
+        "   }"
+        "  }"
+        " }"
+        "})()"
+    )
 
 
 def execute_actions_on_page(page: Any, actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
