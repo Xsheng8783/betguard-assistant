@@ -309,3 +309,65 @@ def test_batch_mock_queue_source_has_no_submit_operation() -> None:
     source = inspect.getsource(batch_mock_queue)
 
     assert "submit(" not in source
+
+
+# --- Next Action display by queue status ---
+
+
+def test_next_action_completed_shows_no_next_action() -> None:
+    """COMPLETED queue must not suggest batch-mock-next."""
+    queue = {
+        "status": COMPLETED,
+        "summary": {"total": 1, "ok": 1, "blocked": 0, "current_index": 0, "remaining": 0},
+        "items": [{"index": 0, "status": DONE, "original": "done"}],
+        "final_decision": {"real_site_operation": False, "auto_submit": False, "human_required_each_item": True},
+    }
+    pretty = format_pretty_batch_mock_queue(queue)
+
+    assert "Queue 已完成" in pretty
+    assert "batch-mock-next" not in pretty
+
+
+def test_next_action_waiting_shows_human_confirm_done() -> None:
+    """WAITING_FOR_HUMAN_CONFIRM queue shows --batch-human-confirm-current-done."""
+    queue = {
+        "status": WAITING_FOR_HUMAN_CONFIRM,
+        "summary": {"total": 1, "ok": 1, "blocked": 0, "current_index": 1, "remaining": 1},
+        "items": [{"index": 0, "status": WAITING_FOR_HUMAN_CONFIRM, "original": "waiting"}],
+        "final_decision": {"real_site_operation": False, "auto_submit": False, "human_required_each_item": True},
+    }
+    pretty = format_pretty_batch_mock_queue(queue)
+
+    assert "batch-human-confirm-current-done" in pretty
+    assert "batch-mock-next" not in pretty
+
+
+def test_next_action_ready_keeps_mock_next() -> None:
+    """READY_FOR_QUEUE still shows batch-mock-next for mock flow."""
+    queue = {
+        "status": READY_FOR_QUEUE,
+        "summary": {"total": 2, "ok": 2, "blocked": 0, "current_index": 1, "remaining": 1},
+        "items": [
+            {"index": 0, "status": DONE, "original": "done"},
+            {"index": 1, "status": PENDING, "original": "pending"},
+        ],
+        "final_decision": {"real_site_operation": False, "auto_submit": False, "human_required_each_item": True},
+    }
+    pretty = format_pretty_batch_mock_queue(queue)
+
+    assert "batch-mock-next" in pretty
+    assert "Queue 已完成" not in pretty
+
+
+def test_next_action_blocked_shows_blocked() -> None:
+    """BATCH_BLOCKED queue shows blocked message, not mock-next."""
+    queue = {
+        "status": BATCH_BLOCKED,
+        "summary": {"total": 0, "ok": 0, "blocked": 1, "current_index": 0, "remaining": 0},
+        "items": [],
+        "final_decision": {"real_site_operation": False, "auto_submit": False, "human_required_each_item": True},
+    }
+    pretty = format_pretty_batch_mock_queue(queue)
+
+    assert "Queue 已封鎖" in pretty
+    assert "batch-mock-next" not in pretty

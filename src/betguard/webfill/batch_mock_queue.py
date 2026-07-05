@@ -446,6 +446,17 @@ def format_pretty_batch_mock_queue(queue: dict[str, Any]) -> str:
                 "python -m betguard.webfill.cli --batch-review-reject --queue queue_state.json --pretty",
             ]
         )
+    elif queue.get("status") == COMPLETED:
+        lines.append("Queue 已完成，沒有下一步要執行。")
+    elif queue.get("status") == WAITING_FOR_HUMAN_CONFIRM:
+        lines.extend(
+            [
+                "人工確認目前這筆已完成後，執行：",
+                "python -X utf8 -m betguard.webfill.cli --batch-human-confirm-current-done --i-confirm-current-item-is-complete --queue <queue_file> --pretty",
+            ]
+        )
+    elif queue.get("status") == BATCH_BLOCKED:
+        lines.append("Queue 已封鎖，無法繼續。")
     else:
         lines.extend(
             [

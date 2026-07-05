@@ -105,6 +105,61 @@ Queue 必須處於 `READY` 狀態且 items 為 `CURRENT`，才能被 live fill �
 
 ---
 
+## 一天開始前檢查清單
+
+重開機或新 session 開始前，依序執行：
+
+- [ ] `cd` 到 betguard-assistant 專案目錄
+- [ ] 設定 `PYTHONPATH` 指向 `src/`
+- [ ] `python -c "import betguard; print(betguard.__file__)"` 確認 betguard 可匯入
+- [ ] `python -c "import playwright; import streamlit; print('OK')"` 確認依賴完整
+- [ ] 若缺套件：`pip install playwright streamlit` + `playwright install chromium`
+- [ ] `git status --short` 確認無意外修改
+- [ ] `python -X utf8 -m pytest -q` 確認全部通過
+
+詳見 [LOCAL_ENV_SETUP.md](LOCAL_ENV_SETUP.md)。
+
+---
+
+## Live 前檢查清單
+
+執行 `--real-site-assisted-fill` 之前，必須全部 PASS：
+
+- [ ] `--real-site-fill-readiness` → Status: PASS
+- [ ] `approved_fill_queue_present`: true
+- [ ] `human_accepted`: true
+- [ ] `review_state_excluded`: true
+- [ ] `profile_validation_ok`: true
+- [ ] `preflight_status_ready`: true
+- [ ] `groupset_value_excluded`: true
+- [ ] `amounts_position_verified`: true
+- [ ] `no_forbidden_steps`: true
+- [ ] `no_auto_next_evidence`: true
+- [ ] 人類已手動登入網站並進入正確頁面
+
+---
+
+## 完成後標記 DONE 流程
+
+網站上人類手動送出/確認後：
+
+```powershell
+python -X utf8 -m betguard.webfill.cli `
+  --batch-human-confirm-current-done `
+  --i-confirm-current-item-is-complete `
+  --queue <queue_file> `
+  --pretty
+```
+
+此指令：
+- WAITING_FOR_HUMAN_CONFIRM → DONE
+- 下一筆 PENDING → CURRENT
+- Queue → READY（或 COMPLETED）
+- 記錄 audit trail
+- 不開瀏覽器、不填寫、不送出、不確認
+
+---
+
 ## 建議後續工作流程
 
 1. **人類檢查**：在瀏覽器中確認號碼和金額無誤

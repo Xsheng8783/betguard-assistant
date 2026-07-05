@@ -329,3 +329,47 @@ def test_cli_advances_only_one_item(capsys, monkeypatch, tmp_path) -> None:
     assert output["items"][2]["status"] == PENDING  # not touched
     assert output["status"] == READY
     assert output["final_decision"]["real_site_auto_submit"] is False
+
+
+def test_multi_item_one_at_a_time_full_flow() -> None:
+    """Walk 3 items one at a time: each must be explicitly confirmed before
+    the next unlocks.  No auto-next, no auto-submit."""
+    queue = build_batch_queue(review_result(ok_batch_text()))
+
+    # Initially: [CURRENT, PENDING, PENDING]
+    assert queue["items"][0]["status"] == CURRENT
+    assert queue["items"][1]["status"] == PENDING
+    assert queue["items"][2]["status"] == PENDING
+    assert queue["status"] == READY
+
+    # --- Item 0 ---
+    waiting = mark_current_waiting_for_human(queue)
+    assert waiting["items"][0]["status"] == WAITING_FOR_HUMAN_CONFIRM
+    assert waiting["items"][1]["status"] == PENDING  # still locked
+
+    done0 = mark_current_done_by_human(waiting)
+    assert done0["items"][0]["status"] == DONE
+    assert done0["items"][1]["status"] == CURRENT  # unlocked
+    assert done0["items"][2]["status"] == PENDING  # still locked
+    assert done0["status"] == READY  # not completed yet
+    assert done0["done_count"] == 1
+
+    # --- Item 1 ---
+    waiting1 = mark_current_waiting_for_human(done0)
+    done1 = mark_current_done_by_human(waiting1)
+    assert done1["items"][1]["status"] == DONE
+    assert done1["items"][2]["status"] == CURRENT  # unlocked
+    assert done1["status"] == READY
+    assert done1["done_count"] == 2
+
+    # --- Item 2 (last) ---
+    waiting2 = mark_current_waiting_for_human(done1)
+    done2 = mark_current_done_by_human(waiting2)
+    assert done2["items"][2]["status"] == DONE
+    assert done2["status"] == COMPLETED  # all done
+    assert done2["current_index"] is None
+    assert done2["done_count"] == 3
+
+    # All steps: auto_submit always false
+    for q in (queue, waiting, done0, waiting1, done1, waiting2, done2):
+        assert q["final_decision"]["real_site_auto_submit"] is False
