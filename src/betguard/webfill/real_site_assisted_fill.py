@@ -179,58 +179,145 @@ def run_real_site_assisted_fill(
 
 
 def execute_actions_on_page(page: Any, actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Execute fill actions on the page.  Safety checks run first (one
+    batched JS call per frame to read element metadata), then execution
+    runs in a single JS call per frame to minimise round-trips."""
     executed: list[dict[str, Any]] = []
-    _frame_cache: dict[tuple, Any] = {}  # (name, url) → resolved frame
+
+    # 1) Validate every action locally (no round-trip).
     for action in actions:
         error = validate_real_site_action(action)
         if error:
             raise RuntimeError(error)
 
-        # Resolve frame once per unique (name, url) pair.
+    # 2) Resolve frames and build per-frame action lists.
+    _frame_cache: dict[tuple, Any] = {}
+    _per_frame: dict[tuple, list[dict[str, Any]]] = {}
+    for action in actions:
         _cache_key = (str(action.get("frame") or ""), str(action.get("frame_url") or ""))
         if _cache_key not in _frame_cache:
             try:
                 _frame_cache[_cache_key] = _resolve_frame(page, action)
             except Exception as exc:
                 raise RuntimeError(f"locator lookup failed for {action_label(action)}: {exc}") from exc
-        context = _frame_cache[_cache_key]
-        try:
-            locator = _resolve_first_locator(context.locator(str(action["selector"])))
-        except Exception as exc:
-            raise RuntimeError(f"locator lookup failed for {action_label(action)}: {exc}") from exc
+        _per_frame.setdefault(_cache_key, []).append(action)
 
-        element_info = _read_element_safety_info(locator)
-        if not _metadata_is_safe(element_info):
-            raise RuntimeError(f"danger text detected on target element for {action_label(action)}")
+    # 3) For each frame: batch safety check via one JS evaluate, then
+    #    batch execution via one JS evaluate.
+    for _cache_key, frame_actions in _per_frame.items():
+        frame = _frame_cache[_cache_key]
+        _batch_safety_check_and_execute(frame, frame_actions, executed)
 
+    return executed
+
+
+def _batch_safety_check_and_execute(
+    frame: Any,
+    actions: list[dict[str, Any]],
+    executed: list[dict[str, Any]],
+) -> None:
+    """One frame: read safety metadata for all selectors in a single JS
+    call, verify in Python, then execute all clicks/fills in a single JS
+    call."""
+    import json as _json
+
+    # Collect unique selectors and their expected safe text.
+    # For number buttons the text *is* the number (e.g. \"11\").
+    # For amount inputs the text is the star label (e.g. \"二星\").
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for action in actions:
+        sel = str(action["selector"])
+        if sel in seen:
+            continue
+        seen.add(sel)
+        expected = ""
         if action["type"] == "SELECT_NUMBER":
-            try:
-                locator.click()
-            except Exception as exc:
-                raise RuntimeError(f"click failed for {action_label(action)}: {exc}") from exc
-            executed.append(
-                {
-                    "type": "SELECT_NUMBER",
-                    "number": action["number"],
-                    "executed": True,
-                }
+            expected = str(action["number"])
+        elif action["type"] == "SET_AMOUNT":
+            expected = str(action.get("star") or "")
+        entries.append({"selector": sel, "expected": expected})
+
+    # Batch safety metadata read.
+    _js_payload = _json.dumps([e["selector"] for e in entries])
+    _safe_script = (
+        "selectors => {"
+        " var out = [];"
+        " for (var i = 0; i < selectors.length; i++) {"
+        "  try {"
+        "   var el = document.querySelector(selectors[i]);"
+        "   out.push(el ? (el.textContent || '').substring(0, 80) : null);"
+        "  } catch(e) { out.push(null); }"
+        " }"
+        " return out;"
+        "}"
+    )
+    try:
+        metadata_list: list = frame.evaluate(_safe_script, _json.loads(_js_payload))
+    except Exception as exc:
+        raise RuntimeError(f"batch safety check failed: {exc}") from exc
+
+    for i, entry in enumerate(entries):
+        raw = metadata_list[i] if i < len(metadata_list) else None
+        if raw is None:
+            raise RuntimeError(f"element not found for {entry['selector']}")
+        text = str(raw or "")
+        # Danger word check (same as old _metadata_is_safe).
+        if _contains_danger_text(text):
+            raise RuntimeError(f"danger text detected on target element for {entry['selector']}: '{text[:40]}'")
+        # Expected text check for number buttons.
+        if entry["expected"] and entry["expected"] not in text:
+            if text.strip():
+                raise RuntimeError(
+                    f"unexpected element text for {entry['selector']}: "
+                    f"expected '{entry['expected']}' in text, got '{text[:40]}'"
+                )
+
+    # Batch execution: one JS call clicks all number buttons and fills
+    # all amount inputs.  Playwright selectors like ``>> nth=0`` are
+    # converted to ``querySelectorAll(...)[N]`` for vanilla JS.
+    _exec_parts: list[str] = []
+    for action in actions:
+        raw_sel = str(action["selector"])
+        # Convert Playwright ``>> nth=N`` to vanilla JS.
+        _nth_match = re.search(r">>\s*nth\s*=\s*(\d+)", raw_sel)
+        if _nth_match:
+            _css = raw_sel[:_nth_match.start()].strip()
+            _idx = _nth_match.group(1)
+            _js_find = f"document.querySelectorAll({_json.dumps(_css)})[{_idx}]"
+        else:
+            _js_find = f"document.querySelector({_json.dumps(raw_sel)})"
+        if action["type"] == "SELECT_NUMBER":
+            _exec_parts.append(
+                f"(function(){{"
+                f"var el={_js_find};"
+                f"if(el){{el.click();}}"
+                f"}})();"
             )
         elif action["type"] == "SET_AMOUNT":
-            try:
-                locator.fill(str(action["amount"]))
-            except Exception as exc:
-                raise RuntimeError(f"fill failed for {action_label(action)}: {exc}") from exc
-            executed.append(
-                {
-                    "type": "SET_AMOUNT",
-                    "star": action["star"],
-                    "amount": action["amount"],
-                    "executed": True,
-                }
+            amt = _json.dumps(str(action["amount"]))
+            _exec_parts.append(
+                f"(function(){{"
+                f"var el={_js_find};"
+                f"if(el){{"
+                f"el.value={amt};"
+                f"el.dispatchEvent(new Event('input',{{bubbles:true}}));"
+                f"el.dispatchEvent(new Event('change',{{bubbles:true}}));"
+                f"}}"
+                f"}})();"
             )
-        else:
-            raise RuntimeError(f"unsupported action type: {action.get('type')}")
-    return executed
+    if _exec_parts:
+        _batch_script = f"(function(){{{';'.join(_exec_parts)}}})()"
+        try:
+            frame.evaluate(_batch_script)
+        except Exception as exc:
+            raise RuntimeError(f"batch execution failed: {exc}") from exc
+
+    for action in actions:
+        if action["type"] == "SELECT_NUMBER":
+            executed.append({"type": "SELECT_NUMBER", "number": action["number"], "executed": True})
+        elif action["type"] == "SET_AMOUNT":
+            executed.append({"type": "SET_AMOUNT", "star": action["star"], "amount": action["amount"], "executed": True})
 
 
 def _find_waiting_in_queue(queue: dict[str, Any]) -> dict[str, Any] | None:

@@ -457,6 +457,13 @@ def format_pretty_batch_mock_queue(queue: dict[str, Any]) -> str:
         )
     elif queue.get("status") == BATCH_BLOCKED:
         lines.append("Queue 已封鎖，無法繼續。")
+    elif queue.get("status") == READY_FOR_QUEUE or queue.get("status") == "READY":
+        lines.extend(
+            [
+                "下一筆已解鎖為 CURRENT，執行 readiness 後可進行下一次 fill：",
+                "python -X utf8 -m betguard.webfill.cli --real-site-fill-readiness --queue <queue_file> --profile <profile_file> --item-index <N> --concise",
+            ]
+        )
     else:
         lines.extend(
             [

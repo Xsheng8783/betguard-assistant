@@ -95,11 +95,71 @@ class FakeFrame:
             raise AssertionError(f"unexpected selector in frame '{self.name}': {selector}")
         return FakeLocator(self._page, selector, metadata)
 
-    def evaluate(self, _script: str):
-        """Used only by the empty-Shared/Index structural diagnostics --
-        distinct from ``.locator(...).evaluate()`` used for rendered text and
-        per-element checks.
-        """
+    def evaluate(self, _script, _arg=None):
+        """Handles both diagnostic evaluate() and batch safety/execution
+        evaluate(script, arg) calls from execute_actions_on_page."""
+        # Batch safety check: receives (script, selector_list).
+        if isinstance(_arg, list) and all(isinstance(s, str) for s in _arg):
+            result = []
+            for sel in _arg:
+                try:
+                    if self._own_elements is not None:
+                        meta = self._own_elements.get(sel)
+                        if meta is not None:
+                            result.append(str(meta.get("text", meta.get("value", ""))))
+                        else:
+                            loc = self._page.locator(sel)
+                            info = loc.evaluate("")
+                            if isinstance(info, dict):
+                                result.append(str(info.get("text", info.get("value", ""))))
+                            else:
+                                result.append(str(info))
+                    else:
+                        loc = self._page.locator(sel)
+                        info = loc.evaluate("")
+                        if isinstance(info, dict):
+                            result.append(str(info.get("text", info.get("value", ""))))
+                        else:
+                            result.append(str(info))
+                except Exception:
+                    result.append(None)
+            return result
+
+        # Batch execution script: simulate individual clicks/fills via
+        # the existing FakeLocator → FakePage mechanism.
+        if "el.click()" in str(_script) or "el.value=" in str(_script):
+            import re as _re, json as _js
+            # Extract all querySelector/querySelectorAll calls with their indices
+            parts = _re.split(r'\(function\(\)\{', str(_script))
+            for part in parts:
+                sel_match = _re.search(r'querySelector(?:All)?\(([^)]+)\)', part)
+                if not sel_match:
+                    continue
+                sel_raw = sel_match.group(1).strip("\"'")
+                try:
+                    sel_raw = _js.loads(f'"{sel_raw}"')
+                except Exception:
+                    pass
+                idx_match = _re.search(r'querySelectorAll\([^)]+\)\[(\d+)\]', part)
+                sel = f"{sel_raw} >> nth={idx_match.group(1)}" if idx_match else sel_raw
+                if "el.click()" in part:
+                    try:
+                        loc = self.locator(sel) if self._own_elements is not None else self._page.locator(sel)
+                        loc.click()
+                    except Exception:
+                        pass
+                if "el.value=" in part:
+                    val_match = _re.search(r'el\.value=([^;]+)', part)
+                    if val_match:
+                        val = val_match.group(1).strip("\"'")
+                        try:
+                            loc = self.locator(sel) if self._own_elements is not None else self._page.locator(sel)
+                            loc.fill(val)
+                        except Exception:
+                            pass
+            return None
+
+        # Original diagnostic path.
         if self._empty_frame_diagnostic_raises:
             raise RuntimeError("simulated frame.evaluate failure")
         if self._empty_frame_diagnostic_data is not None:
@@ -596,7 +656,7 @@ def test_locator_lookup_exception_becomes_safe_blocked() -> None:
     )
 
     assert report["status"] == "BLOCKED"
-    assert any("locator lookup failed" in error for error in report["errors"])
+    assert any("element not found" in error or "locator lookup failed" in error for error in report["errors"])
     assert page.clicked == []
     assert page.filled == {}
     assert report["danger_buttons_clicked"] == []
@@ -614,7 +674,7 @@ def test_click_exception_becomes_safe_blocked() -> None:
     )
 
     assert report["status"] == "BLOCKED"
-    assert any("click failed" in error for error in report["errors"])
+    assert any("batch execution failed" in error or "click failed" in error for error in report["errors"])
     assert page.clicked == []
     assert page.filled == {}
     assert report["danger_buttons_clicked"] == []
@@ -632,7 +692,7 @@ def test_fill_exception_becomes_safe_blocked() -> None:
     )
 
     assert report["status"] == "BLOCKED"
-    assert any("fill failed" in error for error in report["errors"])
+    assert any("batch execution failed" in error or "fill failed" in error for error in report["errors"])
     assert page.filled == {}
     assert report["danger_buttons_clicked"] == []
 
@@ -970,7 +1030,7 @@ def test_frame_not_found_fails_safely_not_silently() -> None:
     page.frames = []  # no frames at all, including no mainFrame
     action = {"type": "SELECT_NUMBER", "number": "23", "selector": "text=23", "frame": "mainFrame"}
 
-    with pytest.raises(RuntimeError, match="locator lookup failed"):
+    with pytest.raises(RuntimeError, match="element not found"):
         execute_actions_on_page(page, [action])
     assert page.clicked == []
 

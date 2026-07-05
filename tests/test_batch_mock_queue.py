@@ -342,8 +342,8 @@ def test_next_action_waiting_shows_human_confirm_done() -> None:
     assert "batch-mock-next" not in pretty
 
 
-def test_next_action_ready_keeps_mock_next() -> None:
-    """READY_FOR_QUEUE still shows batch-mock-next for mock flow."""
+def test_next_action_ready_shows_readiness_hint() -> None:
+    """READY_FOR_QUEUE or READY shows readiness hint, not batch-mock-next."""
     queue = {
         "status": READY_FOR_QUEUE,
         "summary": {"total": 2, "ok": 2, "blocked": 0, "current_index": 1, "remaining": 1},
@@ -355,7 +355,8 @@ def test_next_action_ready_keeps_mock_next() -> None:
     }
     pretty = format_pretty_batch_mock_queue(queue)
 
-    assert "batch-mock-next" in pretty
+    assert "readiness" in pretty
+    assert "batch-mock-next" not in pretty
     assert "Queue 已完成" not in pretty
 
 
