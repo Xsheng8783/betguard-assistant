@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any
 
 from betguard.webfill.real_site_assisted_fill import (
@@ -12,9 +13,6 @@ from betguard.webfill.real_site_assisted_fill import (
     _fast_select_numbers_knockout,
     _execute_amounts_via_playwright,
     READY_FOR_HUMAN_REVIEW,
-)
-from betguard.webfill.batch_queue import (
-    mark_current_done_by_human,
 )
 
 RISK_LOCK_MESSAGE = (
@@ -32,10 +30,8 @@ def run_real_site_assisted_fill_all(
 ) -> dict[str, Any]:
     """Fill ALL CURRENT+PENDING items without closing browser."""
     qp = Path(queue_path)
-    pp = Path(profile_path)
-
     queue = json.loads(qp.read_text(encoding="utf-8"))
-    profile = json.loads(pp.read_text(encoding="utf-8"))
+    profile = json.loads(Path(profile_path).read_text(encoding="utf-8"))
 
     if not risk_acknowledged:
         return {"error": RISK_LOCK_MESSAGE}
@@ -112,7 +108,6 @@ def run_real_site_assisted_fill_all(
                     break
 
                 # Mark item DONE directly (bypass queue state machine)
-                from datetime import datetime, timezone
                 item["status"] = "DONE"
                 item["fill_completed_at"] = datetime.now(timezone.utc).isoformat()
                 # Move queue's CURRENT to next PENDING item

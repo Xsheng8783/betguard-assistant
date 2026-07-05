@@ -1,6 +1,6 @@
 # betguard-assistant 系統規格
 
-> v0.4.0 | 2026-07-05
+> v0.5.0 | 2026-07-06
 
 ## 概述
 
@@ -34,22 +34,23 @@ betguard-assistant 是安全人工輔助投注系統。解析下注文字 → �
 | `real_site_fill_preflight` | 填入前安全檢查 |
 | `real_site_fill_plan` | 產生執行計劃 (selector + action) |
 | `real_site_assisted_fill` | Playwright 真站操作 |
+| `batch_fill_all` | 連續多筆填入 (瀏覽器不關) |
 | `fill_mapping` | Selector 對應 (B03 frame, PengBet.Value) |
 | `safety` | Danger word 檢查 |
 | `selector_discovery` | 頁面 DOM 掃描產生 profile |
 
 ## 關鍵演算法
 
-### Frame Resolution v5
-1. `page.main_frame` → 遞迴 `child_frames`
-2. 名稱匹配 (`mainFrame`)
-3. URL 匹配 (`/Front/B/B03`)
-4. Shared/Index 診斷 → 自動發現 child_frames → 重試
+### Frame Resolution (window.frames)
+Playwright 對 HTML `<frameset>` 支援有限 (`child_frames` 為空)。
+→ 繞過：`window.frames` 原生 JS 走訪，URL 含 `/Front/B/B03` 的 frame。
 
-### Batch Execution v1
-- 安全檢查: 1 次 JS evaluate (XPath `text=` 轉換)
-- 批量執行: 1 次 JS evaluate (所有 click/fill)
-- N+1 round-trip → 2 round-trip
+### Knockout ViewModel Injection (v0.5.0)
+不點 DOM 按鈕，直接操作 knockout.js ViewModel：
+1. `ko.contextFor(td)` 取得號碼的 knockout context
+2. `Mo.OnSwitchSel($data)` 選取號碼 (0.05s)
+3. `PengBet.Value` 設定金額 (Playwright fill, ~3s)
+總時間：0.1s/筆 (相較原生 90s 改善 99.9%)
 
 ## 支援彩種/平台
 

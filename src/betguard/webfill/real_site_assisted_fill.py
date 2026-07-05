@@ -221,7 +221,11 @@ def _fast_select_numbers_knockout(page: Any, numbers: list[str]) -> None:
     nums_json = _json.dumps(numbers)
     page.evaluate(
         "(function() {"
-        " var f = window.frames[2];"
+        " var f = null;"
+        " for (var wi = 0; wi < window.frames.length; wi++) {"
+        "  try { if (window.frames[wi].location.href.indexOf('/Front/B/B03') >= 0) { f = window.frames[wi]; break; } } catch(e) {}"
+        " }"
+        " if (!f) f = window.frames[2];  // fallback"
         " var ko = f.ko;"
         " if (!ko) return;"
         " var mo = f.Mo;"
