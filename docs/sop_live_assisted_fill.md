@@ -109,9 +109,23 @@ Queue 必須處於 `READY` 狀態且 items 為 `CURRENT`，才能被 live fill �
 
 1. **人類檢查**：在瀏覽器中確認號碼和金額無誤
 2. **人類手動送出**：點擊 `送出注單` → 確認對話框
-3. **標記完成**：執行 `mark_item_done_by_human` 或手動更新 queue
-4. **下一筆**：重置 queue 狀態，處理 next item
-5. **重複**：Readiness → Preflight → Live fill → 人類檢查 → 手動送出
+3. **標記完成**：執行本地 queue 狀態更新指令（不開瀏覽器、不填寫、不送出、不確認）：
+   ```powershell
+   python -X utf8 -m betguard.webfill.cli `
+     --batch-human-confirm-current-done `
+     --i-confirm-current-item-is-complete `
+     --queue queue_tiantianle_clean.json `
+     --pretty
+   ```
+   此指令會：
+   - 將 current item 狀態從 `WAITING_FOR_HUMAN_CONFIRM` 改為 `DONE`
+   - 將下一筆 `PENDING` item 改為 `CURRENT`
+   - Queue 狀態改為 `READY`
+   - **不開瀏覽器、不填寫、不送出、不確認**
+   - 記錄 audit trail（含 timestamp）
+   - 若無下一筆則 queue 狀態改為 `COMPLETED`
+4. **下一筆**：Ready → Preflight → Live fill → 人類檢查 → 手動送出
+5. **重複**：步驟 2-4 直到 queue 完成
 
 ---
 
@@ -122,7 +136,7 @@ Queue 必須處於 `READY` 狀態且 items 為 `CURRENT`，才能被 live fill �
 | `queue_tiantianle_clean.json` | 天天樂測試 queue |
 | `../betguard-local-artifacts/site_profile_tiantianle_verified_attempt2.json` | 天天樂網站 profile |
 | `src/betguard/webfill/real_site_assisted_fill.py` | 輔助填入核心邏輯 |
-| `tests/test_real_site_assisted_fill.py` | 970 個測試（含 frame resolver 測試） |
+| `tests/test_real_site_assisted_fill.py` | 含 frame resolver 測試（已通過完整 pytest 驗證） |
 
 ---
 

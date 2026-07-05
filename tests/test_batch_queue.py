@@ -211,3 +211,121 @@ def test_cli_build_batch_queue_from_file_outputs_json(capsys, monkeypatch, tmp_p
     assert output["status"] == READY
     assert output["items"][0]["status"] == CURRENT
     assert output["final_decision"]["real_site_auto_submit"] is False
+
+
+# --- _human_confirm_current_done (CLI helper) ---
+
+
+def test_human_confirm_current_done_marks_done_and_unlocks_next() -> None:
+    """WAITING_FOR_HUMAN_CONFIRM → DONE, next PENDING → CURRENT, queue → READY."""
+    queue = build_batch_queue(review_result(ok_batch_text()))
+    waiting = mark_current_waiting_for_human(queue)
+
+    updated = webfill_cli._human_confirm_current_done(waiting)
+
+    assert updated["items"][0]["status"] == DONE
+    assert updated["items"][1]["status"] == CURRENT
+    assert updated["status"] == READY
+    assert updated["current_index"] == 1
+    assert updated["done_count"] == 1
+    # Audit must exist
+    assert "audit" in updated
+    assert updated["audit"]["queue_status"] == READY
+    assert updated["final_decision"]["real_site_auto_submit"] is False
+
+
+def test_human_confirm_current_done_completes_when_no_next() -> None:
+    """Single item: WAITING → DONE, queue → COMPLETED."""
+    queue = build_batch_queue(review_result(f"06.13.23.22 {TWO_THREE}50"))
+    waiting = mark_current_waiting_for_human(queue)
+
+    updated = webfill_cli._human_confirm_current_done(waiting)
+
+    assert updated["items"][0]["status"] == DONE
+    assert updated["status"] == COMPLETED
+    assert updated["current_index"] is None
+    assert updated["done_count"] == 1
+    assert updated["final_decision"]["real_site_auto_submit"] is False
+
+
+def test_human_confirm_refuses_when_no_waiting_item() -> None:
+    """No WAITING_FOR_HUMAN_CONFIRM item → ValueError."""
+    queue = build_batch_queue(review_result(ok_batch_text()))
+
+    with pytest.raises(ValueError, match="no item is WAITING_FOR_HUMAN_CONFIRM"):
+        webfill_cli._human_confirm_current_done(queue)
+
+
+def test_human_confirm_refuses_multiple_waiting_items() -> None:
+    """Multiple WAITING_FOR_HUMAN_CONFIRM → ValueError."""
+    queue = build_batch_queue(review_result(ok_batch_text()))
+    # Manually set two items to waiting
+    queue["items"][0]["status"] = WAITING_FOR_HUMAN_CONFIRM
+    queue["items"][1]["status"] = WAITING_FOR_HUMAN_CONFIRM
+
+    with pytest.raises(ValueError, match="multiple items are WAITING_FOR_HUMAN_CONFIRM"):
+        webfill_cli._human_confirm_current_done(queue)
+
+
+def test_human_confirm_does_not_auto_submit() -> None:
+    """auto_submit must always be false after human confirm."""
+    queue = build_batch_queue(review_result(ok_batch_text()))
+    waiting = mark_current_waiting_for_human(queue)
+
+    updated = webfill_cli._human_confirm_current_done(waiting)
+
+    assert updated["final_decision"]["real_site_auto_submit"] is False
+    assert updated["final_decision"]["human_required_each_item"] is True
+
+
+def test_human_confirm_does_not_touch_parser() -> None:
+    """Parser fields remain unchanged after human confirm."""
+    queue = build_batch_queue(review_result(ok_batch_text()))
+    waiting = mark_current_waiting_for_human(queue)
+    original_parsed = dict(waiting["items"][0].get("parsed", {}))
+
+    updated = webfill_cli._human_confirm_current_done(waiting)
+
+    assert updated["items"][0].get("parsed") == original_parsed
+
+
+def test_cli_refuses_without_confirmation_flag(capsys, monkeypatch, tmp_path) -> None:
+    """CLI refuses --batch-human-confirm-current-done without --i-confirm-current-item-is-complete."""
+    queue_path = tmp_path / "queue.json"
+    queue = build_batch_queue(review_result(ok_batch_text()))
+    wait = mark_current_waiting_for_human(queue)
+    queue_path.write_text(json.dumps(wait, ensure_ascii=False), encoding="utf-8")
+
+    test_args = [
+        "cli",
+        "--batch-human-confirm-current-done",
+        "--queue", str(queue_path),
+    ]
+    monkeypatch.setattr(sys, "argv", test_args)
+
+    with pytest.raises(SystemExit):
+        webfill_cli.main()
+
+
+def test_cli_advances_only_one_item(capsys, monkeypatch, tmp_path) -> None:
+    """CLI marks exactly one item DONE; next becomes CURRENT; no more."""
+    queue_path = tmp_path / "queue.json"
+    queue = build_batch_queue(review_result(ok_batch_text()))
+    wait = mark_current_waiting_for_human(queue)
+    queue_path.write_text(json.dumps(wait, ensure_ascii=False), encoding="utf-8")
+
+    test_args = [
+        "cli",
+        "--batch-human-confirm-current-done",
+        "--i-confirm-current-item-is-complete",
+        "--queue", str(queue_path),
+    ]
+    monkeypatch.setattr(sys, "argv", test_args)
+    webfill_cli.main()
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["items"][0]["status"] == DONE
+    assert output["items"][1]["status"] == CURRENT
+    assert output["items"][2]["status"] == PENDING  # not touched
+    assert output["status"] == READY
+    assert output["final_decision"]["real_site_auto_submit"] is False

@@ -28,7 +28,7 @@ from betguard.webfill.daily_workflow import (
     format_pretty_new_batch_result,
     format_pretty_review_package_result,
 )
-from betguard.webfill.batch_queue import build_batch_queue, format_pretty_batch_queue
+from betguard.webfill.batch_queue import build_batch_queue, format_pretty_batch_queue, mark_current_done_by_human, WAITING_FOR_HUMAN_CONFIRM as BQ_WAITING_FOR_HUMAN_CONFIRM
 from betguard.webfill.batch_mock_queue import (
     accept_valid_candidates_for_mock_queue,
     advance_queue_after_human_confirm,
@@ -133,6 +133,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Required safety acknowledgement for real-site current-item assisted fill",
     )
     parser.add_argument(
+        "--batch-human-confirm-current-done",
+        action="store_true",
+        help="Mark the current WAITING_FOR_HUMAN_CONFIRM item as DONE and unlock the next PENDING item. No browser, no fill, no submit.",
+    )
+    parser.add_argument(
+        "--i-confirm-current-item-is-complete",
+        action="store_true",
+        help="Required safety flag for --batch-human-confirm-current-done. Attests the current item was manually checked and is complete.",
+    )
+    parser.add_argument(
         "--auto-confirm-mock",
         action="store_true",
         help="Mock-only simulation that marks each filled item as human-confirmed before moving on",
@@ -175,6 +185,32 @@ def build_parser() -> argparse.ArgumentParser:
 
 def build_b03_mapping_from_discovery(url: str, selected_page: str) -> dict:
     return run_live_b03_selector_mapping(url)
+
+
+def _human_confirm_current_done(queue: dict[str, Any]) -> dict[str, Any]:
+    """Mark the single WAITING_FOR_HUMAN_CONFIRM item as DONE and unlock
+    the next PENDING item.  No browser, no fill, no submit.
+
+    Uses ``mark_current_done_by_human`` from batch_queue which enforces:
+    - exactly one WAITING_FOR_HUMAN_CONFIRM item exists
+    - item status goes WAITING_FOR_HUMAN_CONFIRM → DONE
+    - next PENDING item → CURRENT (if any)
+    - queue status → READY (if next item) or COMPLETED (if no items left)
+    """
+    from betguard.webfill.batch_audit import sync_batch_audit
+
+    waiting = [
+        item for item in queue.get("items", [])
+        if item.get("status") == BQ_WAITING_FOR_HUMAN_CONFIRM
+    ]
+    if not waiting:
+        raise ValueError("no item is WAITING_FOR_HUMAN_CONFIRM")
+    if len(waiting) > 1:
+        raise ValueError("multiple items are WAITING_FOR_HUMAN_CONFIRM; cannot auto-confirm")
+
+    updated = mark_current_done_by_human(queue)
+    sync_batch_audit(updated)
+    return updated
 
 
 def main() -> None:
@@ -240,6 +276,27 @@ def main() -> None:
         queue = load_queue_state(args.queue_path)
         try:
             queue = advance_queue_after_human_confirm(queue)
+        except ValueError as exc:
+            queue = dict(queue)
+            queue["errors"] = [str(exc)]
+        save_queue_state(queue, args.queue_path)
+        queue["queue_state_path"] = args.queue_path
+        if args.pretty:
+            print(format_pretty_batch_mock_queue(queue))
+        else:
+            print(json.dumps(queue, ensure_ascii=False, indent=2))
+        return
+
+    if args.batch_human_confirm_current_done:
+        if not args.i_confirm_current_item_is_complete:
+            parser.error(
+                "--batch-human-confirm-current-done requires --i-confirm-current-item-is-complete"
+            )
+        if not args.queue_path:
+            parser.error("--batch-human-confirm-current-done requires --queue")
+        queue = load_queue_state(args.queue_path)
+        try:
+            queue = _human_confirm_current_done(queue)
         except ValueError as exc:
             queue = dict(queue)
             queue["errors"] = [str(exc)]
