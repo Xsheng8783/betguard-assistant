@@ -180,13 +180,22 @@ def run_real_site_assisted_fill(
 
 def execute_actions_on_page(page: Any, actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     executed: list[dict[str, Any]] = []
+    _frame_cache: dict[tuple, Any] = {}  # (name, url) → resolved frame
     for action in actions:
         error = validate_real_site_action(action)
         if error:
             raise RuntimeError(error)
 
+        # Resolve frame once per unique (name, url) pair.
+        _cache_key = (str(action.get("frame") or ""), str(action.get("frame_url") or ""))
+        if _cache_key not in _frame_cache:
+            try:
+                _frame_cache[_cache_key] = _resolve_frame(page, action)
+            except Exception as exc:
+                raise RuntimeError(f"locator lookup failed for {action_label(action)}: {exc}") from exc
+        context = _frame_cache[_cache_key]
         try:
-            locator = _locator_for_action(page, action)
+            locator = _resolve_first_locator(context.locator(str(action["selector"])))
         except Exception as exc:
             raise RuntimeError(f"locator lookup failed for {action_label(action)}: {exc}") from exc
 
@@ -316,7 +325,9 @@ def format_pretty_real_site_assisted_fill(report: dict[str, Any]) -> str:
 
     lines.extend(["", "Danger:"])
     for label in report.get("danger_buttons_detected", []):
-        lines.append(f"- {label} detected, not clicked")
+        short = str(label)[:80]
+        suffix = "..." if len(str(label)) > 80 else ""
+        lines.append(f"- {short}{suffix} detected, not clicked")
     if not report.get("danger_buttons_detected"):
         lines.append("- danger candidates not verified")
 
@@ -728,7 +739,7 @@ def _resolve_frame(page: Any, action: dict[str, Any]) -> Any:
     # 0) Live re-seed with retry: Playwright can populate child_frames
     # asynchronously, so we try a few times with brief pauses.
     import time as _time
-    for _attempt in range(3):
+    for _attempt in range(1):  # single pass — _collect_all_frames v4 already recurses
         try:
             main = page.main_frame
         except Exception:
@@ -746,7 +757,6 @@ def _resolve_frame(page: Any, action: dict[str, Any]) -> Any:
                     frames.append(child)
             if _children:
                 break
-        _time.sleep(0.5)
 
     # --- authoritative candidate list helpers ---
     # Every modification to ``frames`` after this point must also update

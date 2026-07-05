@@ -520,6 +520,10 @@ def main() -> None:
             url=args.url,
             risk_acknowledged=args.i_understand_real_site_fill_risk,
         )
+        # Persist updated queue (fill_completed_at) back to disk.
+        _updated = report.get("queue")
+        if isinstance(_updated, dict):
+            save_queue_state(_updated, args.queue_path)
         if args.pretty:
             print(format_pretty_real_site_assisted_fill(report))
         else:

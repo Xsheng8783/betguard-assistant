@@ -111,7 +111,39 @@ def save_site_profile(profile: dict[str, Any], path: str | Path) -> None:
 
 
 def load_site_profile(path: str | Path) -> dict[str, Any]:
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+    """Load a site profile JSON, with automatic pickle caching.
+
+    Profiles can be 100+ MB of JSON.  Parsing that from scratch on every
+    CLI invocation is the dominant latency source for assisted-fill commands.
+    A pickled copy is written next to the JSON and reused while the JSON
+    mtime is unchanged.
+    """
+    import pickle
+
+    src = Path(path)
+    cache = src.with_suffix(src.suffix + ".pickle")
+
+    try:
+        src_mtime = src.stat().st_mtime
+    except OSError:
+        return json.loads(src.read_text(encoding="utf-8"))
+
+    if cache.exists():
+        try:
+            cache_mtime = cache.stat().st_mtime
+            if cache_mtime >= src_mtime:
+                with open(cache, "rb") as fh:
+                    return pickle.load(fh)
+        except Exception:
+            pass
+
+    data = json.loads(src.read_text(encoding="utf-8"))
+    try:
+        with open(cache, "wb") as fh:
+            pickle.dump(data, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception:
+        pass
+    return data
 
 
 def profile_as_selector_report(profile: dict[str, Any]) -> dict[str, Any]:
