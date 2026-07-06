@@ -181,11 +181,29 @@ def build_parser() -> argparse.ArgumentParser:
         choices=PAGE_ROUTE_LABELS,
         help="Page route to inspect or require, such as 二三四星, 全車, or 快速輸入",
     )
+    parser.add_argument(
+        "--zhu-peng-preflight",
+        action="store_true",
+        help="Local-only safety preflight for a ZhuPeng column bet item; never opens a browser",
+    )
+    parser.add_argument(
+        "--zhu-peng-assisted-fill",
+        action="store_true",
+        help="Safely fill one ZhuPeng column bet item on the real site",
+    )
     return parser
 
 
 def build_b03_mapping_from_discovery(url: str, selected_page: str) -> dict:
     return run_live_b03_selector_mapping(url)
+
+
+def _get_first_current(queue: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the first CURRENT item, or None."""
+    for item in queue.get("items", []):
+        if item.get("status") == "CURRENT":
+            return item
+    return None
 
 
 def _human_confirm_current_done(queue: dict[str, Any]) -> dict[str, Any]:
@@ -664,6 +682,78 @@ def main() -> None:
 
     if not args.dry_run:
         parser.error("Only --dry-run is supported. Filling and submitting are intentionally disabled.")
+
+    # ── ZhuPeng handlers ─────────────────────────────────────────────
+    if args.zhu_peng_preflight:
+        if not args.queue_path:
+            parser.error("--zhu-peng-preflight requires --queue")
+        from betguard.webfill.zhu_peng_pipeline import zhu_peng_preflight, zhu_peng_columns_from_item
+        queue = load_queue_state(args.queue_path)
+        item = _get_first_current(queue) or {}
+        report = zhu_peng_preflight(item)
+        report["columns"] = zhu_peng_columns_from_item(item)
+        if args.pretty:
+            print("ZhuPeng Preflight")
+            print()
+            print(f"Status: {report.get('status')}")
+            print(f"Columns: {report.get('columns')}")
+            for err in report.get("errors", []):
+                print(f"Error: {err}")
+        else:
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+        return
+
+    if args.zhu_peng_assisted_fill:
+        if not args.i_understand_real_site_fill_risk:
+            parser.error("--zhu-peng-assisted-fill requires --i-understand-real-site-fill-risk")
+        if not args.queue_path:
+            parser.error("--zhu-peng-assisted-fill requires --queue")
+        if not args.url:
+            parser.error("--zhu-peng-assisted-fill requires --url")
+        from betguard.webfill.batch_queue import mark_item_waiting_for_human
+        from betguard.webfill.zhu_peng_pipeline import zhu_peng_fill_execute, zhu_peng_preflight
+        from betguard.webfill.batch_audit import sync_batch_audit
+        queue = load_queue_state(args.queue_path)
+        current = _get_first_current(queue)
+        if not current:
+            parser.error("No CURRENT item in queue")
+        item_index = current.get("index", 0)
+        pre = zhu_peng_preflight(current)
+        if pre["status"] != "READY_FOR_HUMAN_REVIEW":
+            print(json.dumps(pre, ensure_ascii=False, indent=2))
+            return
+        from playwright.sync_api import sync_playwright
+        from datetime import datetime, timezone
+        fill_report = {}
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=False)
+            page = browser.new_page()
+            page.goto(args.url, wait_until="domcontentloaded")
+            input("手動登入 → 柱碰頁面 → 按 Enter")
+            fill_report = zhu_peng_fill_execute(page, current)
+            browser.close()
+
+        print(json.dumps(fill_report, ensure_ascii=False, indent=2))
+
+        if fill_report.get("blocked"):
+            print("BLOCKED: fill readback mismatch; item NOT marked WAITING.")
+            return
+
+        # Fill succeeded → immediately mark WAITING_FOR_HUMAN_CONFIRM
+        current["fill_completed_at"] = datetime.now(timezone.utc).isoformat()
+        current["fill_report"] = fill_report
+        queue = mark_item_waiting_for_human(queue, item_index)
+        save_queue_state(queue, args.queue_path)
+        sync_batch_audit(queue)
+
+        print()
+        print("已填入柱碰號碼與金額。")
+        print("請人工檢查網站畫面 → 手動送出/確認。")
+        print("確認完成後請執行：")
+        print("  --batch-human-confirm-current-done --i-confirm-current-item-is-complete")
+        return
+    # ── end ZhuPeng handlers ─────────────────────────────────────────
+
     if not args.url:
         parser.error("--url is required unless --map-dry-run is used")
 
