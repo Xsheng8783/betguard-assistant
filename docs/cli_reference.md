@@ -105,6 +105,34 @@ Output: audit JSON.
 
 Safety: local only. No real website operation.
 
+## ZhuPeng Preflight
+
+```bash
+python -X utf8 -m betguard.webfill.cli --zhu-peng-preflight --queue queue_zhu.json --pretty
+```
+
+Purpose: Local-only safety preflight for a ZhuPeng column bet item. Validates columns, amounts, accepted_by_human, and status. Never opens a browser.
+
+Input: queue JSON with a CURRENT ZhuPeng item.
+
+Output: preflight report (READY_FOR_HUMAN_REVIEW or BLOCKED).
+
+Safety: local only. No real website operation. No browser.
+
+## ZhuPeng Session Fill
+
+```bash
+python -X utf8 -m betguard.webfill.cli --zhu-peng-session-fill --queue queue_zhu.json --url https://www.gts362.com --i-understand-real-site-fill-risk --pretty
+```
+
+Purpose: Batch session fill for ZhuPeng column bets. Opens browser once, processes multiple CURRENT+PENDING items. Each item stops at a DONE gate — human must type DONE in the terminal to advance to the next item. Never auto-submits or auto-confirms.
+
+Input: queue JSON, site URL.
+
+Output: fill report per item, updated queue.
+
+Safety: requires --i-understand-real-site-fill-risk. DONE gate per item. No auto-submit, no auto-confirm, no auto-next.
+
 ## Safety Summary
 
 Every command above keeps:
