@@ -382,6 +382,18 @@ def _parsed_amount_view(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _extract_review_labels(item: dict[str, Any]) -> list[str]:
+    """Extract review_label: prefixed classification labels from preprocessing_notes."""
+    notes = item.get("preprocessing_notes", [])
+    if not isinstance(notes, list):
+        notes = []
+    labels: list[str] = []
+    for note in notes:
+        if isinstance(note, str) and note.startswith("review_label:"):
+            labels.append(note[len("review_label:"):])
+    return labels
+
+
 def _watchlist_entry(item: dict[str, Any]) -> dict[str, Any]:
     result = item.get("result", {})
     entry = {
@@ -395,6 +407,7 @@ def _watchlist_entry(item: dict[str, Any]) -> dict[str, Any]:
         "warnings": list(item.get("warnings", [])),
         "is_missing_money": _is_missing_money_only(item),
         "accepted_automatically": False,
+        "review_labels": _extract_review_labels(item),
     }
     entry.update(_parsed_amount_view(result))
     return entry
@@ -412,6 +425,7 @@ def _invalid_entry(item: dict[str, Any]) -> dict[str, Any]:
         "warnings": list(item.get("warnings", [])),
         "errors": list(item.get("errors", [])),
         "is_missing_money": _is_missing_money_only(item),
+        "review_labels": _extract_review_labels(item),
     }
 
 

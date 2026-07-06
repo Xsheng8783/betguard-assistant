@@ -577,6 +577,7 @@ def _candidate_review_items(
                 "warnings": list(bet_result.get("warnings", [])),
                 "errors": list(bet_result.get("errors", [])),
                 "result": bet_result,
+                "preprocessing_notes": list(candidate.get("preprocessing_notes", [])),
             }
         )
     return result

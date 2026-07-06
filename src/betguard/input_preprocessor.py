@@ -203,6 +203,7 @@ def preprocess_batch_input(text_or_lines: str | Iterable[str]) -> dict[str, Any]
                 + inline_notes
                 + name_marker_notes
                 + _suspicious_paste_notes(fragment)
+                + _review_classification_labels(fragment)
             )
             expanded_fragments = _expand_multi_car_fragment(fragment)
             for expanded_index, expanded in enumerate(expanded_fragments, start=1):
@@ -768,6 +769,55 @@ def _normalize_star_amount_continuation(value: str) -> str:
     if not match:
         return value
     return f"{match.group('stars').replace('.', '')}星X{match.group('amount')}"
+
+def _review_classification_labels(value: str) -> list[str]:
+    """Return review-only classification labels for a fragment.
+
+    These are metadata labels that help reviewers understand WHY a fragment
+    needs review. They do NOT change parser validity, validator rules, or
+    queue status.  All labels are prefixed with 'review_label:' for easy
+    identification in review.html.
+    """
+    labels: list[str] = []
+    compact = value.replace(" ", "")
+    lower = value.lower()
+
+    # 1) non_539_candidate: HK/港/六合 markers
+    _non539_tokens = ["港", "六合", "六和", "六", "hk"]
+    if any(compact.startswith(t) for t in _non539_tokens) or any(
+        t in lower for t in ["hk", "六合", "六和"]
+    ):
+        labels.append("review_label:non_539_candidate")
+
+    # 2) suspected_non_539_due_to_range: numbers 40-49
+    nums = re.findall(r"\b(4[0-9])\b", value)
+    if nums:
+        labels.append("review_label:suspected_non_539_due_to_range")
+
+    # 3) suspected_tiantianle: 天/天天/天天樂 suffix
+    if re.search(r"(?:天天樂|天天|天)\s*$", value):
+        labels.append("review_label:suspected_tiantianle")
+
+    # 4) person_name_suffix: 臂/改/嫌 at end
+    if re.search(r"[臂改嫌]\s*$", value):
+        labels.append("review_label:person_name_suffix")
+
+    # 5) ambiguous_long_token: long digit sequences (5+) that look like
+    #    glued numbers (e.g. 35234, 1500)
+    long_tokens = re.findall(r"\b\d{4,}\b", value)
+    if long_tokens:
+        labels.append("review_label:ambiguous_long_token")
+
+    # 6) per_star_amount_split: per-star amount patterns
+    #    e.g. "23星各2 4星X1" or "二三星各100"
+    if re.search(
+        r"(?:[234二三四兩]{2,3}|二三四|兩三四)[星]?\s*各\s*\d+",
+        value,
+    ):
+        labels.append("review_label:per_star_amount_split")
+
+    return labels
+
 
 
 def _suspicious_paste_notes(value: str) -> list[str]:
