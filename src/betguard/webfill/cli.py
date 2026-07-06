@@ -685,10 +685,7 @@ def main() -> None:
             print(json.dumps(report, ensure_ascii=False, indent=2))
         return
 
-    if not args.dry_run:
-        parser.error("Only --dry-run is supported. Filling and submitting are intentionally disabled.")
-
-    # ── ZhuPeng handlers ─────────────────────────────────────────────
+    # ── ZhuPeng handlers (must dispatch before legacy dry-run guard) ──
     if args.zhu_peng_preflight:
         if not args.queue_path:
             parser.error("--zhu-peng-preflight requires --queue")
@@ -757,9 +754,7 @@ def main() -> None:
         print("確認完成後請執行：")
         print("  --batch-human-confirm-current-done --i-confirm-current-item-is-complete")
         return
-    # ── end ZhuPeng handlers ─────────────────────────────────────────
 
-    # ── ZhuPeng session fill ─────────────────────────────────────────
     if args.zhu_peng_session_fill:
         if not args.i_understand_real_site_fill_risk:
             parser.error("--zhu-peng-session-fill requires --i-understand-real-site-fill-risk")
@@ -776,7 +771,10 @@ def main() -> None:
         print()
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return
-    # ── end ZhuPeng session fill ─────────────────────────────────────
+    # ── end ZhuPeng handlers ─────────────────────────────────────────
+
+    if not args.dry_run:
+        parser.error("Only --dry-run is supported. Filling and submitting are intentionally disabled.")
 
     if not args.url:
         parser.error("--url is required unless --map-dry-run is used")
