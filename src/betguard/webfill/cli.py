@@ -191,6 +191,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Safely fill one ZhuPeng column bet item on the real site",
     )
+    parser.add_argument(
+        "--zhu-peng-session-fill",
+        action="store_true",
+        help="Batch session fill: one browser, multiple ZhuPeng items, human gate each",
+    )
     return parser
 
 
@@ -753,6 +758,25 @@ def main() -> None:
         print("  --batch-human-confirm-current-done --i-confirm-current-item-is-complete")
         return
     # ── end ZhuPeng handlers ─────────────────────────────────────────
+
+    # ── ZhuPeng session fill ─────────────────────────────────────────
+    if args.zhu_peng_session_fill:
+        if not args.i_understand_real_site_fill_risk:
+            parser.error("--zhu-peng-session-fill requires --i-understand-real-site-fill-risk")
+        if not args.queue_path:
+            parser.error("--zhu-peng-session-fill requires --queue")
+        if not args.url:
+            parser.error("--zhu-peng-session-fill requires --url")
+        from betguard.webfill.zhu_peng_session import run_zhu_peng_session_fill
+        report = run_zhu_peng_session_fill(
+            queue_path=args.queue_path,
+            url=args.url,
+            risk_acknowledged=args.i_understand_real_site_fill_risk,
+        )
+        print()
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return
+    # ── end ZhuPeng session fill ─────────────────────────────────────
 
     if not args.url:
         parser.error("--url is required unless --map-dry-run is used")

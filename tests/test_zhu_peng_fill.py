@@ -1,26 +1,28 @@
 """Tests for zhu_peng_fill — unit tests (no browser required)."""
 import pytest
+from betguard.webfill.safety import DANGER_WORDS, is_dangerous_action
 from betguard.webfill.zhu_peng_fill import (
     build_zhu_peng_plan,
-    _is_danger_text,
     _b03_js,
 )
 
 
 class TestSafety:
-    def test_danger_text_detected(self):
-        assert _is_danger_text("送出")
-        assert _is_danger_text("確認送出")
-        assert _is_danger_text("確定下注")
+    def test_all_danger_words_blocked(self):
+        """Every word in DANGER_WORDS must be blocked by is_dangerous_action."""
+        for word in DANGER_WORDS:
+            assert is_dangerous_action(word), f"'{word}' should be blocked"
+
+    def test_zhu_peng_critical_words_blocked(self):
+        """Words ZhuPeng specifically relied on must all be blocked."""
+        for word in ("送出", "確認", "確定", "取消", "完成", "送出注單",
+                     "下注", "刪除", "清除全部", "加入注單"):
+            assert is_dangerous_action(word), f"'{word}' should be blocked"
 
     def test_safe_text_ok(self):
-        assert not _is_danger_text("11")
-        assert not _is_danger_text("二星")
-        assert not _is_danger_text("新增一柱")
-
-    def test_forbidden_set_immutable(self):
-        with pytest.raises(AttributeError):
-            _is_danger_text.__wrapped__  # frozenset is immutable
+        assert not is_dangerous_action("11")
+        assert not is_dangerous_action("二星")
+        assert not is_dangerous_action("新增一柱")
 
 
 class TestB03JS:

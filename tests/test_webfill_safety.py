@@ -1,5 +1,5 @@
 from betguard.webfill.inspector import extract_labels_from_elements, guess_current_game, scan_text_for_labels
-from betguard.webfill.safety import is_dangerous_action
+from betguard.webfill.safety import DANGER_WORDS, is_dangerous_action
 
 
 def test_dangerous_action_words_are_blocked() -> None:
@@ -7,6 +7,25 @@ def test_dangerous_action_words_are_blocked() -> None:
     assert is_dangerous_action("確認") is True
     assert is_dangerous_action("加入注單") is True
     assert is_dangerous_action("刪除") is True
+
+
+def test_new_danger_words_blocked() -> None:
+    """「取消」「完成」must be blocked — added for ZhuPeng safety unification."""
+    assert is_dangerous_action("取消") is True
+    assert is_dangerous_action("完成") is True
+
+
+def test_all_danger_words_blocked_by_iteration() -> None:
+    """Every word in DANGER_WORDS must be blocked."""
+    for word in DANGER_WORDS:
+        assert is_dangerous_action(word), f"'{word}' should be blocked"
+
+
+def test_danger_words_in_compound_text() -> None:
+    """Danger words embedded in longer text must still be caught."""
+    assert is_dangerous_action("確認送出")
+    assert is_dangerous_action("確定下注")
+    assert is_dangerous_action("取消全部")
 
 
 def test_safe_labels_are_not_blocked() -> None:

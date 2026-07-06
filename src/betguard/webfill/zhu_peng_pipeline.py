@@ -11,7 +11,6 @@ from typing import Any
 from betguard.webfill.zhu_peng_fill import (
     build_zhu_peng_plan,
     execute_zhu_peng_plan,
-    verify_zhu_peng_result,
 )
 
 
@@ -128,12 +127,15 @@ def zhu_peng_fill_execute(
     """
     columns = zhu_peng_columns_from_item(item)
     amounts_raw = item.get("amounts") or item.get("amount_per_star") or {}
-    amounts = {str(k): int(v) for k, v in amounts_raw.items()}
 
-    # Convert star numbers to labels if needed
-    if any(isinstance(k, int) or k.isdigit() for k in amounts):
-        star_map = zhu_peng_star_map(item)
-        amounts = {star_map.get(int(k), str(k)): int(v) for k, v in amounts_raw.items()}
+    # Convert star keys (int or digit-str) to labels via star_map
+    star_map = zhu_peng_star_map(item)
+    amounts = {}
+    for k, v in amounts_raw.items():
+        label = k
+        if isinstance(k, int) or (isinstance(k, str) and k.isdigit()):
+            label = star_map.get(int(k), k)
+        amounts[str(label)] = int(v)
 
     plan = build_zhu_peng_plan({"numbers": columns, "amounts": amounts})
     report = execute_zhu_peng_plan(page, plan)

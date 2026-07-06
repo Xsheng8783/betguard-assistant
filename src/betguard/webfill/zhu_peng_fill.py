@@ -16,9 +16,9 @@ import json
 import time
 from typing import Any
 
-# ── B03 context helpers ────────────────────────────────────────────────
+from betguard.webfill.safety import DANGER_WORDS
 
-_SAFETY_FORBIDDEN = frozenset(("送出", "確認", "確定", "取消", "完成", "送出注單"))
+# ── B03 context helpers ────────────────────────────────────────────────
 
 _FRAME_PREFIX = "window.frames[2]"
 
@@ -33,13 +33,6 @@ def _b03_js(inner: str) -> str:
     return inner.replace("__B03__.", f"{_FRAME_PREFIX}.")
 
 
-# ── Safety helpers ──────────────────────────────────────────────────────
-
-def _is_danger_text(text: str) -> bool:
-    """Return True if *text* contains any forbidden safety word."""
-    return any(w in text for w in _SAFETY_FORBIDDEN)
-
-
 # ── Number selection ────────────────────────────────────────────────────
 
 def click_number(page: Any, number: int) -> None:
@@ -49,10 +42,10 @@ def click_number(page: Any, number: int) -> None:
 (function(){
     var t=__B03__.document.querySelectorAll('td');
     for(var i=0;i<t.length;i++){
-        if((t[i].innerText||'').trim()==='"""+s+"""'){
+        if((t[i].innerText||'').trim()==='""" + s + """'){
             // Safety: text must not contain danger words.
             var txt=(t[i].innerText||'').trim();
-            if("""+json.dumps(list(_SAFETY_FORBIDDEN))+""".some(function(w){return txt.indexOf(w)>=0;})) return;
+            if(""" + json.dumps(list(DANGER_WORDS)) + """.some(function(w){return txt.indexOf(w)>=0;})) return;
             t[i].click();
             return;
         }
@@ -226,14 +219,3 @@ def execute_zhu_peng_plan(page: Any, plan: dict[str, Any]) -> dict[str, Any]:
         "amounts": amounts,
         "steps": steps,
     }
-
-
-def verify_zhu_peng_result(report: dict[str, Any], expected_numbers: list[list[int]], expected_amounts: dict[str, int] | None = None) -> bool:
-    """Return True if the report matches expected numbers and amounts."""
-    if report.get("blocked"):
-        return False
-    # Check numbers from steps
-    for step in report.get("steps", []):
-        if step.get("blocked"):
-            return False
-    return True
