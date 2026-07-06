@@ -5,6 +5,7 @@ from betguard.webfill.zhu_peng_pipeline import (
     zhu_peng_columns_from_item,
     zhu_peng_preflight,
     zhu_peng_star_map,
+    _normalize_star_amounts,
     ZHU_PENG_SAFETY_GUARDS,
 )
 
@@ -110,6 +111,70 @@ class TestPreflightSafety:
         report = zhu_peng_preflight(item)
         assert report["status"] == "BLOCKED"
         assert any("amount" in e.lower() for e in report["errors"])
+
+
+class TestNormalizeStarAmounts:
+    """Tests for the _normalize_star_amounts shared helper."""
+
+    def test_int_keys(self):
+        star_map = {2: "二星", 3: "三星", 4: "四星"}
+        result = _normalize_star_amounts({2: 100, 3: 100, 4: 100}, star_map)
+        assert result == {"二星": 100, "三星": 100, "四星": 100}
+
+    def test_string_digit_keys(self):
+        star_map = {2: "二星", 3: "三星", 4: "四星"}
+        result = _normalize_star_amounts({"2": 100, "3": 100, "4": 100}, star_map)
+        assert result == {"二星": 100, "三星": 100, "四星": 100}
+
+    def test_mixed_keys(self):
+        star_map = {2: "二星", 3: "三星", 4: "四星"}
+        result = _normalize_star_amounts({2: 100, "3": 100, "4": 100}, star_map)
+        assert result == {"二星": 100, "三星": 100, "四星": 100}
+
+    def test_non_numeric_key_passthrough(self):
+        star_map = {2: "二星", 3: "三星", 4: "四星"}
+        result = _normalize_star_amounts({2: 100, "custom_star": 200}, star_map)
+        assert result == {"二星": 100, "custom_star": 200}
+
+    def test_partial_stars(self):
+        star_map = {2: "二星", 3: "三星", 4: "四星"}
+        result = _normalize_star_amounts({2: 100, 3: 100}, star_map)
+        assert result == {"二星": 100, "三星": 100}
+
+
+class TestPreflightAmountKeyNormalization:
+    """Preflight must accept both int and string key amounts."""
+
+    def test_string_key_amounts_passes(self):
+        item = {
+            "columns": [[11], [22], [33], [13, 23]],
+            "amounts": {"2": 100, "3": 100, "4": 100},
+            "status": "CURRENT",
+            "accepted_by_human": True,
+        }
+        report = zhu_peng_preflight(item)
+        assert report["status"] == "READY_FOR_HUMAN_REVIEW"
+        assert report["errors"] == []
+
+    def test_int_key_amounts_passes(self):
+        item = {
+            "columns": [[11], [22], [33], [13, 23]],
+            "amounts": {2: 100, 3: 100, 4: 100},
+            "status": "CURRENT",
+            "accepted_by_human": True,
+        }
+        report = zhu_peng_preflight(item)
+        assert report["status"] == "READY_FOR_HUMAN_REVIEW"
+
+    def test_mixed_key_amounts_passes(self):
+        item = {
+            "columns": [[11], [22]],
+            "amounts": {2: 100, "3": 100, "4": 100},
+            "status": "CURRENT",
+            "accepted_by_human": True,
+        }
+        report = zhu_peng_preflight(item)
+        assert report["status"] == "READY_FOR_HUMAN_REVIEW"
 
 
 class TestSafetyGuards:

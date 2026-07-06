@@ -65,6 +65,28 @@ def zhu_peng_star_map(item: dict[str, Any]) -> dict[str, str]:
     return {s: default.get(s, f"star_{s}") for s in stars}
 
 
+# ── Amount normalization ─────────────────────────────────────────────────
+
+
+def _normalize_star_amounts(
+    amounts_raw: dict[str, int] | dict[int, int],
+    star_map: dict[int, str],
+) -> dict[str, int]:
+    """Normalize star amount keys from raw item amounts.
+
+    Converts int keys or digit-string keys (e.g. 2 or "2") to star labels
+    via star_map (e.g. "二星").  Non-numeric string keys pass through as-is.
+    """
+    amounts: dict[str, int] = {}
+    for k, v in amounts_raw.items():
+        if isinstance(k, int) or (isinstance(k, str) and k.isdigit()):
+            label = star_map.get(int(k), str(k))
+        else:
+            label = str(k)
+        amounts[str(label)] = int(v)
+    return amounts
+
+
 # ── Preflight ───────────────────────────────────────────────────────────
 
 def zhu_peng_preflight(item: dict[str, Any]) -> dict[str, Any]:
@@ -96,12 +118,13 @@ def zhu_peng_preflight(item: dict[str, Any]) -> dict[str, Any]:
         missing.append("numbers_in_range")
 
     # Amount check
-    amounts = item.get("amounts") or item.get("amount_per_star") or {}
+    amounts_raw = item.get("amounts") or item.get("amount_per_star") or {}
     star_map = zhu_peng_star_map(item)
-    for star in star_map:
-        if star not in amounts:
-            errors.append(f"Missing amount for star {star}")
-            missing.append(f"amount_star_{star}")
+    amounts = _normalize_star_amounts(amounts_raw, star_map)
+    for star_label in star_map.values():
+        if star_label not in amounts:
+            errors.append(f"Missing amount for star {star_label}")
+            missing.append(f"amount_star_{star_label}")
 
     return {
         "status": "READY_FOR_HUMAN_REVIEW" if not errors else "BLOCKED",
@@ -109,7 +132,7 @@ def zhu_peng_preflight(item: dict[str, Any]) -> dict[str, Any]:
         "missing": missing,
         "columns": columns,
         "amounts": amounts,
-        "star_map": star_map,
+        "star_map": {str(k): v for k, v in star_map.items()},
         "item": item,
     }
 
@@ -128,14 +151,9 @@ def zhu_peng_fill_execute(
     columns = zhu_peng_columns_from_item(item)
     amounts_raw = item.get("amounts") or item.get("amount_per_star") or {}
 
-    # Convert star keys (int or digit-str) to labels via star_map
+    # Normalize star keys (int or digit-str) to labels via star_map
     star_map = zhu_peng_star_map(item)
-    amounts = {}
-    for k, v in amounts_raw.items():
-        label = k
-        if isinstance(k, int) or (isinstance(k, str) and k.isdigit()):
-            label = star_map.get(int(k), k)
-        amounts[str(label)] = int(v)
+    amounts = _normalize_star_amounts(amounts_raw, star_map)
 
     plan = build_zhu_peng_plan({"numbers": columns, "amounts": amounts})
     report = execute_zhu_peng_plan(page, plan)
