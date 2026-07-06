@@ -1,7 +1,7 @@
 """Input 格式邊界測試 v1.
 
 Documentation-only. This file does NOT change parser or preprocessor behavior;
-it records, for a batch of boundary cases (negative amounts, customer
+it records, for a batch of boundary cases (decimal hyphen amounts, customer
 shorthand, suspicious Chinese chars, number range edges, HK prefix), what
 the parser/review does TODAY (locked, so we notice regressions), and what it
 SHOULD do once the corresponding rule lands (``xfail``).
@@ -28,36 +28,49 @@ def status_of(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Section 1 -- 負數小數 amount (README: "小數 hyphen amount 例如
-# 02-03-05-16-20 -0.25" -> Needs Review / Invalid)
+# Section 1 -- Decimal hyphen amount (e.g. 06.13.23.22 -0.25)
+#
+# In this project's input format, "0.25" is a unit (1 unit = 100 元), so
+# "06.13.23.22 -0.25" means a normal 2-3-4 star bet on numbers 6,13,23,22
+# at 0.25 unit = 25 元. The leading "-" here is the standard "numbers then
+# amount" separator, NOT a sign. Parser must keep this path valid; if it
+# ever flips to error or returns money=0.25, that is a regression.
 # ---------------------------------------------------------------------------
 
-# -0.25 走 standalone 0.5 amount branch, 觸發 number=0 不在 range -> error
-#   today. Locks existing safe behavior.
-def test_negative_decimal_amount_standalone_blocked() -> None:
+# Standalone "-0.25" has no numbers prefix, so parser cannot tell whether
+# it is an amount or a number. Today this surfaces as an error (numbers
+# out of range), which is the safe outcome.
+def test_standalone_decimal_amount_without_numbers_blocked() -> None:
     assert status_of("-0.25") == "error"
 
 
-# "06.13.23.22 234.-0.25" hits confirmed_spaced_decimal_hyphen with a
-# negative amount, which parser surfaces as "missing or unclear amount".
-# Locks existing safe behavior.
-def test_negative_decimal_amount_with_star_blocked() -> None:
+# "06.13.23.22 234.-0.25" attaches the negative-decimal amount AFTER a
+# star segment, where the input grammar expects a unit (e.g. 234.0.5 for
+# half a 100-元 unit). The leading "-" on the decimal is ambiguous in this
+# position, so parser surfaces it as an error. Locks existing safe behavior.
+def test_star_prefixed_negative_decimal_amount_blocked() -> None:
     assert status_of("06.13.23.22 234.-0.25") == "error"
 
 
-# 06.13.23.22 -0.25 (hyphen, no star) -- KNOWN BUG: parser currently accepts
-# this as a Valid bet because confirmed_spaced_decimal_hyphen does not
-# reject a leading "-" on the amount. README clearly states this is Needs
-# Review territory. xfail marks the existing unsafe behavior; once the
-# parser gains a signed-amount guard this should XPASS.
-@pytest.mark.xfail(
-    reason="parser accepts '-0.25' as valid money via confirmed_spaced_decimal_hyphen; "
-           "needs a signed-amount guard. See README 'Needs Review' bullet on "
-           "小數 hyphen amount (e.g. 02-03-05-16-20 -0.25).",
-    strict=True,
+@pytest.mark.parametrize(
+    "text, expected_money, expected_unit",
+    [
+        ("06.13.23.22 -0.25", 25, 0.25),  # decimal unit -> 25 元
+        ("06.13.23.22 -0.5", 50, 0.5),    # decimal unit -> 50 元
+        ("06.13.23.22 -100", 100, 1),      # integer unit -> 100 元
+        ("06.13.23.22 -.25", 25, 0.25),    # no leading 0 on the decimal
+    ],
 )
-def test_negative_decimal_amount_hyphen_blocked() -> None:
-    assert status_of("06.13.23.22 -0.25") == "error"
+def test_decimal_hyphen_amount_parses_to_correct_money(
+    text: str, expected_money: int, expected_unit: float
+) -> None:
+    report = build_report(text).to_dict()
+    assert report["status"] == "ok"
+    assert report["type"] == "normal"
+    assert report["numbers"] == [6, 13, 23, 22]
+    assert report["stars"] == [2, 3, 4]
+    assert report["money"] == expected_money
+    assert report["unit"] == expected_unit
 
 
 # ---------------------------------------------------------------------------
