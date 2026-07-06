@@ -219,29 +219,32 @@ def _fast_select_numbers_knockout(page: Any, numbers: list[str]) -> None:
     """Select numbers via knockout.js OnSwitchSel — instant, no DOM click."""
     import json as _json
     nums_json = _json.dumps(numbers)
-    page.evaluate(
+    js = (
         "(function() {"
-        " var f = null;"
-        " for (var wi = 0; wi < window.frames.length; wi++) {"
-        "  try { if (window.frames[wi].location.href.indexOf('/Front/B/B03') >= 0) { f = window.frames[wi]; break; } } catch(e) {}"
-        " }"
-        " if (!f) f = window.frames[2];  // fallback"
-        " var ko = f.ko;"
-        " if (!ko) return;"
-        " var mo = f.Mo;"
-        " var target = " + nums_json + ";"
-        " var tds = f.document.querySelectorAll('td');"
-        " for (var i = 0; i < tds.length; i++) {"
-        "  var txt = (tds[i].textContent || '').trim();"
-        "  if (target.indexOf(txt) >= 0) {"
-        "   var ctx = ko.contextFor(tds[i]);"
-        "   if (ctx && ctx.$data && typeof ctx.$data.HasSeled === 'function' && !ctx.$data.HasSeled()) {"
-        "    mo.OnSwitchSel(ctx.$data, {});"
+        " try {"
+        "  var f = null;"
+        "  for (var wi = 0; wi < window.frames.length; wi++) {"
+        "   try { if (window.frames[wi].location.href.indexOf('/Front/B/B03') >= 0) { f = window.frames[wi]; break; } } catch(e) {}"
+        "  }"
+        "  if (!f) f = window.frames[2];"
+        "  if (!f || !f.ko || !f.Mo) return;"
+        "  var ko = f.ko;"
+        "  var mo = f.Mo;"
+        "  var target = " + nums_json + ";"
+        "  var tds = f.document.querySelectorAll('td');"
+        "  for (var i = 0; i < tds.length; i++) {"
+        "   var txt = (tds[i].textContent || '').trim();"
+        "   if (target.indexOf(txt) >= 0) {"
+        "    var ctx = ko.contextFor(tds[i]);"
+        "    if (ctx && ctx.$data && typeof ctx.$data.HasSeled === 'function' && !ctx.$data.HasSeled()) {"
+        "     mo.OnSwitchSel(ctx.$data, {});"
+        "    }"
         "   }"
         "  }"
-        " }"
+        " } catch(e) { console.log('betguard knockout error:', e); }"
         "})()"
     )
+    page.evaluate(js)
 
 
 def execute_actions_on_page(page: Any, actions: list[dict[str, Any]]) -> list[dict[str, Any]]:

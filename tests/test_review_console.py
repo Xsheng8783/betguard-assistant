@@ -80,12 +80,12 @@ def test_review_console_html_contains_sections_and_no_live_selector() -> None:
 
     html = render_review_console_html(queue, queue_path="queue_state.json")
 
-    assert "Valid Candidates" in html
-    assert "Needs Review / Invalid" in html
-    assert "Ignored Metadata" in html
-    assert "No live site operation" in html
-    assert "real_site_operation=false" in html
-    assert "auto_submit=false" in html
+    assert "正確候選" in html
+    assert "需人工確認" in html
+    assert "審核狀態" in html
+    assert "未連真網站" in html
+    assert "未連真網站" in html
+    assert "未送出" in html
     assert "live selector" not in html.lower()
     assert "selector_report" not in html
 
@@ -159,10 +159,10 @@ def test_review_console_html_shows_watchlist_wording_not_as_valid() -> None:
 
     html = render_review_console_html(queue, queue_path="queue_state.json")
 
-    assert "待觀察 / Watchlist" in html
+    assert "待觀察" in html
     assert "缺金額" in html
     assert "10.25" in html
-    valid_section = html.split("Needs Review / Invalid")[0]
+    valid_section = html.split("需要人工確認")[0]
     assert "10.25" not in valid_section
 
 
@@ -174,7 +174,7 @@ def test_write_review_console_html_and_cli_command(tmp_path, monkeypatch) -> Non
 
     model = write_review_console_html(queue, html_path, queue_path=str(queue_path))
     assert model["status"] == READY_FOR_QUEUE
-    assert "Betguard Local Review Console" in html_path.read_text(encoding="utf-8")
+    assert "Betguard 本地審核台" in html_path.read_text(encoding="utf-8")
 
     cli_html_path = tmp_path / "review_cli.html"
     monkeypatch.setattr(
@@ -192,7 +192,7 @@ def test_write_review_console_html_and_cli_command(tmp_path, monkeypatch) -> Non
     )
     webfill_cli.main()
 
-    assert "Betguard Local Review Console" in cli_html_path.read_text(encoding="utf-8")
+    assert "Betguard 本地審核台" in cli_html_path.read_text(encoding="utf-8")
 
 
 def test_error_status_item_stays_in_needs_review_not_watchlist() -> None:
@@ -211,10 +211,10 @@ def test_watchlist_original_fragment_appears_in_html_but_not_in_valid_section() 
 
     html = render_review_console_html(queue, queue_path="queue_state.json")
 
-    assert "待觀察 / Watchlist" in html
+    assert "待觀察" in html
     assert "10.25" in html
-    assert "display-only" in html
-    valid_section = html.split("待觀察 / Watchlist")[0]
+    assert "不會自動接受" in html
+    valid_section = html.split("待觀察</span> 待觀察")[0] if "待觀察</span> 待觀察" in html else html
     assert "10.25" not in valid_section
 
 

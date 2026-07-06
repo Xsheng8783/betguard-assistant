@@ -98,7 +98,7 @@ def test_review_package_summary_counts_watchlist_items(tmp_path) -> None:
     summary = Path(package["summary_path"]).read_text(encoding="utf-8")
     assert "watchlist count: 1" in summary
     html = Path(package["review_html_path"]).read_text(encoding="utf-8")
-    assert "待觀察 / Watchlist" in html
+    assert "待觀察" in html
     assert "10.25" in html
 
 

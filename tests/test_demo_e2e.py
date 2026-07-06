@@ -45,11 +45,11 @@ def test_generated_review_html_contains_review_sections_and_safety(tmp_path) -> 
     result = run_e2e_demo(out_dir=tmp_path)
     html = Path(result["review_html_path"]).read_text(encoding="utf-8")
 
-    assert "Valid Candidates" in html
-    assert "Needs Review / Invalid" in html
-    assert "No live site operation" in html
-    assert "real_site_operation=false" in html
-    assert "auto_submit=false" in html
+    assert "正確候選" in html
+    assert "需人工確認" in html
+    assert "未連真網站" in html
+    assert "未送出" in html
+    assert "未填寫" in html
     assert "live selector" not in html.lower()
 
 

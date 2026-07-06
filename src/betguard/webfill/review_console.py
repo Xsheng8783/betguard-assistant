@@ -1,9 +1,29 @@
+"""Review console — dashboard layout with wide review cards."""
 from __future__ import annotations
 
 import html
 import json
 from pathlib import Path
 from typing import Any
+
+
+_LABEL_CN: dict[str, str] = {
+    "non_539_candidate": "疑似六合彩 / 港彩",
+    "suspected_non_539_due_to_range": "號碼超出 539，疑似六合彩 / 大樂透",
+    "suspected_tiantianle": "疑似天天樂",
+    "person_name_suffix": "疑似人名或備註",
+    "ambiguous_long_token": "疑似客人唸牌黏住",
+    "per_star_amount_split": "疑似星別金額拆分",
+}
+
+_LABEL_COLOR: dict[str, str] = {
+    "non_539_candidate": "blue",
+    "suspected_non_539_due_to_range": "red",
+    "suspected_tiantianle": "yellow",
+    "person_name_suffix": "purple",
+    "ambiguous_long_token": "purple",
+    "per_star_amount_split": "orange",
+}
 
 
 def build_review_console_model(queue: dict[str, Any], *, queue_path: str | None = None) -> dict[str, Any]:
@@ -64,133 +84,410 @@ def build_review_console_model(queue: dict[str, Any], *, queue_path: str | None 
 def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None = None) -> str:
     model = build_review_console_model(queue, queue_path=queue_path)
     status_class = _status_class(str(model.get("status") or ""))
-    valid_rows = "".join(_candidate_row(item) for item in model["valid_candidates"]) or _empty_row(4, "No valid candidates")
-    watchlist_rows = "".join(_watchlist_row(item) for item in model["watchlist"]) or _empty_row(4, "No watchlist items")
-    invalid_rows = "".join(_invalid_row(item) for item in model["invalid_fragments"]) or _empty_row(4, "No invalid or error fragments")
+
+    # Build cards
+    invalid_cards = "".join(_review_card(item, "invalid") for item in model["invalid_fragments"])
+    if not invalid_cards:
+        invalid_cards = '<div class="empty-block">目前沒有需要人工確認的項目</div>'
+
+    watchlist_cards = "".join(_review_card(item, "watch") for item in model["watchlist"])
+    if not watchlist_cards:
+        watchlist_cards = '<div class="empty-block">目前沒有待觀察項目</div>'
+
+    valid_rows = "".join(_candidate_row(item) for item in model["valid_candidates"])
+    if not valid_rows:
+        valid_rows = '<div class="empty-block">目前沒有正確候選</div>'
+
     metadata_rows = "".join(
         f"<li>{_e(str(item.get('raw', item)))}</li>" for item in model["ignored_metadata_lines"][:8]
-    ) or "<li>None</li>"
+    ) or "<li>無</li>"
     current = model["queue_view"]["current_item"]
     current_html = _current_item_html(current)
     last_mock_html = _last_mock_html(model["queue_view"].get("last_mock_result"))
-    actions_html = "".join(f"<li><code>{_e(action)}</code></li>" for action in model["actions"]) or "<li>No action available</li>"
-    safety = model["safety"]
+    actions_html = "".join(f"<li><code>{_e(action)}</code></li>" for action in model["actions"]) or "<li>無可用指令</li>"
     audit = model["audit"]
     source_json = _e(json.dumps(model, ensure_ascii=False, indent=2))
+
+    # Compute label category counts
+    _all_review_items = model["invalid_fragments"] + model["watchlist"]
+    _label_counts: dict[str, int] = {}
+    for item in _all_review_items:
+        for lb in item.get("review_labels", []):
+            _label_counts[lb] = _label_counts.get(lb, 0) + 1
+
+    _label_count_html_parts = []
+    for lb_key in ("non_539_candidate", "suspected_non_539_due_to_range", "suspected_tiantianle",
+                   "person_name_suffix", "ambiguous_long_token", "per_star_amount_split"):
+        cnt = _label_counts.get(lb_key, 0)
+        cn = _LABEL_CN.get(lb_key, lb_key)
+        color = _LABEL_COLOR.get(lb_key, "slate")
+        short = cn.replace("疑似", "").replace("號碼超出 539，", "")
+        _label_count_html_parts.append(
+            f'<span class="label-count" data-filter="{lb_key}">'
+            f'<span class="label-badge {color}">{cn}</span>'
+            f'<strong style="font-size:14px;margin-left:4px">{cnt}</strong>'
+            f'</span>'
+        )
+    _label_count_html = " ".join(_label_count_html_parts)
 
     return f"""<!doctype html>
 <html lang="zh-Hant">
 <head>
   <meta charset="utf-8">
-  <title>Betguard Local Review Console</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Betguard 本地審核台</title>
   <style>
-    body {{ font-family: Arial, "Microsoft JhengHei", sans-serif; margin: 24px; color: #17202a; background: #f6f7f9; }}
-    h1 {{ margin-bottom: 4px; }}
-    h2 {{ margin-top: 0; }}
-    .grid {{ display: grid; grid-template-columns: 1.15fr 1fr; gap: 16px; align-items: start; }}
-    .card {{ background: #fff; border: 1px solid #d8dee8; border-radius: 8px; padding: 16px; margin-bottom: 16px; }}
-    .status {{ border-left: 8px solid #98a2b3; }}
-    .status.ready {{ border-left-color: #198754; }}
-    .status.review {{ border-left-color: #f59f00; }}
-    .status.blocked {{ border-left-color: #dc3545; }}
-    .metrics {{ display: grid; grid-template-columns: repeat(6, minmax(90px, 1fr)); gap: 8px; }}
-    .metric {{ background: #f1f4f8; border-radius: 6px; padding: 10px; }}
-    .metric strong {{ display: block; font-size: 22px; }}
-    .card.watch {{ border-left: 8px solid #f59f00; }}
-    table {{ width: 100%; border-collapse: collapse; }}
-    th, td {{ border-bottom: 1px solid #e7ebf0; padding: 8px; text-align: left; vertical-align: top; }}
-    th {{ background: #f7f9fb; }}
-    code, pre {{ background: #eef2f6; border-radius: 4px; padding: 2px 4px; }}
-    pre {{ padding: 12px; overflow: auto; max-height: 360px; }}
-    .badge {{ display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: bold; color: #fff; }}
-    .badge.valid {{ background: #198754; }}
-    .badge.watch {{ background: #f59f00; }}
-    .badge.invalid {{ background: #dc3545; }}
-    .safe {{ color: #087f5b; font-weight: bold; }}
-    .danger {{ color: #c92a2a; font-weight: bold; }}
+    :root {{
+      --green: #059669; --green-bg: #ecfdf5; --green-border: #a7f3d0;
+      --yellow: #d97706; --yellow-bg: #fffbeb; --yellow-border: #fde68a;
+      --red: #dc2626; --red-bg: #fef2f2; --red-border: #fecaca;
+      --blue: #2563eb; --blue-bg: #eff6ff; --blue-border: #bfdbfe;
+      --purple: #7c3aed; --purple-bg: #f5f3ff; --purple-border: #c4b5fd;
+      --orange: #ea580c; --orange-bg: #fff7ed; --orange-border: #fed7aa;
+      --slate: #64748b; --slate-dark: #334155; --slate-light: #f1f5f9;
+      --white: #ffffff; --radius: 12px;
+    }}
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+      font-family: "Microsoft JhengHei", "Segoe UI", Arial, sans-serif;
+      background: #f0f4f8; color: #1e293b; line-height: 1.6;
+      padding: 28px; max-width: 1500px; margin: 0 auto;
+    }}
+
+    .page-header {{
+      display: flex; justify-content: space-between; align-items: flex-start;
+      margin-bottom: 24px;
+    }}
+    .page-header h1 {{ font-size: 22px; font-weight: 700; }}
+    .page-header .subtitle {{ color: var(--slate); font-size: 12px; margin-top: 2px; }}
+    .page-header .mode-tag {{
+      font-size: 11px; color: var(--slate); background: #e2e8f0;
+      padding: 3px 12px; border-radius: 10px; font-weight: 500;
+    }}
+
+    .top-row {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }}
+    .bottom-row {{ display: grid; grid-template-columns: 25fr 75fr; gap: 20px; margin-bottom: 20px; min-height: 400px; }}
+    .full-row {{ margin-bottom: 20px; }}
+
+    .card {{
+      background: var(--white); border: 1px solid #e2e8f0; border-radius: var(--radius);
+      padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+    }}
+    .card h2 {{ font-size: 14px; font-weight: 600; margin-bottom: 14px; }}
+
+    .filter-bar {{ display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }}
+    .search-box {{
+      width: 100%; padding: 12px 16px; border: 2px solid #e2e8f0; border-radius: 10px;
+      font-size: 15px; font-family: inherit; outline: none; background: #f8fafc;
+    }}
+    .search-box:focus {{ border-color: var(--blue); box-shadow: 0 0 0 2px rgba(37,99,235,0.1); }}
+    .filter-chips {{ display: flex; flex-wrap: wrap; gap: 6px; }}
+    .chip {{
+      display: inline-block; padding: 5px 14px; border-radius: 16px;
+      font-size: 12px; font-weight: 500; cursor: pointer; background: #f1f5f9;
+      color: var(--slate-dark); border: 1px solid #e2e8f0;
+      transition: all 0.15s;
+    }}
+    .chip:hover {{ background: #e2e8f0; }}
+    .chip.active {{ background: var(--red); color: #fff; border-color: var(--red); }}
+    .review-card.hidden {{ display: none; }}
+    .label-count {{ display: inline-flex; align-items: center; gap: 2px; cursor: pointer; opacity: 0.7; transition: opacity 0.15s; }}
+    .label-count:hover {{ opacity: 1; }}
+
+    .stats-grid {{ display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; }}
+    .stat-card {{
+      background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px;
+      padding: 14px 10px; text-align: center; font-size: 12px; color: var(--slate);
+      transition: transform 0.1s;
+    }}
+    .stat-card:hover {{ transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.06); }}
+    .stat-card strong {{ display: block; font-size: 32px; font-weight: 700; color: #0f172a; margin-top: 4px; }}
+    .stat-card.valid {{ border-color: var(--green-border); }} .stat-card.valid strong {{ color: var(--green); }}
+    .stat-card.watch {{ border-color: var(--yellow-border); }} .stat-card.watch strong {{ color: var(--yellow); }}
+    .stat-card.invalid {{ border-color: var(--red-border); }} .stat-card.invalid strong {{ color: var(--red); }}
+
+    .safety-card {{
+      background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);
+      border: 1px solid #86efac; border-radius: var(--radius); padding: 18px 22px;
+    }}
+    .safety-card h2 {{ color: #166534; }}
+    .safety-card ul {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; list-style: none; }}
+    .safety-card li {{ color: #166534; font-size: 12px; font-weight: 500; }}
+
+    /* Review cards - WIDE horizontal */
+    .card-list {{ display: flex; flex-direction: column; gap: 16px; }}
+    .review-card {{
+      display: grid; grid-template-columns: 6px 1fr auto;
+      background: var(--white); border-radius: 12px; overflow: hidden;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+      transition: box-shadow 0.15s;
+      min-height: 90px;
+    }}
+    .review-card:hover {{ box-shadow: 0 2px 12px rgba(0,0,0,0.08); }}
+    .review-card .card-bar {{
+      width: 6px; min-height: 100%;
+    }}
+    .review-card .card-bar.blue {{ background: var(--blue); }}
+    .review-card .card-bar.red {{ background: var(--red); }}
+    .review-card .card-bar.yellow {{ background: var(--yellow); }}
+    .review-card .card-bar.purple {{ background: var(--purple); }}
+    .review-card .card-bar.orange {{ background: var(--orange); }}
+    .review-card .card-bar.watch {{ background: var(--yellow); }}
+    .review-card .card-bar.invalid {{ background: var(--red); }}
+
+    .review-card .card-body {{
+      padding: 18px 24px; display: flex; flex-direction: column; gap: 10px;
+    }}
+    .card-meta {{ display: flex; align-items: center; gap: 10px; }}
+    .card-meta .card-idx {{ font-size: 12px; font-weight: 600; color: var(--slate); }}
+    .card-meta .card-line {{ font-size: 11px; color: var(--slate); background: #f1f5f9; padding: 2px 8px; border-radius: 8px; }}
+    .review-card .card-fragment {{
+      font-size: 28px; font-weight: 800; color: #0f172a; line-height: 1.3;
+      word-break: break-word; letter-spacing: 0.5px;
+    }}
+    .review-card .card-labels {{ display: flex; flex-wrap: wrap; gap: 4px; }}
+    .review-card .card-en-label {{
+      font-size: 11px; color: #94a3b8; margin-top: 4px;
+    }}
+
+    .review-card .card-right {{
+      padding: 18px 20px; display: flex; flex-direction: column;
+      align-items: flex-end; justify-content: center; gap: 10px;
+      border-left: 1px solid #f1f5f9; min-width: 120px;
+    }}
+    .review-card .card-status {{
+      font-size: 13px; font-weight: 600; padding: 5px 14px; border-radius: 14px;
+    }}
+    .review-card .card-status.invalid {{ background: var(--red-bg); color: var(--red); border: 1px solid var(--red-border); }}
+    .review-card .card-status.watch {{ background: var(--yellow-bg); color: var(--yellow); border: 1px solid var(--yellow-border); }}
+
+    .review-card .card-details {{
+      margin-top: 8px; font-size: 12px; grid-column: 2 / -1; padding: 0 24px 14px;
+    }}
+    .review-card .card-details summary {{
+      color: var(--slate); cursor: pointer; font-size: 12px; font-weight: 500;
+    }}
+    .review-card .card-details div {{
+      margin: 4px 0; padding-left: 12px; border-left: 2px solid #e2e8f0;
+      font-size: 12px; color: var(--slate);
+    }}
+
+    .label-badge {{
+      display: inline-block; padding: 6px 18px; border-radius: 16px; font-size: 15px;
+      color: #fff; font-weight: 600; letter-spacing: 0.3px;
+    }}
+    .label-badge.blue {{ background: var(--blue); }}
+    .label-badge.red {{ background: var(--red); }}
+    .label-badge.yellow {{ background: var(--yellow); }}
+    .label-badge.purple {{ background: var(--purple); }}
+    .label-badge.orange {{ background: var(--orange); }}
+
+    .badge {{
+      display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px;
+      border-radius: 20px; font-size: 11px; font-weight: 600; color: #fff;
+    }}
+    .badge.valid {{ background: var(--green); }}
+    .badge.watch {{ background: var(--yellow); }}
+    .badge.invalid {{ background: var(--red); }}
+
+    .empty-block {{
+      text-align: center; color: var(--slate); padding: 40px 20px;
+      font-size: 14px; border: 1px dashed #e2e8f0; border-radius: var(--radius);
+    }}
+
+    table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
+    th {{
+      background: #f8fafc; font-weight: 600; color: var(--slate-dark); font-size: 11px;
+      padding: 10px 8px; border-bottom: 2px solid #e2e8f0; text-align: left;
+    }}
+    td {{ padding: 8px; border-bottom: 1px solid #f1f5f9; vertical-align: top; }}
+    tr:hover td {{ background: #f8fafc; }}
+
+    pre {{
+      background: #1e293b; color: #e2e8f0; border-radius: 8px; padding: 16px;
+      overflow: auto; max-height: 400px; font-size: 11px; font-family: "Consolas", monospace;
+    }}
+    code {{ background: #f1f5f9; border-radius: 3px; padding: 1px 5px; font-size: 11px; }}
+    ul {{ padding-left: 20px; }} li {{ margin-bottom: 4px; }}
+    .danger {{ color: var(--red); font-weight: 600; }}
+    .empty {{ color: var(--slate); font-style: italic; }}
+
+    @media (max-width: 1100px) {{
+      .bottom-row {{ grid-template-columns: 1fr; }}
+      .top-row {{ grid-template-columns: 1fr; }}
+      .safety-card ul {{ grid-template-columns: repeat(2, 1fr); }}
+    }}
+    @media (max-width: 700px) {{
+      body {{ padding: 12px; }}
+      .stats-grid {{ grid-template-columns: repeat(3, 1fr); }}
+      .safety-card ul {{ grid-template-columns: 1fr; }}
+    }}
   </style>
 </head>
 <body>
-  <h1>Betguard Local Review Console</h1>
-  <p>Paste review, accept/reject, mock-next planning, and audit export. <strong>No live site operation.</strong></p>
-
-  <section class="card status {status_class}">
-    <h2>Queue Status: {_e(str(model.get("status")))}</h2>
-    <div class="metrics">
-      <div class="metric">Candidates<strong>{model["preprocessing"]["candidate_count"]}</strong></div>
-      <div class="metric">Valid<strong>{model["preprocessing"]["valid_count"]}</strong></div>
-      <div class="metric">待觀察 Watchlist<strong>{model["preprocessing"]["watchlist_count"]}</strong></div>
-      <div class="metric">Needs Review / Invalid<strong>{model["preprocessing"]["needs_review_count"]}</strong></div>
-      <div class="metric">Warnings<strong>{model["preprocessing"]["warnings_count"]}</strong></div>
-      <div class="metric">Ignored Metadata<strong>{model["preprocessing"]["ignored_metadata_count"]}</strong></div>
+  <div class="page-header">
+    <div>
+      <h1>🛡️ Betguard 本地審核台</h1>
+      <p class="subtitle">僅供本地審核 — 不合格項目不會進入 approved_fill_queue</p>
     </div>
-  </section>
-
-  <div class="grid">
-    <section class="card">
-      <h2><span class="badge valid">Valid</span> Valid Candidates</h2>
-      <table><thead><tr><th>#</th><th>Original Fragment</th><th>Summary</th><th>Type</th></tr></thead><tbody>{valid_rows}</tbody></table>
-    </section>
-    <section class="card">
-      <h2><span class="badge invalid">Invalid</span> Needs Review / Invalid</h2>
-      <table><thead><tr><th>#</th><th>Original Fragment</th><th>Parsed Summary</th><th>Reason</th></tr></thead><tbody>{invalid_rows}</tbody></table>
-    </section>
+    <span class="mode-tag">僅本機模式</span>
   </div>
 
-  <section class="card watch">
-    <h2><span class="badge watch">待觀察</span> 待觀察 / Watchlist</h2>
-    <p>需人工判斷的不確定項目。<strong>display-only；不會自動接受，不會進入 approved_fill_queue、fill-preview 或 mock-fill。</strong></p>
-    <table><thead><tr><th>#</th><th>Original Fragment</th><th>Parsed Summary</th><th>Reason</th></tr></thead><tbody>{watchlist_rows}</tbody></table>
-  </section>
-
-  <div class="grid">
+  <div class="top-row">
     <section class="card">
-      <h2>Queue View</h2>
-      <p><strong>Status:</strong> {_e(str(model["queue_view"]["status"]))}</p>
-      <p><strong>Current index:</strong> {_e(str(model["queue_view"]["current_index"]))} / {_e(str(model["queue_view"]["item_count"]))}</p>
-      {current_html}
-      {last_mock_html}
+      <h2>📊 審核狀態</h2>
+      <div class="stats-grid">
+        <div class="stat-card">總筆數<strong>{model["preprocessing"]["candidate_count"]}</strong></div>
+        <div class="stat-card valid">正確<strong>{model["preprocessing"]["valid_count"]}</strong></div>
+        <div class="stat-card watch">待觀察<strong>{model["preprocessing"]["watchlist_count"]}</strong></div>
+        <div class="stat-card invalid">需人工確認<strong>{model["preprocessing"]["needs_review_count"]}</strong></div>
+        <div class="stat-card">警告<strong>{model["preprocessing"]["warnings_count"]}</strong></div>
+        <div class="stat-card">已忽略<strong>{model["preprocessing"]["ignored_metadata_count"]}</strong></div>
+      </div>
     </section>
-    <section class="card">
-      <h2>Actions</h2>
-      <p>Run these commands manually. This report does not execute actions.</p>
-      <ul>{actions_html}</ul>
-    </section>
-  </div>
-
-  <div class="grid">
-    <section class="card">
-      <h2>Ignored Metadata</h2>
-      <ul>{metadata_rows}</ul>
-    </section>
-    <section class="card">
-      <h2>Safety</h2>
-      <p class="safe">No live site operation</p>
+    <section class="safety-card">
+      <h2>🔒 安全狀態</h2>
       <ul>
-        <li>real_site_operation={str(safety["real_site_operation"]).lower()}</li>
-        <li>auto_submit={str(safety["auto_submit"]).lower()}</li>
-        <li>danger_buttons_clicked={_e(str(safety["danger_buttons_clicked"]))}</li>
+        <li>✅ 未連真網站</li>
+        <li>✅ 未點擊</li>
+        <li>✅ 未填寫</li>
+        <li>✅ 未送出</li>
+        <li>✅ 不合格項目不進 approved_fill_queue</li>
+        <li>✅ 每筆仍需人工確認</li>
       </ul>
     </section>
   </div>
 
-  <section class="card">
-    <h2>Audit Summary</h2>
-    <ul>
-      <li>batch_id: {_e(str(audit.get("batch_id")))}</li>
-      <li>created_at: {_e(str(audit.get("created_at")))}</li>
-      <li>review_action: {_e(str(audit.get("review_action")))}</li>
-      <li>invalid_fragments_count: {_e(str(audit.get("invalid_fragments_count")))}</li>
-    </ul>
+  <div class="bottom-row">
+    <section class="card" style="border-left: 4px solid var(--green);">
+      <h2><span class="badge valid">✅ 正確</span> 正確候選</h2>
+      <div style="overflow-x:auto"><table><thead><tr><th>#</th><th>原始片段</th><th>摘要</th><th>類型</th></tr></thead><tbody>{valid_rows}</tbody></table></div>
+    </section>
+    <section class="card" style="border-left: 4px solid var(--red);">
+      <h2><span class="badge invalid">❌ 需確認</span> 需要人工確認</h2>
+      <div class="filter-bar">
+        <input type="text" class="search-box" placeholder="搜尋原文、號碼、分類..." oninput="filterCards()">
+        <div class="filter-chips">
+          <span class="chip active" data-filter="all" onclick="setFilter('all')">全部 {model["preprocessing"]["needs_review_count"] + model["preprocessing"]["watchlist_count"]}</span>
+          <span class="chip" data-filter="non_539_candidate" onclick="setFilter('non_539_candidate')">疑似六合彩 {_label_counts.get("non_539_candidate", 0)}</span>
+          <span class="chip" data-filter="suspected_non_539_due_to_range" onclick="setFilter('suspected_non_539_due_to_range')">超出 539 {_label_counts.get("suspected_non_539_due_to_range", 0)}</span>
+          <span class="chip" data-filter="suspected_tiantianle" onclick="setFilter('suspected_tiantianle')">疑似天天樂 {_label_counts.get("suspected_tiantianle", 0)}</span>
+          <span class="chip" data-filter="person_name_suffix" onclick="setFilter('person_name_suffix')">人名備註 {_label_counts.get("person_name_suffix", 0)}</span>
+          <span class="chip" data-filter="ambiguous_long_token" onclick="setFilter('ambiguous_long_token')">唸牌黏住 {_label_counts.get("ambiguous_long_token", 0)}</span>
+          <span class="chip" data-filter="per_star_amount_split" onclick="setFilter('per_star_amount_split')">星別金額 {_label_counts.get("per_star_amount_split", 0)}</span>
+        </div>
+      </div>
+      <div class="label-counts" style="margin:10px 0;display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+        {_label_count_html}
+      </div>
+      <div class="card-list" id="review-cards">{invalid_cards}</div>
+    </section>
+  </div>
+
+  <section class="card full-row" style="border-left: 4px solid var(--yellow);">
+    <h2><span class="badge watch">⚠️ 待觀察</span> 待觀察</h2>
+    <p style="font-size:12px;color:var(--yellow);margin-bottom:12px">需人工判斷。不會自動接受。</p>
+    <div class="card-list">{watchlist_cards}</div>
   </section>
 
-  <section class="card">
-    <h2>Console Data</h2>
+  <div class="top-row">
+    <section class="card">
+      <h2>📋 佇列</h2>
+      <p><strong>狀態：</strong> {_e(str(model["queue_view"]["status"]))}</p>
+      <p><strong>進度：</strong> {_e(str(model["queue_view"]["current_index"]))} / {_e(str(model["queue_view"]["item_count"]))}</p>
+      {current_html}{last_mock_html}
+    </section>
+    <section class="card">
+      <h2>⚡ 指令 / 摘要</h2>
+      <p style="font-size:12px;color:var(--slate);margin-bottom:8px">手動執行，本報告不執行任何操作。</p>
+      <ul style="font-size:11px">{actions_html}</ul>
+      <hr style="margin:12px 0;border-color:#e2e8f0">
+      <ul style="font-size:11px">
+        <li>批次：{_e(str(audit.get("batch_id")))}</li>
+        <li>時間：{_e(str(audit.get("created_at")))}</li>
+        <li>錯誤：{_e(str(audit.get("invalid_fragments_count")))}</li>
+      </ul>
+    </section>
+  </div>
+
+  <section class="card full-row">
+    <h2>📄 原始資料 (JSON)</h2>
     <pre>{source_json}</pre>
   </section>
+<script>
+  var currentFilter = 'all';
+  function setFilter(f) {{
+    currentFilter = f;
+    document.querySelectorAll('.filter-chips .chip').forEach(function(c) {{
+      c.classList.toggle('active', c.dataset.filter === f);
+    }});
+    filterCards();
+  }}
+  function filterCards() {{
+    var q = (document.querySelector('.search-box') || {{}}).value || '';
+    q = q.toLowerCase();
+    var cards = document.querySelectorAll('#review-cards .review-card');
+    cards.forEach(function(card) {{
+      var labels = (card.dataset.labels || '').toLowerCase();
+      var frag = (card.dataset.fragment || '').toLowerCase();
+      var matchFilter = currentFilter === 'all' || labels.indexOf(currentFilter) >= 0;
+      var matchSearch = !q || frag.indexOf(q) >= 0 || labels.indexOf(q) >= 0;
+      card.classList.toggle('hidden', !(matchFilter && matchSearch));
+    }});
+  }}
+  document.querySelector('.search-box').addEventListener('input', filterCards);
+</script>
 </body>
 </html>
 """
+
+
+def _review_card(item: dict[str, Any], kind: str) -> str:
+    labels = item.get("review_labels", [])
+    label_spans = []
+    bar_color = kind
+    for lb in labels:
+        cn = _LABEL_CN.get(lb, lb)
+        color = _LABEL_COLOR.get(lb, "slate")
+        if kind == "invalid":
+            bar_color = color if color != "slate" else kind
+        label_spans.append(f'<span class="label-badge {color}">{_e(cn)}</span>')
+    label_html = " ".join(label_spans) if label_spans else '<span class="empty">無分類標籤</span>'
+
+    en_label_text = ", ".join(labels) if labels else "無"
+
+    if kind == "invalid":
+        errors = item.get("errors", [])
+        status_cn = "需要人工確認" if errors else "需人工判斷"
+    else:
+        status_cn = "待觀察"
+
+    fragment = _e(str(item.get("original_fragment", "")))
+    idx = _e(str(item.get("index", "")))
+    parsed = _e(str(item.get("parsed_summary", "")))
+    reason = _e(str(item.get("reason", "")))
+
+    lb_attr = " ".join(labels) if labels else ""
+    line_no = item.get("line_no", "")
+    line_tag = f'<span class="card-line">第 {line_no} 行</span>' if line_no else ""
+    return (
+        f"<div class='review-card' data-labels='{lb_attr}' data-fragment='{fragment}'>"
+        f"<div class='card-bar {bar_color}'></div>"
+        f"<div class='card-body'>"
+        f"<div class='card-meta'><span class='card-idx'>#{idx}</span>{line_tag}</div>"
+        f"<div class='card-fragment'>{fragment}</div>"
+        f"<div class='card-labels'>{label_html}</div>"
+        f"<div class='card-en-label'>{en_label_text}</div>"
+        f"</div>"
+        f"<div class='card-right'>"
+        f"<span class='card-status {kind}'>{status_cn}</span>"
+        f"<details class='card-details' style='margin-top:0'><summary>技術原因</summary>"
+        f"<div style='text-align:left'><strong>解析：</strong>{parsed}</div>"
+        f"<div style='text-align:left'><strong>原因：</strong>{reason}</div>"
+        f"</details>"
+        f"</div>"
+        f"</div>"
+    )
 
 
 def write_review_console_html(queue: dict[str, Any], path: str | Path, *, queue_path: str | None = None) -> dict[str, Any]:
@@ -200,32 +497,24 @@ def write_review_console_html(queue: dict[str, Any], path: str | Path, *, queue_
 
 
 def format_pretty_review_console(model: dict[str, Any]) -> str:
-    preprocessing = model.get("preprocessing", {})
-    queue_view = model.get("queue_view", {})
-    safety = model.get("safety", {})
-    lines = [
-        "Local Review Console",
-        "",
-        f"Status: {model.get('status')}",
-        "",
+    p = model.get("preprocessing", {})
+    qv = model.get("queue_view", {})
+    s = model.get("safety", {})
+    return "\n".join([
+        "Local Review Console", "", f"Status: {model.get('status')}", "",
         "Preprocessing:",
-        f"- candidates: {preprocessing.get('candidate_count', 0)}",
-        f"- valid: {preprocessing.get('valid_count', 0)}",
-        f"- watchlist: {preprocessing.get('watchlist_count', 0)}",
-        f"- invalid/review: {preprocessing.get('invalid_count', 0)}",
-        f"- ignored metadata: {preprocessing.get('ignored_metadata_count', 0)}",
-        "",
-        "Queue:",
-        f"- status: {queue_view.get('status')}",
-        f"- current index: {queue_view.get('current_index')} / {queue_view.get('item_count')}",
-        "",
+        f"- candidates: {p.get('candidate_count', 0)}",
+        f"- valid: {p.get('valid_count', 0)}",
+        f"- watchlist: {p.get('watchlist_count', 0)}",
+        f"- invalid/review: {p.get('invalid_count', 0)}",
+        f"- ignored: {p.get('ignored_metadata_count', 0)}", "",
+        "Queue:", f"- status: {qv.get('status')}",
+        f"- current: {qv.get('current_index')} / {qv.get('item_count')}", "",
         "Safety:",
-        f"- real_site_operation: {str(safety.get('real_site_operation')).lower()}",
-        f"- auto_submit: {str(safety.get('auto_submit')).lower()}",
-        f"- danger_buttons_clicked: {safety.get('danger_buttons_clicked')}",
+        f"- real_site: {str(s.get('real_site_operation')).lower()}",
+        f"- auto_submit: {str(s.get('auto_submit')).lower()}",
         "- No live site operation",
-    ]
-    return "\n".join(lines)
+    ])
 
 
 def _actions(queue: dict[str, Any], queue_path: str | None) -> list[str]:
@@ -254,32 +543,6 @@ def _candidate_row(item: dict[str, Any]) -> str:
     )
 
 
-def _invalid_row(item: dict[str, Any]) -> str:
-    return (
-        "<tr>"
-        f"<td>{_e(str(item.get('index')))}</td>"
-        f"<td>{_e(str(item.get('original_fragment')))}</td>"
-        f"<td>{_e(str(item.get('parsed_summary')))}</td>"
-        f"<td>{_e(str(item.get('reason')))}</td>"
-        "</tr>"
-    )
-
-
-def _watchlist_row(item: dict[str, Any]) -> str:
-    return (
-        "<tr>"
-        f"<td>{_e(str(item.get('index')))}</td>"
-        f"<td>{_e(str(item.get('original_fragment')))}</td>"
-        f"<td>{_e(str(item.get('parsed_summary')))}</td>"
-        f"<td>{_e(str(item.get('reason')))}</td>"
-        "</tr>"
-    )
-
-
-def _empty_row(colspan: int, text: str) -> str:
-    return f"<tr><td colspan=\"{colspan}\">{_e(text)}</td></tr>"
-
-
 def _current_item_html(item: dict[str, Any] | None) -> str:
     if not item:
         return "<p>No current item.</p>"
@@ -296,13 +559,11 @@ def _current_item_html(item: dict[str, Any] | None) -> str:
 
 def _last_mock_html(mock: dict[str, Any] | None) -> str:
     if not mock:
-        return "<h3>Last Mock Result</h3><p>None</p>"
+        return ""
     return (
         "<h3>Last Mock Result</h3>"
-        f"<p>selected_numbers: {_e(str(mock.get('selected_numbers', [])))}</p>"
-        f"<p>selected_columns: {_e(str(mock.get('selected_columns', [])))}</p>"
-        f"<p>selected_car_number: {_e(str(mock.get('selected_car_number')))}</p>"
-        f"<p>filled_amounts: {_e(str(mock.get('filled_amounts', {})))}</p>"
+        f"<p>numbers: {_e(str(mock.get('selected_numbers', [])))}</p>"
+        f"<p>amounts: {_e(str(mock.get('filled_amounts', {})))}</p>"
     )
 
 
@@ -310,8 +571,7 @@ def _item_view(item: dict[str, Any] | None) -> dict[str, Any] | None:
     if not item:
         return None
     return {
-        "index": item.get("index"),
-        "status": item.get("status"),
+        "index": item.get("index"), "status": item.get("status"),
         "original_fragment": item.get("original_fragment") or item.get("original"),
         "parsed_summary": item.get("parsed_summary", ""),
         "bet_type": item.get("bet_type") or item.get("review_result", {}).get("type"),
@@ -345,17 +605,8 @@ def _last_mock_result(queue: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _safety_view(queue: dict[str, Any]) -> dict[str, Any]:
-    clicked = [
-        click
-        for item in queue.get("items", [])
-        for click in item.get("danger_buttons_clicked", [])
-    ]
-    return {
-        "real_site_operation": False,
-        "auto_submit": False,
-        "danger_buttons_clicked": clicked,
-        "no_live_site_operation": True,
-    }
+    clicked = [click for item in queue.get("items", []) for click in item.get("danger_buttons_clicked", [])]
+    return {"real_site_operation": False, "auto_submit": False, "danger_buttons_clicked": clicked, "no_live_site_operation": True}
 
 
 def _reason_text(item: dict[str, Any]) -> str:
@@ -374,16 +625,10 @@ def _fragment_status(item: dict[str, Any]) -> str:
 
 
 def _parsed_amount_view(result: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "money": result.get("money"),
-        "unit": result.get("unit"),
-        "car_units": result.get("car_units"),
-        "number": result.get("number"),
-    }
+    return {"money": result.get("money"), "unit": result.get("unit"), "car_units": result.get("car_units"), "number": result.get("number")}
 
 
 def _extract_review_labels(item: dict[str, Any]) -> list[str]:
-    """Extract review_label: prefixed classification labels from preprocessing_notes."""
     notes = item.get("preprocessing_notes", [])
     if not isinstance(notes, list):
         notes = []
@@ -397,16 +642,11 @@ def _extract_review_labels(item: dict[str, Any]) -> list[str]:
 def _watchlist_entry(item: dict[str, Any]) -> dict[str, Any]:
     result = item.get("result", {})
     entry = {
-        "index": item.get("index"),
-        "original_fragment": item.get("original_fragment") or item.get("raw"),
-        "parsed_summary": item.get("summary", ""),
-        "bet_type": result.get("type"),
-        "numbers": list(result.get("numbers", [])),
-        "stars": list(result.get("stars", [])),
-        "reason": _watchlist_reason(item),
-        "warnings": list(item.get("warnings", [])),
-        "is_missing_money": _is_missing_money_only(item),
-        "accepted_automatically": False,
+        "index": item.get("index"), "original_fragment": item.get("original_fragment") or item.get("raw"),
+        "parsed_summary": item.get("summary", ""), "bet_type": result.get("type"),
+        "numbers": list(result.get("numbers", [])), "stars": list(result.get("stars", [])),
+        "reason": _watchlist_reason(item), "warnings": list(item.get("warnings", [])),
+        "is_missing_money": _is_missing_money_only(item), "accepted_automatically": False,
         "review_labels": _extract_review_labels(item),
     }
     entry.update(_parsed_amount_view(result))
@@ -416,25 +656,20 @@ def _watchlist_entry(item: dict[str, Any]) -> dict[str, Any]:
 def _invalid_entry(item: dict[str, Any]) -> dict[str, Any]:
     result = item.get("result", {})
     return {
-        "index": item.get("index"),
-        "original_fragment": item.get("original_fragment") or item.get("raw"),
-        "parsed_summary": item.get("summary", ""),
-        "numbers": list(result.get("numbers", [])),
-        "stars": list(result.get("stars", [])),
-        "reason": _reason_text(item),
-        "warnings": list(item.get("warnings", [])),
-        "errors": list(item.get("errors", [])),
-        "is_missing_money": _is_missing_money_only(item),
-        "review_labels": _extract_review_labels(item),
+        "index": item.get("index"), "original_fragment": item.get("original_fragment") or item.get("raw"),
+        "parsed_summary": item.get("summary", ""), "numbers": list(result.get("numbers", [])),
+        "stars": list(result.get("stars", [])), "reason": _reason_text(item),
+        "warnings": list(item.get("warnings", [])), "errors": list(item.get("errors", [])),
+        "is_missing_money": _is_missing_money_only(item), "review_labels": _extract_review_labels(item),
     }
 
 
 def _watchlist_reason(item: dict[str, Any]) -> str:
     if _is_missing_money_only(item):
-        return "待觀察 / Watchlist: 缺金額，需人工補 (missing money)"
+        return "待觀察: 缺金額，需人工補"
     reasons = list(item.get("warnings", []))
     joined = "; ".join(str(reason) for reason in reasons)
-    return f"待觀察 / Watchlist: {joined}" if joined else "待觀察 / Watchlist: 需人工判斷"
+    return f"待觀察: {joined}" if joined else "待觀察: 需人工判斷"
 
 
 def _status_class(status: str) -> str:
