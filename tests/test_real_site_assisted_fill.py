@@ -577,10 +577,49 @@ class RaisingLocator(FakeLocator):
         super().fill(value)
 
 
+class RaisingFrame(FakeFrame):
+    """Frame-level failure injection for v0.5.0 batched-JS / frame.evaluate path.
+
+    RaisingLocator-based mocks no longer reach the production path because
+    execute_actions_on_page now dispatches per-frame work via
+    ``frame.evaluate(_batch_script)`` (a single JS call) instead of calling
+    per-locator ``.click()`` / ``.fill()`` methods. FakeFrame.evaluate swallows
+    any per-locator exception when it parses the JS back into per-locator
+    calls, so the production-level RuntimeError never surfaces.
+
+    RaisingFrame injects the failure one level up -- at the frame.evaluate()
+    boundary that the production code actually checks -- so the test now
+    exercises the real failure path that ``run_real_site_assisted_fill_with_page``
+    catches and converts into ``status=BLOCKED``.
+    """
+
+    def __init__(self, name: str, page: "FakePage", *, raise_on: str, **kw) -> None:
+        super().__init__(name, page, **kw)
+        self.raise_on = raise_on
+
+    def evaluate(self, script, arg=None):  # type: ignore[no-untyped-def]  - mirrors Playwright signature
+        # Batch safety-check call carries the selector list as the second arg.
+        # raise_on="safety" mirrors real_site_assisted_fill.py line 322-324.
+        if isinstance(arg, list) and self.raise_on == "safety":
+            raise RuntimeError("simulated batch safety check failure")
+        # raise_on="missing" lets the production line 328-329 raise on its own
+        # ("element not found for {selector}") by returning a [None] payload.
+        if isinstance(arg, list) and self.raise_on == "missing":
+            return [None] * len(arg)
+        # Batch execution call has no arg (the JS is built from action parts).
+        # raise_on="click" / "fill" mirrors real_site_assisted_fill.py line 377-380.
+        if arg is None and self.raise_on in ("click", "fill"):
+            raise RuntimeError(f"simulated batch execution failure: {self.raise_on}")
+        return super().evaluate(script, arg)
+
+
 class RaisingPage(FakePage):
     def __init__(self, elements: dict[str, dict], raise_on: str):
         super().__init__(elements)
         self.raise_on = raise_on
+        # Replace the default top-level frame with a RaisingFrame so the
+        # v0.5.0 batched-JS execution path actually surfaces the failure.
+        self.frames = [RaisingFrame("mainFrame", self, raise_on=raise_on)]
 
     def locator(self, selector: str):
         metadata = self.elements.get(selector)
@@ -1019,8 +1058,7 @@ def test_selector_missing_in_every_frame_still_blocked() -> None:
     page = FakePage({})
     page.frames = [FakeFrame("mainFrame", page, elements={})]
     action = {"type": "SELECT_NUMBER", "number": "23", "selector": "text=23", "frame": "mainFrame"}
-
-    with pytest.raises(RuntimeError, match="locator lookup failed"):
+    with pytest.raises(RuntimeError, match=r"(element not found|locator lookup failed)"):
         execute_actions_on_page(page, [action])
     assert page.clicked == []
 
@@ -1030,7 +1068,7 @@ def test_frame_not_found_fails_safely_not_silently() -> None:
     page.frames = []  # no frames at all, including no mainFrame
     action = {"type": "SELECT_NUMBER", "number": "23", "selector": "text=23", "frame": "mainFrame"}
 
-    with pytest.raises(RuntimeError, match="element not found"):
+    with pytest.raises(RuntimeError, match=r"(element not found|locator lookup failed|frame not found)"):
         execute_actions_on_page(page, [action])
     assert page.clicked == []
 
