@@ -6,7 +6,12 @@ import sys
 from pathlib import Path
 
 from betguard.game_rules import GAME_RULES
-from betguard.review import build_report, format_pretty_review, review_text
+from betguard.review import (
+    build_report,
+    format_input_diagnostic_report,
+    format_pretty_review,
+    review_text,
+)
 from betguard.webfill.fill_mapping import build_dry_run_mapping
 from betguard.webfill.fill_plan import build_fill_plan
 
@@ -23,6 +28,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pretty", action="store_true", help="Print a human-readable review summary.")
     parser.add_argument("--fill-plan", action="store_true", help="Output an assisted fill plan preview JSON.")
     parser.add_argument("--map-selectors", help="Read a selector discovery JSON report and output a dry-run mapping.")
+    parser.add_argument(
+        "--input-format-report",
+        action="store_true",
+        help="Print a read-only line-by-line diagnostic of every input line "
+        "(Raw status / Display status / Type / Numbers / Stars / Unit / "
+        "Money / Reason / Raw errors / Raw warnings). No queue or fill state "
+        "is touched.",
+    )
     args = parser.parse_args(argv)
 
     selected_inputs = [
@@ -36,6 +49,17 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--map-selectors requires --fill-plan")
     if args.map_selectors and (args.file_path is not None or args.batch_text is not None):
         parser.error("--map-selectors v0 supports single positional text only")
+    if args.input_format_report and args.fill_plan:
+        parser.error("--input-format-report and --fill-plan are mutually exclusive")
+
+    if args.input_format_report:
+        if args.file_path is not None:
+            raw_text = Path(args.file_path).read_text(encoding="utf-8")
+        else:
+            raw_text = args.batch_text
+        summary = review_text(raw_text, game=args.game)
+        print(format_input_diagnostic_report(summary))
+        return 0
 
     if args.file_path is not None:
         raw_text = Path(args.file_path).read_text(encoding="utf-8")
