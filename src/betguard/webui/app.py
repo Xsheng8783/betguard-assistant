@@ -903,6 +903,64 @@ def _html_escape(s: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _derive_star_amounts(result: dict[str, Any], stars: list[int]) -> dict[str, int]:
+    """Derive per-star amounts from a parsed result.
+
+    Handles three parser output shapes:
+      1. ``result.amounts`` — explicit per-star amounts dict  (already keyed)
+      2. ``result.bets``   — per-star BetAmount dicts         (nested ``money``)
+      3. ``result.money``  — single money expanded to all stars (most common)
+
+    Returns ``{str(star): int(amount), ...}`` or empty dict when no money found.
+    """
+    # Shape 1: explicit amounts dict (may come from preprocessor)
+    amounts = result.get("amounts", {})
+    if amounts and isinstance(amounts, dict):
+        out: dict[str, int] = {}
+        for k, v in amounts.items():
+            try:
+                key = str(int(k))
+            except (ValueError, TypeError):
+                key = str(k)
+            try:
+                val = v.get("money", v) if isinstance(v, dict) else int(v)
+            except (ValueError, TypeError):
+                continue
+            out[key] = int(val)
+        if out:
+            return out
+
+    # Shape 2: per-star bets (e.g. 二星200 三星200 四星100)
+    bets = result.get("bets", {})
+    if bets and isinstance(bets, dict):
+        out = {}
+        for k, v in bets.items():
+            try:
+                key = str(int(k))
+            except (ValueError, TypeError):
+                key = str(k)
+            try:
+                val = int(v.get("money", 0)) if isinstance(v, dict) else int(v)
+            except (ValueError, TypeError):
+                val = 0
+            if val > 0:
+                out[key] = val
+        if out:
+            return out
+
+    # Shape 3: single money expanded to each star (e.g. 17.20.29.33.440)
+    money = result.get("money")
+    if money is not None:
+        try:
+            m = int(money)
+        except (ValueError, TypeError):
+            m = 0
+        if m > 0 and stars:
+            return {str(int(s)): m for s in stars}
+
+    return {}
+
+
 def _resolve_queue_path(queue_path: str) -> Path | None:
     """Resolve a queue path relative to PROJECT_ROOT.
 
@@ -971,35 +1029,28 @@ def _validate_assist_fill_item(
 
     numbers = result.get("numbers", [])
     stars = result.get("stars", [])
-    amounts = result.get("amounts", {}) or result.get("bets", {})
 
     if not numbers:
         return {"ok": False, "error": f"item #{item_index} parsed result has no numbers; BLOCKED"}
     if not stars:
         return {"ok": False, "error": f"item #{item_index} parsed result has no stars; BLOCKED"}
 
-    # Normalize amounts: convert keys to int and values to int
-    normalized_amounts: dict[str, int] = {}
-    if isinstance(amounts, dict):
-        for k, v in amounts.items():
-            try:
-                key = str(int(k))
-            except (ValueError, TypeError):
-                key = str(k)
-            try:
-                if isinstance(v, dict):
-                    val = int(v.get("money", 0))
-                else:
-                    val = int(v)
-            except (ValueError, TypeError):
-                val = 0
-            normalized_amounts[key] = val
+    # Derive per-star amounts from money / bets / amounts in parsed result
+    star_amounts = _derive_star_amounts(result, [int(s) for s in stars])
+    if not star_amounts:
+        return {
+            "ok": False,
+            "error": (
+                f"item #{item_index} has no money/bets/amounts in parsed result; "
+                "cannot determine fill amounts; BLOCKED"
+            ),
+        }
 
     return {
         "ok": True,
         "numbers": [int(n) for n in numbers],
         "stars": [int(s) for s in stars],
-        "amounts": normalized_amounts,
+        "amounts": star_amounts,
         "game": result.get("game") or "539",
     }
 
@@ -1018,7 +1069,7 @@ def _assist_fill_item(
     fills numbers via knockout and amounts via Playwright, then stops.
     Never submits, confirms, or clicks danger buttons.
 
-    The HTTP request blocks while the browser session is active — this
+    The HTTP request blocks while the browser session is active -- this
     is intentional so the web UI can show "已輔助填入" after completion.
     """
     try:

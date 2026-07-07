@@ -1002,9 +1002,37 @@ def _candidate_row(item: dict[str, Any]) -> str:
     # Build assist-fill data attributes from the parsed result
     parsed = item.get("result", {}) or item.get("review_result", {}) or {}
     numbers = json.dumps(parsed.get("numbers", []))
-    stars = json.dumps(parsed.get("stars", []))
-    amounts = parsed.get("amounts", {}) or parsed.get("bets", {}) or {}
-    amounts_json = json.dumps({str(k): int(v.get("money", v)) if isinstance(v, dict) else int(v) for k, v in amounts.items()}) if amounts else "{}"
+    stars_raw = parsed.get("stars", []) or []
+    stars = json.dumps(stars_raw)
+
+    # Derive per-star amounts: bets > money expansion > explicit amounts
+    result_amounts_raw = parsed.get("amounts", {}) or {}
+    bets_raw = parsed.get("bets", {}) or {}
+    money = parsed.get("money")
+    star_amounts: dict[str, int] = {}
+    if result_amounts_raw and isinstance(result_amounts_raw, dict):
+        for k, v in result_amounts_raw.items():
+            try:
+                val = int(v.get("money", v)) if isinstance(v, dict) else int(v)
+            except (ValueError, TypeError):
+                continue
+            star_amounts[str(k)] = val
+    elif bets_raw and isinstance(bets_raw, dict):
+        for k, v in bets_raw.items():
+            try:
+                val = int(v.get("money", 0)) if isinstance(v, dict) else int(v)
+            except (ValueError, TypeError):
+                continue
+            if val > 0:
+                star_amounts[str(int(k))] = val
+    elif money is not None and stars_raw:
+        try:
+            m = int(money)
+        except (ValueError, TypeError):
+            m = 0
+        if m > 0:
+            star_amounts = {str(int(s)): m for s in stars_raw}
+    amounts_json = json.dumps(star_amounts) if star_amounts else "{}"
     return (
         "<tr>"
         f"<td>{idx}</td>"
