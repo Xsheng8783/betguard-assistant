@@ -842,50 +842,126 @@ def build_workbench_handler(
                 )
                 return
 
-            # POST /assist-fill — trigger single-item assisted fill
+            # POST /assist-fill — validate candidate and return preview data (read-only)
             if path == "/assist-fill":
-                length = int(self.headers.get("Content-Length", "0") or 0)
-                if length <= 0:
-                    self._send_json({"ok": False, "error": "empty body"})
-                    return
-                body_raw = self.rfile.read(length)
-                try:
-                    data = json.loads(body_raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    self._send_json({"ok": False, "error": "invalid JSON"})
-                    return
-                queue_path = (data.get("queue_path") or "").strip()
-                item_index = data.get("item_index")
-                if not queue_path or item_index is None:
-                    self._send_json({"ok": False, "error": "missing queue_path or item_index"})
-                    return
+                self._handle_assist_fill_validate()
+                return
 
-                # Resolve queue path relative to PROJECT_ROOT
-                resolved = _resolve_queue_path(queue_path)
-                if resolved is None:
-                    self._send_json({"ok": False, "error": f"queue not found: {queue_path}"})
-                    return
+            # POST /assist-fill/start — open browser, create staged session
+            if path == "/assist-fill/start":
+                self._handle_assist_fill_start()
+                return
 
-                # Read queue, find item, validate, extract parsed data
-                try:
-                    validation = _validate_assist_fill_item(resolved, int(item_index))
-                except (TypeError, ValueError) as exc:
-                    self._send_json({"ok": False, "error": f"invalid item_index: {exc}"})
-                    return
-                if not validation["ok"]:
-                    self._send_json(validation)
-                    return
+            # POST /assist-fill/ready — check page danger elements
+            if path == "/assist-fill/ready":
+                self._handle_assist_fill_ready()
+                return
 
-                result = _assist_fill_item(
-                    numbers=validation["numbers"],
-                    stars=validation["stars"],
-                    amounts=validation["amounts"],
-                    game=validation.get("game", "539"),
-                )
-                self._send_json(result)
+            # POST /assist-fill/execute — fill numbers and amounts
+            if path == "/assist-fill/execute":
+                self._handle_assist_fill_execute()
+                return
+
+            # POST /assist-fill/cancel — close browser, clean up
+            if path == "/assist-fill/cancel":
+                self._handle_assist_fill_cancel()
                 return
 
             self._send_text("not found", status=404)
+
+        # ----------------------------------------------------------------
+        # Assist-fill staged handlers
+        # ----------------------------------------------------------------
+
+        def _read_json_body(self) -> dict[str, Any] | None:
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            if length <= 0:
+                self._send_json({"ok": False, "error": "empty body"})
+                return None
+            body_raw = self.rfile.read(length)
+            try:
+                return json.loads(body_raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self._send_json({"ok": False, "error": "invalid JSON"})
+                return None
+
+        def _validate_candidate(self) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+            """Parse body, resolve queue, validate item. Returns (error_response, validation)."""
+            data = self._read_json_body()
+            if data is None:
+                return (None, None)  # error already sent
+            queue_path = (data.get("queue_path") or "").strip()
+            item_index = data.get("item_index")
+            if not queue_path or item_index is None:
+                self._send_json({"ok": False, "error": "missing queue_path or item_index"})
+                return (None, None)
+            resolved = _resolve_queue_path(queue_path)
+            if resolved is None:
+                self._send_json({"ok": False, "error": f"queue not found: {queue_path}"})
+                return (None, None)
+            try:
+                validation = _validate_assist_fill_item(resolved, int(item_index))
+            except (TypeError, ValueError) as exc:
+                self._send_json({"ok": False, "error": f"invalid item_index: {exc}"})
+                return (None, None)
+            if not validation["ok"]:
+                self._send_json(validation)
+                return (None, None)
+            return (None, validation)
+
+        def _handle_assist_fill_validate(self) -> None:
+            """Read-only: validate candidate and return parsed data for preview."""
+            _err, validation = self._validate_candidate()
+            if validation is None:
+                return  # error already sent
+            self._send_json({
+                "ok": True,
+                "numbers": validation["numbers"],
+                "stars": validation["stars"],
+                "amounts": validation["amounts"],
+                "game": validation.get("game", "539"),
+            })
+
+        def _handle_assist_fill_start(self) -> None:
+            """Open browser, create staged fill session."""
+            _err, validation = self._validate_candidate()
+            if validation is None:
+                return
+            from betguard.webfill.web_assist_session import CMD_START, get_assist_session
+
+            worker = get_assist_session()
+            result = worker.dispatch(CMD_START, {
+                "numbers": validation["numbers"],
+                "stars": validation["stars"],
+                "amounts": validation["amounts"],
+                "url": "https://www.gts362.com",
+            })
+            self._send_json(result)
+
+        def _handle_assist_fill_ready(self) -> None:
+            """Check page danger elements."""
+            from betguard.webfill.web_assist_session import CMD_CHECK_READY, get_assist_session
+            worker = get_assist_session()
+            result = worker.dispatch(CMD_CHECK_READY, None)
+            self._send_json(result)
+
+        def _handle_assist_fill_execute(self) -> None:
+            """Fill numbers and amounts."""
+            from betguard.webfill.web_assist_session import CMD_EXECUTE_FILL, get_assist_session
+            worker = get_assist_session()
+            result = worker.dispatch(CMD_EXECUTE_FILL, None)
+            # Enforce safety invariants
+            result.setdefault("auto_submit", False)
+            result.setdefault("auto_confirm", False)
+            result.setdefault("danger_buttons_clicked", [])
+            self._send_json(result)
+
+        def _handle_assist_fill_cancel(self) -> None:
+            """Close browser, clean up."""
+            from betguard.webfill.web_assist_session import CMD_CLOSE, get_assist_session
+            worker = get_assist_session()
+            result = worker.dispatch(CMD_CLOSE, None)
+            self._send_json(result)
 
     return WorkbenchHandler
 

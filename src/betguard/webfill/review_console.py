@@ -785,12 +785,14 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     }});
   }}
 
-  // ---- assist fill ----
+  // ---- assist fill (staged) ----
   var assistItem = null;
   var assistInProgress = false;
   var queuePath = document.body.getAttribute('data-queue-path') || '';
+
   function previewAssist(idx, fragment, summary, numbers, stars, amounts) {{
     assistItem = {{idx: idx, fragment: fragment, summary: summary, numbers: numbers, stars: stars, amounts: amounts}};
+    assistInProgress = false;
     var starNames = {{2: '二星', 3: '三星', 4: '四星'}};
     var preview = '<p><strong>原始：</strong>' + fragment + '</p><p><strong>號碼：</strong>' + numbers.join(',') + '</p>';
     var hasAmounts = false;
@@ -799,35 +801,125 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       hasAmounts = true;
     }}
     if (!hasAmounts) {{
-      preview += '<p><strong style=\\"color:var(--red)\\">⚠️ 無金額資料</strong></p>';
+      preview += '<p><strong style=\\\"color:var(--red)\\\">⚠️ 無金額資料</strong></p>';
     }}
-    preview += '<p style=\\"color:var(--slate);font-size:11px\\">⚠️ 僅填入號碼與金額，不送出、不確認。需人工核對後手動送出。</p>';
+    preview += '<p style=\\\"color:var(--slate);font-size:11px\\\">⚠️ 僅填入號碼與金額，不送出、不確認。需人工核對後手動送出。</p>';
     document.getElementById('assist-preview').innerHTML = preview;
-    document.getElementById('assist-status').textContent = '';
-    document.getElementById('assist-confirm-btn').disabled = false;
-    document.getElementById('assist-confirm-btn').textContent = '確認輔助填入';
+    setAssistStage('start');
     document.getElementById('assist-modal-overlay').classList.add('show');
   }}
+
+  function setAssistStage(stage) {{
+    // stage: start | waiting_login | danger | execute | done | error
+    document.getElementById('assist-status').className = 'am-status assist-' + stage;
+    var statusEl = document.getElementById('assist-status');
+    var btnStart = document.getElementById('assist-btn-start');
+    var btnReady = document.getElementById('assist-btn-ready');
+    var btnExec = document.getElementById('assist-btn-exec');
+    var btnCancel = document.getElementById('assist-btn-cancel');
+    // Hide all action buttons
+    [btnStart, btnReady, btnExec, btnCancel].forEach(function(b) {{ if(b) b.style.display = 'none'; }});
+    if (stage === 'start') {{
+      statusEl.textContent = '';
+      if (btnStart) {{ btnStart.style.display = ''; btnStart.disabled = false; btnStart.textContent = '開始輔助填入'; }}
+      if (btnCancel) btnCancel.style.display = 'none';
+    }} else if (stage === 'waiting_login') {{
+      statusEl.textContent = '🖥️ 請在開啟的網站視窗中手動登入，並切到 539 或天天樂二三四星頁面';
+      if (btnReady) {{ btnReady.style.display = ''; btnReady.disabled = false; btnReady.textContent = '我已登入並進入234星頁面'; }}
+      if (btnCancel) btnCancel.style.display = '';
+    }} else if (stage === 'danger') {{
+      statusEl.textContent = '⚠️ 偵測到 danger 元素（系統不會點擊），確認後將只填入號碼與金額';
+      if (btnExec) {{ btnExec.style.display = ''; btnExec.disabled = false; btnExec.textContent = '確認只填入，不送出'; }}
+      if (btnCancel) btnCancel.style.display = '';
+    }} else if (stage === 'executing') {{
+      statusEl.textContent = '⏳ 填入中...';
+      if (btnCancel) btnCancel.style.display = '';
+    }} else if (stage === 'done') {{
+      statusEl.textContent = '✅ 已輔助填入，待人工送出';
+    }} else if (stage === 'error') {{
+      // statusEl already set by caller
+    }}
+  }}
+
   function closeAssistModal() {{
     document.getElementById('assist-modal-overlay').classList.remove('show');
     assistItem = null;
   }}
-  function confirmAssist() {{
+
+  function startAssist() {{
     if (!assistItem || assistInProgress) return;
     assistInProgress = true;
-    var btn = document.getElementById('assist-confirm-btn');
-    btn.disabled = true;
-    btn.textContent = '執行中...';
     var statusEl = document.getElementById('assist-status');
-    statusEl.textContent = '處理中... 瀏覽器將開啟，請手動登入後按 Enter。';
-    fetch('/assist-fill', {{
+    statusEl.textContent = '⏳ 開啟瀏覽器中...';
+    var btn = document.getElementById('assist-btn-start');
+    if (btn) btn.disabled = true;
+    fetch('/assist-fill/start', {{
       method: 'POST',
       headers: {{'Content-Type': 'application/json'}},
       body: JSON.stringify({{queue_path: queuePath, item_index: parseInt(assistItem.idx)}})
     }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
+      if (data.ok && data.state === 'browser_open') {{
+        assistInProgress = false;
+        setAssistStage('waiting_login');
+      }} else {{
+        statusEl.textContent = '❌ 失敗: ' + (data.error || 'unknown');
+        setAssistStage('error');
+        assistInProgress = false;
+      }}
+    }}).catch(function(err) {{
+      statusEl.textContent = '❌ 錯誤: ' + err.message;
+      setAssistStage('error');
+      assistInProgress = false;
+    }});
+  }}
+
+  function confirmPageReady() {{
+    if (assistInProgress) return;  // not technically "in progress" but guard
+    assistInProgress = true;
+    var btn = document.getElementById('assist-btn-ready');
+    if (btn) {{ btn.disabled = true; btn.textContent = '檢查中...'; }}
+    fetch('/assist-fill/ready', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{}})
+    }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
       if (data.ok) {{
-        statusEl.textContent = '✅ 已輔助填入，待人工送出';
-        btn.textContent = '已完成';
+        var dangerCount = (data.danger_detected || []).length;
+        var statusEl = document.getElementById('assist-status');
+        if (dangerCount > 0) {{
+          statusEl.textContent = '⚠️ 偵測到 danger: ' + data.danger_detected.join(', ') + '（系統不會點擊）';
+        }} else {{
+          statusEl.textContent = '✅ 頁面檢查通過，無 danger 元素';
+        }}
+        setAssistStage('danger');
+        assistInProgress = false;
+      }} else {{
+        var statusEl = document.getElementById('assist-status');
+        statusEl.textContent = '❌ 失敗: ' + (data.error || 'unknown');
+        setAssistStage('error');
+        assistInProgress = false;
+      }}
+    }}).catch(function(err) {{
+      var statusEl = document.getElementById('assist-status');
+      statusEl.textContent = '❌ 錯誤: ' + err.message;
+      setAssistStage('error');
+      assistInProgress = false;
+    }});
+  }}
+
+  function confirmExecute() {{
+    if (assistInProgress) return;
+    assistInProgress = true;
+    var btn = document.getElementById('assist-btn-exec');
+    if (btn) {{ btn.disabled = true; btn.textContent = '填入中...'; }}
+    setAssistStage('executing');
+    fetch('/assist-fill/execute', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{}})
+    }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
+      if (data.ok) {{
+        setAssistStage('done');
         // Add to history
         var history = loadHistory();
         if (!history.some(function(h) {{ return h.idx === assistItem.idx && h.type === '已輔助填入，待人工送出'; }})) {{
@@ -839,19 +931,41 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
           saveHistory(history);
           renderHistoryPanel(); updateToggleBadge();
         }}
-        // Update button state
-        var rowBtn = document.querySelector('.assist-btn[onclick*=\\"' + assistItem.idx + '\\"]');
+        // Update row button
+        var rowBtn = document.querySelector('.assist-btn[onclick*=\\\"' + assistItem.idx + '\\\"]');
         if (rowBtn) {{ rowBtn.textContent = '已輔助填入'; rowBtn.classList.add('done'); }}
+        assistInProgress = false;
       }} else {{
+        var statusEl = document.getElementById('assist-status');
         statusEl.textContent = '❌ 失敗: ' + (data.error || 'unknown');
-        btn.disabled = false;
-        btn.textContent = '重試';
+        setAssistStage('error');
         assistInProgress = false;
       }}
     }}).catch(function(err) {{
+      var statusEl = document.getElementById('assist-status');
       statusEl.textContent = '❌ 錯誤: ' + err.message;
-      btn.disabled = false;
-      btn.textContent = '重試';
+      setAssistStage('error');
+      assistInProgress = false;
+    }});
+  }}
+
+  function cancelAssist() {{
+    var statusEl = document.getElementById('assist-status');
+    statusEl.textContent = '⏳ 取消中...';
+    fetch('/assist-fill/cancel', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{}})
+    }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
+      statusEl.textContent = '已取消';
+      setAssistStage('start');
+      assistInProgress = false;
+      if (assistItem) {{
+        previewAssist(assistItem.idx, assistItem.fragment, assistItem.summary, assistItem.numbers, assistItem.stars, assistItem.amounts);
+      }}
+    }}).catch(function(err) {{
+      statusEl.textContent = '已取消（可能有殘留視窗）';
+      setAssistStage('start');
       assistInProgress = false;
     }});
   }}
@@ -874,8 +988,11 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       <div class="am-preview" id="assist-preview"></div>
       <div class="am-status" id="assist-status"></div>
       <div class="am-actions">
-        <button class="btn-cancel" onclick="closeAssistModal()">取消</button>
-        <button class="btn-confirm" id="assist-confirm-btn" onclick="confirmAssist()">確認輔助填入</button>
+        <button class="btn-confirm" id="assist-btn-start" onclick="startAssist()">開始輔助填入</button>
+        <button class="btn-confirm" id="assist-btn-ready" onclick="confirmPageReady()" style="display:none">我已登入並進入234星頁面</button>
+        <button class="btn-confirm" id="assist-btn-exec" onclick="confirmExecute()" style="display:none">確認只填入，不送出</button>
+        <button class="btn-cancel" id="assist-btn-cancel" onclick="cancelAssist()" style="display:none">取消本次輔助填入</button>
+        <button class="btn-cancel" onclick="closeAssistModal()">關閉</button>
       </div>
     </div>
   </div>
