@@ -389,12 +389,40 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     }}
     .history-toggle.has-items {{ background: var(--green); }}
     .history-toggle .count-badge {{
-      position: absolute; top: -4px; right: -4px;
-      background: var(--red); color: #fff; font-size: 9px; font-weight: 700;
-      width: 18px; height: 18px; border-radius: 50%; display: flex;
-      align-items: center; justify-content: center;
-    }}
-  </style>
+        position: absolute; top: -4px; right: -4px;
+        background: var(--red); color: #fff; font-size: 9px; font-weight: 700;
+        width: 18px; height: 18px; border-radius: 50%; display: flex;
+        align-items: center; justify-content: center;
+      }}
+
+      /* ---- paste-to-review block ---- */
+      .paste-block {{
+        background: var(--white); border: 2px dashed #e2e8f0; border-radius: var(--radius);
+        padding: 16px 20px; margin-bottom: 20px;
+      }}
+      .paste-block summary {{
+        font-size: 14px; font-weight: 600; cursor: pointer; color: var(--slate-dark);
+      }}
+      .paste-block summary:hover {{ color: var(--blue); }}
+      .paste-block .paste-body {{ margin-top: 12px; display: flex; flex-direction: column; gap: 10px; }}
+      .paste-block textarea {{
+        width: 100%; min-height: 120px; padding: 12px; border: 1px solid #e2e8f0;
+        border-radius: 8px; font-family: inherit; font-size: 14px; resize: vertical;
+      }}
+      .paste-block textarea:focus {{ border-color: var(--blue); outline: none; }}
+      .paste-block .paste-buttons {{ display: flex; gap: 8px; }}
+      .paste-block .paste-buttons button {{
+        font-size: 13px; padding: 6px 16px; border-radius: 8px; cursor: pointer; font-weight: 500;
+        border: 1px solid #e2e8f0; background: var(--white);
+      }}
+      .paste-block .btn-create {{
+        background: var(--blue) !important; color: #fff !important; border-color: var(--blue) !important;
+      }}
+      .paste-block .btn-create:hover {{ background: #1d4ed8 !important; }}
+      .paste-block .btn-clear {{ color: var(--slate); }}
+      .paste-block .btn-clear:hover {{ background: #fee2e2; color: var(--red); }}
+      .paste-block .paste-warn {{ font-size: 11px; color: var(--slate); }}
+    </style>
 </head>
 <body>
   <div class="page-header">
@@ -404,6 +432,18 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     </div>
     <span class="mode-tag">僅本機模式</span>
   </div>
+
+  <details class="paste-block">
+    <summary>📋 貼上牌單建立審核</summary>
+    <div class="paste-body">
+      <textarea id="paste-input" placeholder="貼上 LINE / 聊天室牌單..."></textarea>
+      <div class="paste-buttons">
+        <button class="btn-create" onclick="submitPaste()">建立審核</button>
+        <button class="btn-clear" onclick="document.getElementById('paste-input').value=''">清空</button>
+      </div>
+      <div class="paste-warn" id="paste-warn"></div>
+    </div>
+  </details>
 
   <div class="top-row">
     <section class="card">
@@ -692,6 +732,27 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       }}
     }});
   }})();
+
+  // ---- paste-to-review ----
+  function submitPaste() {{
+    var text = document.getElementById('paste-input').value.trim();
+    var warn = document.getElementById('paste-warn');
+    if (!text) {{ warn.textContent = '請先貼上牌單內容'; return; }}
+    warn.textContent = '處理中...';
+    fetch('/workbench', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/x-www-form-urlencoded' }},
+      body: 'text=' + encodeURIComponent(text) + '&game=auto'
+    }}).then(function(resp) {{
+      if (resp.ok) return resp.text();
+      throw new Error('server returned ' + resp.status);
+    }}).then(function(html) {{
+      // Replace current page with the result
+      document.open(); document.write(html); document.close();
+    }}).catch(function(err) {{
+      warn.textContent = '無法建立審核: ' + err.message + ' (請確認工作臺已啟動: streamlit run src/betguard/webui/app.py)';
+    }});
+  }}
 </script>
 
   <button id="history-toggle-btn" class="history-toggle" onclick="toggleHistoryPanel()" title="剛剛下注紀錄">
