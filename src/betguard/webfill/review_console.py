@@ -14,7 +14,7 @@ _LABEL_CN: dict[str, str] = {
     "person_name_suffix": "疑似人名或備註",
     "ambiguous_long_token": "疑似客人唸牌黏住",
     "per_star_amount_split": "疑似星別金額拆分",
-    "car_bet": "車 / 車號",
+    "car_bet": "疑似車 / 車號",
     "write_shorthand": "寫法簡寫",
     "tail_write_shorthand": "尾數寫法",
 }
@@ -411,7 +411,6 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       <div class="stats-grid">
         <div class="stat-card">總筆數<strong>{model["preprocessing"]["candidate_count"]}</strong></div>
         <div class="stat-card valid">正確<strong>{model["preprocessing"]["valid_count"]}</strong></div>
-        <div class="stat-card watch">待觀察<strong>{model["preprocessing"]["watchlist_count"]}</strong></div>
         <div class="stat-card invalid">需人工確認<strong>{model["preprocessing"]["needs_review_count"]}</strong></div>
         <div class="stat-card">警告<strong>{model["preprocessing"]["warnings_count"]}</strong></div>
         <div class="stat-card">已忽略<strong>{model["preprocessing"]["ignored_metadata_count"]}</strong></div>
@@ -447,7 +446,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
           <span class="chip" data-filter="person_name_suffix" onclick="setFilter('person_name_suffix')">人名備註 {_label_counts.get("person_name_suffix", 0)}</span>
           <span class="chip" data-filter="ambiguous_long_token" onclick="setFilter('ambiguous_long_token')">唸牌黏住 {_label_counts.get("ambiguous_long_token", 0)}</span>
           <span class="chip" data-filter="per_star_amount_split" onclick="setFilter('per_star_amount_split')">星別金額 {_label_counts.get("per_star_amount_split", 0)}</span>
-          <span class="chip" data-filter="car_bet" onclick="setFilter('car_bet')">車 / 車號 {_label_counts.get("car_bet", 0)}</span>
+          <span class="chip" data-filter="car_bet" onclick="setFilter('car_bet')">疑似車 / 車號 {_label_counts.get("car_bet", 0)}</span>
           <span class="chip" data-filter="write_shorthand" onclick="setFilter('write_shorthand')">寫法簡寫 {_label_counts.get("write_shorthand", 0)}</span>
           <span class="chip" data-filter="tail_write_shorthand" onclick="setFilter('tail_write_shorthand')">尾數寫法 {_label_counts.get("tail_write_shorthand", 0)}</span>
           <span class="chip" data-filter="uncategorized" onclick="setFilter('uncategorized')">未分類</span>
@@ -465,12 +464,6 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       <div class="card-list" id="review-cards">{invalid_cards}</div>
     </section>
   </div>
-
-  <section class="card full-row" style="border-left: 4px solid var(--yellow);">
-    <h2><span class="badge watch">⚠️ 待觀察</span> 待觀察</h2>
-    <p style="font-size:12px;color:var(--yellow);margin-bottom:12px">需人工判斷。不會自動接受。</p>
-    <div class="card-list">{watchlist_cards}</div>
-  </section>
 
   <div class="top-row">
     <section class="card">
@@ -513,26 +506,58 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     if (!card) return;
     var idx = card.dataset.batchId;
     card.classList.add('dismissed');
+    // Toggle buttons: hide ✓已處理, show ↩取消已處理
+    var doneBtn = card.querySelector('.dismiss-btn:not(.undo-btn)');
+    var undoBtn = card.querySelector('.undo-btn');
+    if (doneBtn) doneBtn.style.display = 'none';
+    if (undoBtn) undoBtn.style.display = '';
     var dismissed = loadDismissed();
     if (dismissed.indexOf(idx) < 0) {{ dismissed.push(idx); }}
     saveDismissed(dismissed);
     updateCounts();
   }}
-  function showDismissed() {{
-    document.querySelectorAll('#review-cards .review-card.dismissed').forEach(function(c) {{ c.classList.add('hidden'); }});
+  function undoDismiss(btn) {{
+    var card = btn.closest('.review-card');
+    if (!card) return;
+    var idx = card.dataset.batchId;
+    card.classList.remove('dismissed');
+    var doneBtn = card.querySelector('.dismiss-btn:not(.undo-btn)');
+    var undoBtn = card.querySelector('.undo-btn');
+    if (doneBtn) doneBtn.style.display = '';
+    if (undoBtn) undoBtn.style.display = 'none';
+    var dismissed = loadDismissed().filter(function(d) {{ return d !== idx; }});
+    saveDismissed(dismissed);
+    updateCounts();
   }}
-  function hideDismissed() {{
+  function showDismissed() {{
+    document.querySelectorAll('#review-cards .review-card:not(.dismissed)').forEach(function(c) {{ c.classList.add('hidden'); }});
     document.querySelectorAll('#review-cards .review-card.dismissed').forEach(function(c) {{ c.classList.remove('hidden'); }});
   }}
+  function hideDismissed() {{
+    document.querySelectorAll('#review-cards .review-card.dismissed').forEach(function(c) {{ c.classList.add('hidden'); }});
+    document.querySelectorAll('#review-cards .review-card:not(.dismissed)').forEach(function(c) {{ c.classList.remove('hidden'); }});
+  }}
   function restoreAll() {{
-    document.querySelectorAll('#review-cards .review-card.dismissed').forEach(function(c) {{ c.classList.remove('dismissed', 'hidden'); }});
+    document.querySelectorAll('#review-cards .review-card.dismissed').forEach(function(c) {{
+      c.classList.remove('dismissed', 'hidden');
+      var doneBtn = c.querySelector('.dismiss-btn:not(.undo-btn)');
+      var undoBtn = c.querySelector('.undo-btn');
+      if (doneBtn) doneBtn.style.display = '';
+      if (undoBtn) undoBtn.style.display = 'none';
+    }});
     localStorage.removeItem(storageKey);
     updateCounts();
   }}
   (function() {{
     var dismissed = loadDismissed();
     document.querySelectorAll('#review-cards .review-card').forEach(function(card) {{
-      if (dismissed.indexOf(card.dataset.batchId) >= 0) {{ card.classList.add('dismissed'); }}
+      if (dismissed.indexOf(card.dataset.batchId) >= 0) {{
+        card.classList.add('dismissed');
+        var doneBtn = card.querySelector('.dismiss-btn:not(.undo-btn)');
+        var undoBtn = card.querySelector('.undo-btn');
+        if (doneBtn) doneBtn.style.display = 'none';
+        if (undoBtn) undoBtn.style.display = '';
+      }}
     }});
     updateCounts();
   }})();
@@ -631,7 +656,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     if (!body) return;
     var history = loadHistory();
     if (history.length === 0) {{
-      body.innerHTML = '<div class=\"empty-block\">尚無紀錄。點擊卡片上的「已手動下注」按鈕加入。</div>';
+      body.innerHTML = '<div class=\"empty-block\">目前沒有紀錄</div>';
       return;
     }}
     var html = '';
@@ -729,6 +754,7 @@ def _review_card(item: dict[str, Any], kind: str) -> str:
         f"<div style='text-align:left'><strong>原因：</strong>{reason}</div>"
         f"</details>"
         f"<button class='dismiss-btn' onclick='dismissCard(this)' title='標記為已處理 (不影響 queue)'>✓ 已處理</button>"
+        f"<button class='dismiss-btn undo-btn' onclick='undoDismiss(this)' style='display:none' title='取消已處理'>↩ 取消已處理</button>"
         f"<button class='history-btn' onclick='addToHistory(this)' title='加入剛剛下注紀錄 (僅存瀏覽器)'>已手動下注</button>"
         f"</div>"
         f"</div>"
