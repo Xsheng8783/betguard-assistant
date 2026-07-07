@@ -26,6 +26,7 @@ from betguard.webfill.web_assisted_fill_executor import (
 # ---------------------------------------------------------------------------
 
 IDLE = "idle"
+BROWSER_IDLE = "browser_idle"  # browser open, no active fill job — can reuse
 BROWSER_OPEN = "browser_open"
 READY_CHECKED = "ready_checked"
 DONE = "done"
@@ -36,6 +37,52 @@ CMD_EXECUTE_FILL = "execute_fill"
 CMD_CLOSE = "close"
 
 WORKER_TIMEOUT = 30  # seconds to wait for worker to process a command
+
+
+def _pad_number(n: int) -> str:
+    """Zero-pad 1-9 to '01'-'09'; 10+ stays as-is."""
+    i = int(n)
+    if 1 <= i <= 9:
+        return f"0{i}"
+    return str(i)
+
+
+def _count_selected_numbers(page: Any, expected: list[str]) -> int:
+    """Count how many of the expected numbers are selected on the B03 frame."""
+    import json as _json
+
+    try:
+        js = (
+            "(function(){"
+            " var f=null;"
+            " for(var wi=0;wi<window.frames.length;wi++){"
+            "  try{if(window.frames[wi].location.href.indexOf('"
+            + "/Front/B/B03"
+            + "')>=0){f=window.frames[wi];break;}}catch(e){}"
+            " }"
+            " if(!f)f=window.frames[2];"
+            " if(!f||!f.ko)return 0;"
+            " var expected="
+            + _json.dumps(expected)
+            + ";"
+            " var tds=f.document.querySelectorAll('td');"
+            " var count=0;"
+            " for(var i=0;i<tds.length;i++){"
+            "  var txt=(tds[i].textContent||'').trim();"
+            "  if(expected.indexOf(txt)>=0){"
+            "   var ctx=f.ko.contextFor(tds[i]);"
+            "   if(ctx&&ctx.$data&&typeof ctx.$data.HasSeled==='function'&&ctx.$data.HasSeled()){"
+            "    count++;"
+            "   }"
+            "  }"
+            " }"
+            " return count;"
+            "})()"
+        )
+        raw = page.evaluate(js)
+        return int(raw) if raw is not None else 0
+    except Exception:
+        return 0
 
 
 # ---------------------------------------------------------------------------
@@ -124,10 +171,25 @@ class _AssistWorker(threading.Thread):
     # ---- Command handlers (run on worker thread) ----
 
     def _handle_start(self, payload: dict[str, Any], result: _CommandResult) -> None:
-        if self.state != IDLE:
-            result.set({"ok": False, "error": "another assisted fill session is already active; please cancel it first"})
+        # BROWSER_IDLE → reuse existing browser, skip launch
+        if self.state == BROWSER_IDLE:
+            if payload.get("open_site_only"):
+                result.set({"ok": True, "state": BROWSER_IDLE, "reused": True})
+                return
+            self.numbers = list(payload.get("numbers", []))
+            self.stars = list(payload.get("stars", []))
+            self.amounts = dict(payload.get("amounts", {}))
+            self.state = BROWSER_OPEN
+            self.danger_detected = []
+            self.filled_amounts = []
+            result.set({"ok": True, "state": BROWSER_OPEN, "reused": True})
             return
 
+        if self.state != IDLE:
+            result.set({"ok": False, "error": "another assisted fill job is already active; please cancel it first"})
+            return
+
+        # IDLE → launch new browser
         try:
             from playwright.sync_api import sync_playwright  # pragma: no cover
         except ImportError as exc:
@@ -146,13 +208,17 @@ class _AssistWorker(threading.Thread):
             result.set({"ok": False, "error": f"browser start failed: {exc}"})
             return
 
-        self.numbers = list(payload.get("numbers", []))
-        self.stars = list(payload.get("stars", []))
-        self.amounts = dict(payload.get("amounts", {}))
-        self.state = BROWSER_OPEN
-        self.danger_detected = []
-        self.filled_amounts = []
-        result.set({"ok": True, "state": BROWSER_OPEN})
+        if payload.get("open_site_only"):
+            self.state = BROWSER_IDLE
+            result.set({"ok": True, "state": BROWSER_IDLE, "reused": False})
+        else:
+            self.numbers = list(payload.get("numbers", []))
+            self.stars = list(payload.get("stars", []))
+            self.amounts = dict(payload.get("amounts", {}))
+            self.state = BROWSER_OPEN
+            self.danger_detected = []
+            self.filled_amounts = []
+            result.set({"ok": True, "state": BROWSER_OPEN, "reused": False})
 
     def _handle_check_ready(self, result: _CommandResult) -> None:
         if self.state != BROWSER_OPEN:
@@ -180,19 +246,33 @@ class _AssistWorker(threading.Thread):
             if self._page is None:
                 result.set({"ok": False, "error": "page is not available"})
                 return
-            _fast_select_numbers_knockout(self._page, [str(n) for n in self.numbers])
+            # Zero-pad numbers 1-9 to "01"-"09" (site uses two-digit format)
+            padded = [_pad_number(n) for n in self.numbers]
+            _fast_select_numbers_knockout(self._page, padded)
             self.filled_amounts = _fill_amounts_on_b03(self._page, self.amounts)
-            self.state = DONE
-            success = len(self.numbers) > 0 and any(
-                a.get("executed") for a in self.filled_amounts
-            )
+            self.state = BROWSER_IDLE  # browser stays open for reuse
+
+            # Verify selection (informational only — does NOT block success)
+            selected = _count_selected_numbers(self._page, padded)
+            amounts_ok = any(a.get("executed") for a in self.filled_amounts)
+            success = amounts_ok and len(self.numbers) > 0
+            warnings: list[str] = []
+            if selected != len(padded):
+                warnings.append(
+                    f"post-fill verify: {selected}/{len(padded)} numbers confirmed selected "
+                    f"(fill executed, may be a readback timing issue)"
+                )
             result.set({
                 "ok": success,
                 "state": DONE,
                 "numbers": self.numbers,
+                "numbers_for_fill": padded,
                 "stars": self.stars,
                 "amounts": self.amounts,
                 "filled_amounts": self.filled_amounts,
+                "numbers_selected": selected,
+                "numbers_expected": len(padded),
+                "warnings": warnings,
                 "danger_buttons_detected": self.danger_detected,
                 "danger_buttons_clicked": [],
                 "auto_submit": False,

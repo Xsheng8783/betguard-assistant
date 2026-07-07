@@ -381,6 +381,17 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       padding: 2px 6px; border-radius: 4px; border: 1px solid #e2e8f0; background: #fff;
     }}
     .history-item .hi-del:hover {{ color: var(--red); border-color: var(--red); }}
+
+    .history-inline-item {{
+      background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px;
+      padding: 10px 14px; margin-bottom: 8px; font-size: 12px;
+    }}
+    .history-inline-item .hi-time {{ color: var(--slate); font-size: 10px; }}
+    .history-inline-item .hi-fragment {{ font-weight: 700; font-size: 15px; margin: 2px 0; }}
+    .history-inline-item .hi-numbers {{ color: var(--blue); font-size: 13px; font-weight: 600; margin: 2px 0; }}
+    .history-inline-item .hi-amounts {{ font-size: 12px; margin: 2px 0; }}
+    .history-inline-item .hi-amount {{ display: inline-block; background: #dbeafe; color: #1e40af; padding: 1px 6px; border-radius: 4px; margin-right: 4px; font-size: 11px; }}
+    .history-inline-item .hi-type {{ font-size: 11px; color: var(--green); font-weight: 600; margin-top: 4px; }}
     .history-toggle {{
       position: fixed; right: 12px; bottom: 20px; z-index: 1001;
       background: var(--blue); color: #fff; border: none; border-radius: 50%;
@@ -458,7 +469,11 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       <h1>🛡️ Betguard 本地審核台</h1>
       <p class="subtitle">僅供本地審核 — 不合格項目不會進入 approved_fill_queue</p>
     </div>
-    <span class="mode-tag">僅本機模式</span>
+    <div style="display:flex;gap:8px;align-items:center">
+      <button class="btn-open-site" id="open-site-btn" onclick="openBettingSite()" style="font-size:14px;padding:8px 16px">🌐 開啟下牌網站</button>
+      <span id="open-site-status" style="font-size:12px;color:var(--slate);margin-left:8px"></span>
+      <span class="mode-tag">僅本機模式</span>
+    </div>
   </div>
 
   <details class="paste-block">
@@ -541,22 +556,15 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       {current_html}{last_mock_html}
     </section>
     <section class="card">
-      <h2>⚡ 指令 / 摘要</h2>
-      <p style="font-size:12px;color:var(--slate);margin-bottom:8px">手動執行，本報告不執行任何操作。</p>
-      <ul style="font-size:11px">{actions_html}</ul>
-      <hr style="margin:12px 0;border-color:#e2e8f0">
-      <ul style="font-size:11px">
-        <li>批次：{_e(str(audit.get("batch_id")))}</li>
-        <li>時間：{_e(str(audit.get("created_at")))}</li>
-        <li>錯誤：{_e(str(audit.get("invalid_fragments_count")))}</li>
-      </ul>
+      <h2>📋 下注紀錄</h2>
+      <div id="history-inline-body" style="max-height:400px;overflow-y:auto"></div>
     </section>
   </div>
 
-  <section class="card full-row">
-    <h2>📄 原始資料 (JSON)</h2>
+  <details class="card full-row" style="margin-bottom:20px">
+    <summary>📄 原始資料 (JSON)</summary>
     <pre>{source_json}</pre>
-  </section>
+  </details>
 <script>
   var currentFilter = 'all';
 
@@ -713,7 +721,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       btn.textContent = '已手動下注'; btn.classList.remove('done');
       btn.onclick = function() {{ addToHistory(btn); }};
     }});
-    renderHistoryPanel(); updateToggleBadge();
+    renderHistoryPanel(); renderHistoryInline(); updateToggleBadge();
   }}
   function toggleHistoryPanel() {{
     var panel = document.getElementById('history-side-panel');
@@ -739,6 +747,34 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     }});
     body.innerHTML = html;
   }}
+  function renderHistoryInline() {{
+    var body = document.getElementById('history-inline-body');
+    if (!body) return;
+    var history = loadHistory();
+    if (history.length === 0) {{
+      body.innerHTML = '<div class="empty-block">尚無輔助填入紀錄</div>';
+      return;
+    }}
+    var starNames = {{2: '二星', 3: '三星', 4: '四星'}};
+    var html = '';
+    history.forEach(function(h) {{
+      var nums = (h.numbers || []).map(function(n) {{ return (n < 10 ? '0' : '') + n; }}).join(', ');
+      var amtHtml = '';
+      var amts = h.amounts || {{}};
+      for (var s in amts) {{
+        amtHtml += '<span class="hi-amount">' + (starNames[parseInt(s)] || s) + ' ' + amts[s] + '</span> ';
+      }}
+      html += '<div class="history-inline-item">' +
+        '<div class="hi-time">' + h.time + ' · #' + h.idx + '</div>' +
+        '<div class="hi-fragment">' + (h.fragment || '') + '</div>' +
+        '<div class="hi-numbers">號碼: ' + (nums || '') + '</div>' +
+        '<div class="hi-amounts">' + (amtHtml || '') + '</div>' +
+        '<div class="hi-type">' + (h.type || '') + '</div>' +
+        '</div>';
+    }});
+    body.innerHTML = html;
+  }}
+
   function updateToggleBadge() {{
     var toggle = document.getElementById('history-toggle-btn');
     var badge = document.getElementById('history-count-badge');
@@ -749,7 +785,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     toggle.classList.toggle('has-items', count > 0);
   }}
   (function() {{
-    renderHistoryPanel(); updateToggleBadge();
+    renderHistoryPanel(); renderHistoryInline(); updateToggleBadge();
     var history = loadHistory();
     var doneIds = history.map(function(h) {{ return h.idx; }});
     document.querySelectorAll('#review-cards .review-card, .card-list .review-card').forEach(function(card) {{
@@ -785,195 +821,159 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     }});
   }}
 
-  // ---- assist fill (staged) ----
-  var assistItem = null;
-  var assistInProgress = false;
-  var queuePath = document.body.getAttribute('data-queue-path') || '';
+    // ---- assist fill (one-button auto flow) ----
+    var assistItem = null;
+    var assistInProgress = false;
+    var queuePath = document.body.getAttribute('data-queue-path') || '';
 
-  function previewAssist(idx, fragment, summary, numbers, stars, amounts) {{
-    assistItem = {{idx: idx, fragment: fragment, summary: summary, numbers: numbers, stars: stars, amounts: amounts}};
-    assistInProgress = false;
-    var starNames = {{2: '二星', 3: '三星', 4: '四星'}};
-    var preview = '<p><strong>原始：</strong>' + fragment + '</p><p><strong>號碼：</strong>' + numbers.join(',') + '</p>';
-    var hasAmounts = false;
-    for (var s in amounts) {{
-      preview += '<p><strong>' + (starNames[parseInt(s)] || s) + '金額：</strong>' + amounts[s] + ' 元</p>';
-      hasAmounts = true;
-    }}
-    if (!hasAmounts) {{
-      preview += '<p><strong style=\\\"color:var(--red)\\\">⚠️ 無金額資料</strong></p>';
-    }}
-    preview += '<p style=\\\"color:var(--slate);font-size:11px\\\">⚠️ 僅填入號碼與金額，不送出、不確認。需人工核對後手動送出。</p>';
-    document.getElementById('assist-preview').innerHTML = preview;
-    setAssistStage('start');
-    document.getElementById('assist-modal-overlay').classList.add('show');
-  }}
-
-  function setAssistStage(stage) {{
-    // stage: start | waiting_login | danger | execute | done | error
-    document.getElementById('assist-status').className = 'am-status assist-' + stage;
-    var statusEl = document.getElementById('assist-status');
-    var btnStart = document.getElementById('assist-btn-start');
-    var btnReady = document.getElementById('assist-btn-ready');
-    var btnExec = document.getElementById('assist-btn-exec');
-    var btnCancel = document.getElementById('assist-btn-cancel');
-    // Hide all action buttons
-    [btnStart, btnReady, btnExec, btnCancel].forEach(function(b) {{ if(b) b.style.display = 'none'; }});
-    if (stage === 'start') {{
-      statusEl.textContent = '';
-      if (btnStart) {{ btnStart.style.display = ''; btnStart.disabled = false; btnStart.textContent = '開始輔助填入'; }}
-      if (btnCancel) btnCancel.style.display = 'none';
-    }} else if (stage === 'waiting_login') {{
-      statusEl.textContent = '🖥️ 請在開啟的網站視窗中手動登入，並切到 539 或天天樂二三四星頁面';
-      if (btnReady) {{ btnReady.style.display = ''; btnReady.disabled = false; btnReady.textContent = '我已登入並進入234星頁面'; }}
-      if (btnCancel) btnCancel.style.display = '';
-    }} else if (stage === 'danger') {{
-      statusEl.textContent = '⚠️ 偵測到 danger 元素（系統不會點擊），確認後將只填入號碼與金額';
-      if (btnExec) {{ btnExec.style.display = ''; btnExec.disabled = false; btnExec.textContent = '確認只填入，不送出'; }}
-      if (btnCancel) btnCancel.style.display = '';
-    }} else if (stage === 'executing') {{
-      statusEl.textContent = '⏳ 填入中...';
-      if (btnCancel) btnCancel.style.display = '';
-    }} else if (stage === 'done') {{
-      statusEl.textContent = '✅ 已輔助填入，待人工送出';
-    }} else if (stage === 'error') {{
-      // statusEl already set by caller
-    }}
-  }}
-
-  function closeAssistModal() {{
-    document.getElementById('assist-modal-overlay').classList.remove('show');
-    assistItem = null;
-  }}
-
-  function startAssist() {{
-    if (!assistItem || assistInProgress) return;
-    assistInProgress = true;
-    var statusEl = document.getElementById('assist-status');
-    statusEl.textContent = '⏳ 開啟瀏覽器中...';
-    var btn = document.getElementById('assist-btn-start');
-    if (btn) btn.disabled = true;
-    fetch('/assist-fill/start', {{
-      method: 'POST',
-      headers: {{'Content-Type': 'application/json'}},
-      body: JSON.stringify({{queue_path: queuePath, item_index: parseInt(assistItem.idx)}})
-    }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
-      if (data.ok && data.state === 'browser_open') {{
-        assistInProgress = false;
-        setAssistStage('waiting_login');
-      }} else {{
-        statusEl.textContent = '❌ 失敗: ' + (data.error || 'unknown');
-        setAssistStage('error');
-        assistInProgress = false;
-      }}
-    }}).catch(function(err) {{
-      statusEl.textContent = '❌ 錯誤: ' + err.message;
-      setAssistStage('error');
-      assistInProgress = false;
-    }});
-  }}
-
-  function confirmPageReady() {{
-    if (assistInProgress) return;  // not technically "in progress" but guard
-    assistInProgress = true;
-    var btn = document.getElementById('assist-btn-ready');
-    if (btn) {{ btn.disabled = true; btn.textContent = '檢查中...'; }}
-    fetch('/assist-fill/ready', {{
-      method: 'POST',
-      headers: {{'Content-Type': 'application/json'}},
-      body: JSON.stringify({{}})
-    }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
-      if (data.ok) {{
-        var dangerCount = (data.danger_detected || []).length;
-        var statusEl = document.getElementById('assist-status');
-        if (dangerCount > 0) {{
-          statusEl.textContent = '⚠️ 偵測到 danger: ' + data.danger_detected.join(', ') + '（系統不會點擊）';
+    function openBettingSite() {{
+      var btn = document.getElementById('open-site-btn');
+      var statusEl = document.getElementById('open-site-status');
+      if (btn) {{ btn.disabled = true; btn.textContent = '⏳ 開啟中...'; }}
+      if (statusEl) statusEl.textContent = '⏳ 正在開啟下牌網站...';
+      fetch('/assist-fill/open-site', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{}})
+      }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
+        if (data.ok) {{
+          if (data.reused) {{
+            if (btn) {{ btn.textContent = '🌐 下牌網站已開啟（重用）'; btn.style.background = '#059669'; }}
+            if (statusEl) statusEl.textContent = '✅ 下牌網站已開啟，請確認目前在二三四星頁面';
+          }} else {{
+            if (btn) {{ btn.textContent = '🌐 下牌網站已開啟'; btn.style.background = '#059669'; }}
+            if (statusEl) statusEl.textContent = '✅ 下牌網站已開啟，請手動登入並切到 539 或天天樂二三四星頁面';
+          }}
         }} else {{
-          statusEl.textContent = '✅ 頁面檢查通過，無 danger 元素';
+          if (btn) {{ btn.disabled = false; btn.textContent = '🌐 開啟下牌網站（重試）'; }}
+          var errMsg = '❌ 開啟失敗: ' + (data.error || 'unknown');
+          if (statusEl) statusEl.textContent = errMsg;
+          console.error(errMsg);
         }}
-        setAssistStage('danger');
-        assistInProgress = false;
-      }} else {{
-        var statusEl = document.getElementById('assist-status');
-        statusEl.textContent = '❌ 失敗: ' + (data.error || 'unknown');
+      }}).catch(function(err) {{
+        if (btn) {{ btn.disabled = false; btn.textContent = '🌐 開啟下牌網站（重試）'; }}
+        var errMsg = '❌ 錯誤: ' + err.message;
+        if (statusEl) statusEl.textContent = errMsg;
+        console.error(errMsg);
+      }});
+    }}
+
+    function previewAssist(idx, fragment, summary, numbers, stars, amounts) {{
+      assistItem = {{idx: idx, fragment: fragment, summary: summary, numbers: numbers, stars: stars, amounts: amounts}};
+      assistInProgress = false;
+      var starNames = {{2: '二星', 3: '三星', 4: '四星'}};
+      var preview = '<p><strong>原始：</strong>' + fragment + '</p>'
+        + '<p><strong>號碼：</strong>' + numbers.map(function(n) {{ return (n < 10 ? '0' : '') + n; }}).join(',') + '</p>';
+      var hasAmounts = false;
+      for (var s in amounts) {{
+        preview += '<p><strong>' + (starNames[parseInt(s)] || s) + '金額：</strong>' + amounts[s] + ' 元</p>';
+        hasAmounts = true;
+      }}
+      if (!hasAmounts) {{
+        preview += '<p><strong style=\"color:var(--red)\">⚠️ 無金額資料</strong></p>';
+      }}
+      preview += '<p style=\"color:var(--slate);font-size:11px\">⚠️ 請先按「開啟下牌網站」登入並切到 539 或天天樂二三四星頁面。系統只會填入號碼與金額，不送出、不確認。</p>';
+      document.getElementById('assist-preview').innerHTML = preview;
+      setAssistStage('start');
+      document.getElementById('assist-modal-overlay').classList.add('show');
+    }}
+
+    function setAssistStage(stage) {{
+      document.getElementById('assist-status').className = 'am-status assist-' + stage;
+      var statusEl = document.getElementById('assist-status');
+      var btnStart = document.getElementById('assist-btn-start');
+      var btnCancel = document.getElementById('assist-btn-cancel');
+      [btnStart, btnCancel].forEach(function(b) {{ if(b) b.style.display = 'none'; }});
+      if (stage === 'start') {{
+        statusEl.textContent = '';
+        if (btnStart) {{ btnStart.style.display = ''; btnStart.disabled = false; btnStart.textContent = '開始輔助填入'; }}
+        if (btnCancel) btnCancel.style.display = 'none';
+      }} else if (stage === 'executing') {{
+        statusEl.textContent = '⏳ 檢查頁面並填入中...';
+        if (btnCancel) btnCancel.style.display = '';
+      }} else if (stage === 'done') {{
+        statusEl.textContent = '✅ 已輔助填入，待人工送出';
+      }} else if (stage === 'error') {{
+        // statusEl set by caller
+      }}
+    }}
+
+    function closeAssistModal() {{
+      document.getElementById('assist-modal-overlay').classList.remove('show');
+      assistItem = null;
+    }}
+
+    function startAssist() {{
+      if (!assistItem || assistInProgress) return;
+      assistInProgress = true;
+      var statusEl = document.getElementById('assist-status');
+      setAssistStage('executing');
+      var btn = document.getElementById('assist-btn-start');
+      fetch('/assist-fill/start', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{queue_path: queuePath, item_index: parseInt(assistItem.idx)}})
+      }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
+        if (data.ok) {{
+          // Success: update history and UI
+          try {{
+            var history = loadHistory();
+            if (!history.some(function(h) {{ return String(h.idx) === String(assistItem.idx) && h.type === '已輔助填入，待人工送出'; }})) {{
+              history.unshift({{
+                  idx: assistItem.idx, time: new Date().toLocaleTimeString(),
+                  fragment: assistItem.fragment || '', summary: assistItem.summary || '',
+                  numbers: assistItem.numbers || [], amounts: assistItem.amounts || {{}},
+                  type: '已輔助填入，待人工送入'
+                }});
+                saveHistory(history);
+                renderHistoryPanel(); renderHistoryInline(); updateToggleBadge();
+            }}
+          }} catch(e) {{ console.error('assist history error:', e); }}
+          try {{
+            var rowBtn = document.querySelector('.assist-btn[data-assist-index=\"' + assistItem.idx + '\"]');
+            if (rowBtn) {{ rowBtn.textContent = '已輔助填入'; rowBtn.classList.add('done'); }}
+          }} catch(e) {{ console.log('rowBtn error:', e); }}
+          assistInProgress = false;
+          setAssistStage('done');
+        }} else {{
+          var errMsg = data.error || 'unknown';
+          if (data.warnings && data.warnings.length) errMsg += ' | ' + data.warnings.join('; ');
+          statusEl.textContent = '❌ 失敗: ' + errMsg;
+          if (errMsg.indexOf('already active') >= 0) {{
+            var bc = document.getElementById('assist-btn-cancel');
+            if (bc) bc.style.display = '';
+          }}
+          setAssistStage('error');
+          assistInProgress = false;
+        }}
+      }}).catch(function(err) {{
+        statusEl.textContent = '❌ 錯誤: ' + err.message;
         setAssistStage('error');
         assistInProgress = false;
-      }}
-    }}).catch(function(err) {{
-      var statusEl = document.getElementById('assist-status');
-      statusEl.textContent = '❌ 錯誤: ' + err.message;
-      setAssistStage('error');
-      assistInProgress = false;
-    }});
-  }}
+      }});
+    }}
 
-  function confirmExecute() {{
-    if (assistInProgress) return;
-    assistInProgress = true;
-    var btn = document.getElementById('assist-btn-exec');
-    if (btn) {{ btn.disabled = true; btn.textContent = '填入中...'; }}
-    setAssistStage('executing');
-    fetch('/assist-fill/execute', {{
-      method: 'POST',
-      headers: {{'Content-Type': 'application/json'}},
-      body: JSON.stringify({{}})
-    }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
-      if (data.ok) {{
-        setAssistStage('done');
-        // Add to history
-        var history = loadHistory();
-        if (!history.some(function(h) {{ return h.idx === assistItem.idx && h.type === '已輔助填入，待人工送出'; }})) {{
-          history.unshift({{
-            idx: assistItem.idx, time: new Date().toLocaleTimeString(),
-            fragment: assistItem.fragment, summary: assistItem.summary,
-            type: '已輔助填入，待人工送出'
-          }});
-          saveHistory(history);
-          renderHistoryPanel(); updateToggleBadge();
+    function cancelAssist() {{
+      var statusEl = document.getElementById('assist-status');
+      statusEl.textContent = '⏳ 取消中...';
+      fetch('/assist-fill/cancel', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{}})
+      }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
+        statusEl.textContent = '已取消';
+        setAssistStage('start');
+        assistInProgress = false;
+        if (assistItem) {{
+          previewAssist(assistItem.idx, assistItem.fragment, assistItem.summary, assistItem.numbers, assistItem.stars, assistItem.amounts);
         }}
-        // Update row button
-        var rowBtn = document.querySelector('.assist-btn[onclick*=\\\"' + assistItem.idx + '\\\"]');
-        if (rowBtn) {{ rowBtn.textContent = '已輔助填入'; rowBtn.classList.add('done'); }}
+      }}).catch(function(err) {{
+        statusEl.textContent = '已取消（可能有殘留視窗）';
+        setAssistStage('start');
         assistInProgress = false;
-      }} else {{
-        var statusEl = document.getElementById('assist-status');
-        statusEl.textContent = '❌ 失敗: ' + (data.error || 'unknown');
-        setAssistStage('error');
-        assistInProgress = false;
-      }}
-    }}).catch(function(err) {{
-      var statusEl = document.getElementById('assist-status');
-      statusEl.textContent = '❌ 錯誤: ' + err.message;
-      setAssistStage('error');
-      assistInProgress = false;
-    }});
-  }}
-
-  function cancelAssist() {{
-    var statusEl = document.getElementById('assist-status');
-    statusEl.textContent = '⏳ 取消中...';
-    fetch('/assist-fill/cancel', {{
-      method: 'POST',
-      headers: {{'Content-Type': 'application/json'}},
-      body: JSON.stringify({{}})
-    }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
-      statusEl.textContent = '已取消';
-      setAssistStage('start');
-      assistInProgress = false;
-      if (assistItem) {{
-        previewAssist(assistItem.idx, assistItem.fragment, assistItem.summary, assistItem.numbers, assistItem.stars, assistItem.amounts);
-      }}
-    }}).catch(function(err) {{
-      statusEl.textContent = '已取消（可能有殘留視窗）';
-      setAssistStage('start');
-      assistInProgress = false;
-    }});
-  }}
-</script>
-
-  <button id="history-toggle-btn" class="history-toggle" onclick="toggleHistoryPanel()" title="剛剛下注紀錄">
-    📋<span id="history-count-badge" class="count-badge" style="display:none">0</span>
-  </button>
+      }});
+    }}
+  </script>
   <div id="history-side-panel" class="history-panel">
     <div class="history-panel-header">
       <h3>📋 剛剛下注紀錄</h3>
@@ -989,8 +989,6 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       <div class="am-status" id="assist-status"></div>
       <div class="am-actions">
         <button class="btn-confirm" id="assist-btn-start" onclick="startAssist()">開始輔助填入</button>
-        <button class="btn-confirm" id="assist-btn-ready" onclick="confirmPageReady()" style="display:none">我已登入並進入234星頁面</button>
-        <button class="btn-confirm" id="assist-btn-exec" onclick="confirmExecute()" style="display:none">確認只填入，不送出</button>
         <button class="btn-cancel" id="assist-btn-cancel" onclick="cancelAssist()" style="display:none">取消本次輔助填入</button>
         <button class="btn-cancel" onclick="closeAssistModal()">關閉</button>
       </div>
@@ -1156,7 +1154,7 @@ def _candidate_row(item: dict[str, Any]) -> str:
         f"<td>{fragment}</td>"
         f"<td>{summary}</td>"
         f"<td>{bet_type}</td>"
-        f"<td><button class='assist-btn' onclick='previewAssist(\"{idx}\",\"{fragment}\",\"{summary}\",{numbers},{stars},{amounts_json})'>輔助填入</button></td>"
+        f"<td><button class='assist-btn' data-assist-index=\"{idx}\" onclick='previewAssist(\"{idx}\",\"{fragment}\",\"{summary}\",{numbers},{stars},{amounts_json})'>輔助填入</button></td>"
         "</tr>"
     )
 

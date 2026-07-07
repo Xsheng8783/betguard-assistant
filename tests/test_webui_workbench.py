@@ -125,7 +125,7 @@ def test_valid_text_creates_input_file(tmp_path: Path, monkeypatch: pytest.Monke
     handler = build_workbench_handler(project_version="v0.4.5", git_commit="test")
     with _running_server(handler) as port:
         status, _body = _post_workbench(port, text=text)
-        assert status == 200
+        assert status == 302  # redirects to review
         # At least one input_*.txt should exist under runs/YYYY-MM-DD/
         inputs = list(runs_tmp.rglob("input_*.txt"))
         assert inputs, "no input_*.txt created under runs/"
@@ -146,7 +146,7 @@ def test_batch_creates_queue_and_review_html(tmp_path: Path, monkeypatch: pytest
     handler = build_workbench_handler(project_version="v0.4.5", git_commit="test")
     with _running_server(handler) as port:
         status, _body = _post_workbench(port, text=text)
-        assert status == 200
+        assert status == 302  # redirects to review
         queues = list(runs_tmp.rglob("queue_*.json"))
         reviews = list(runs_tmp.rglob("review_*.html"))
         assert queues, "no queue_*.json produced"
@@ -170,7 +170,7 @@ def test_no_approved_fill_queue_after_batch(tmp_path: Path, monkeypatch: pytest.
     handler = build_workbench_handler(project_version="v0.4.5", git_commit="test")
     with _running_server(handler) as port:
         status, _body = _post_workbench(port, text=text)
-        assert status == 200
+        assert status == 302  # redirects to review
         queue_files = list(runs_tmp.rglob("queue_*.json"))
         assert queue_files
         for q in queue_files:
@@ -295,20 +295,12 @@ def test_dashboard_and_sop_routes(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     with _running_server(handler) as port:
         conn = HTTPConnection("127.0.0.1", port, timeout=10)
         try:
-            # GET /
+            # GET / (redirects to workbench)
             conn.request("GET", "/")
             r = conn.getresponse()
-            assert r.status == 200
+            assert r.status == 302
             body = r.read().decode("utf-8")
-            assert "Betguard Assistant 今日工作台" in body
-            assert "auto-submit OFF" in body
-            assert "human required" in body
-            assert "v0.4.5" in body
-            assert "abc1234" in body
-            assert "/workbench" in body
-            assert "/latest-review" in body
-            assert "/sop" in body
-            assert "/cli" in body
+            assert "/workbench" in r.getheader("Location", "")
 
             # GET /workbench
             conn.request("GET", "/workbench")
@@ -470,13 +462,15 @@ def _get(port: int, path: str) -> tuple[int, str]:
 
 
 # K-1: dashboard has a /history link
-def test_dashboard_has_history_link(tmp_path: Path) -> None:
+def test_dashboard_redirects_to_workbench(tmp_path: Path) -> None:
     handler = build_workbench_handler(project_version="v0.5", git_commit="abc")
     with _running_server(handler) as port:
-        status, body = _get(port, "/")
-        assert status == 200
-        assert "/history" in body
-        assert "查看歷史紀錄" in body
+        # / redirects to /workbench
+        conn = HTTPConnection("127.0.0.1", port, timeout=10)
+        conn.request("GET", "/")
+        r = conn.getresponse()
+        assert r.status == 302
+        assert "/workbench" in r.getheader("Location", "")
 
 
 # K-2: /history with no orders.jsonl shows the empty state

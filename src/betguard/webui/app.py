@@ -112,6 +112,15 @@ _HTML_FOOTER = """
 """
 
 
+def _runs_url(rel: Path) -> str:
+    """Convert a path relative to RUNS_DIR into a POSIX-style URL segment.
+
+    On Windows, ``Path.relative_to()`` produces backslashes which must be
+    normalised to forward slashes for valid HTTP URLs.
+    """
+    return str(rel).replace("\\", "/")
+
+
 def _build_dashboard_links() -> str:
     """Return the dashboard button bar HTML, with optional unrecognized link."""
     lines = [
@@ -121,9 +130,9 @@ def _build_dashboard_links() -> str:
     ]
     latest_unrec = _find_latest_unrecognized()
     if latest_unrec:
-        rel = latest_unrec.relative_to(RUNS_DIR)
+        rel = _runs_url(latest_unrec.relative_to(RUNS_DIR))
         lines.append(
-            f'  <a class="danger" href="/runs/{urllib.parse.quote(str(rel))}">'
+            f'  <a class="danger" href="/runs/{urllib.parse.quote(rel)}">'
             f"開啟最新未辨識報告</a>"
         )
     lines += [
@@ -213,9 +222,9 @@ def _render_result(
     total_unrecognized = needs_review + invalid + watchlist
     unrecognized_block_html = ""
     if total_unrecognized > 0 and unrecognized_html and unrecognized_html.exists():
-        rel = unrecognized_html.relative_to(RUNS_DIR)
+        rel = _runs_url(unrecognized_html.relative_to(RUNS_DIR))
         unrecognized_block_html = (
-            f'<p>未辨識格式: <a href="/runs/{urllib.parse.quote(str(rel))}">'
+            f'<p>未辨識格式: <a href="/runs/{urllib.parse.quote(rel)}">'
             f"{total_unrecognized} 筆 → 查看報告</a></p>"
         )
     else:
@@ -737,7 +746,7 @@ def build_workbench_handler(
             path = parsed.path
 
             if path == "/" or path == "":
-                self._send_html(_render_dashboard(project_version, git_commit))
+                self._send_redirect("/workbench")
                 return
             if path == "/workbench":
                 self._send_html(_render_workbench_form())
@@ -752,8 +761,8 @@ def build_workbench_handler(
                         + _HTML_FOOTER
                     )
                     return
-                rel = latest.relative_to(RUNS_DIR)
-                self._send_redirect(f"/runs/{urllib.parse.quote(str(rel))}")
+                rel = _runs_url(latest.relative_to(RUNS_DIR))
+                self._send_redirect(f"/runs/{urllib.parse.quote(rel)}")
                 return
             if path == "/sop":
                 if not SOP_PATH.exists():
@@ -830,16 +839,9 @@ def build_workbench_handler(
                         status=500,
                     )
                     return
-                if redirect_review:
-                    rel = review_path.relative_to(RUNS_DIR)
-                    self._send_redirect(f"/runs/{urllib.parse.quote(str(rel))}")
-                    return
-                self._send_html(
-                    _render_result(
-                        input_path, queue_path, review_path, summary,
-                        unrecognized_html=unrecognized_html,
-                    )
-                )
+                # Always redirect to the new review page
+                rel = _runs_url(review_path.relative_to(RUNS_DIR))
+                self._send_redirect(f"/runs/{urllib.parse.quote(rel)}")
                 return
 
             # POST /assist-fill — validate candidate and return preview data (read-only)
@@ -865,6 +867,11 @@ def build_workbench_handler(
             # POST /assist-fill/cancel — close browser, clean up
             if path == "/assist-fill/cancel":
                 self._handle_assist_fill_cancel()
+                return
+
+            # POST /assist-fill/open-site — open or reuse betting site browser
+            if path == "/assist-fill/open-site":
+                self._handle_assist_fill_open_site()
                 return
 
             self._send_text("not found", status=404)
@@ -923,20 +930,39 @@ def build_workbench_handler(
             })
 
         def _handle_assist_fill_start(self) -> None:
-            """Open browser, create staged fill session."""
+            """Validate candidate, start fill, auto-execute if browser is open."""
             _err, validation = self._validate_candidate()
             if validation is None:
                 return
-            from betguard.webfill.web_assist_session import CMD_START, get_assist_session
+            from betguard.webfill.web_assist_session import (
+                CMD_CHECK_READY, CMD_EXECUTE_FILL, CMD_START, get_assist_session,
+            )
 
             worker = get_assist_session()
-            result = worker.dispatch(CMD_START, {
+            start_result = worker.dispatch(CMD_START, {
                 "numbers": validation["numbers"],
                 "stars": validation["stars"],
                 "amounts": validation["amounts"],
                 "url": "https://www.gts362.com",
             })
-            self._send_json(result)
+            print(f"[assist] start: ok={start_result.get('ok')} state={start_result.get('state')}", flush=True)
+            if not start_result.get("ok"):
+                self._send_json(start_result)
+                return
+
+            # Auto chain: check_ready → execute
+            ready_result = worker.dispatch(CMD_CHECK_READY, None)
+            print(f"[assist] ready: ok={ready_result.get('ok')} danger={len(ready_result.get('danger_detected', []))}", flush=True)
+            if not ready_result.get("ok"):
+                self._send_json(ready_result)
+                return
+
+            exec_result = worker.dispatch(CMD_EXECUTE_FILL, None)
+            print(f"[assist] execute: ok={exec_result.get('ok')} selected={exec_result.get('numbers_selected')}/{exec_result.get('numbers_expected')}", flush=True)
+            exec_result.setdefault("auto_submit", False)
+            exec_result.setdefault("auto_confirm", False)
+            exec_result.setdefault("danger_buttons_clicked", [])
+            self._send_json(exec_result)
 
         def _handle_assist_fill_ready(self) -> None:
             """Check page danger elements."""
@@ -961,6 +987,23 @@ def build_workbench_handler(
             from betguard.webfill.web_assist_session import CMD_CLOSE, get_assist_session
             worker = get_assist_session()
             result = worker.dispatch(CMD_CLOSE, None)
+            self._send_json(result)
+
+        def _handle_assist_fill_open_site(self) -> None:
+            """Open or reuse the betting site browser (no fill data)."""
+            from betguard.webfill.web_assist_session import (
+                CMD_START, get_assist_session,
+            )
+
+            worker = get_assist_session()
+            # Start with empty fill data — just open browser or confirm reuse
+            result = worker.dispatch(CMD_START, {
+                "numbers": [],
+                "stars": [],
+                "amounts": {},
+                "url": "https://www.gts362.com",
+                "open_site_only": True,
+            })
             self._send_json(result)
 
     return WorkbenchHandler

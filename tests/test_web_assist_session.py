@@ -13,6 +13,7 @@ class TestAssistSessionConstants:
 
     def test_state_constants(self) -> None:
         from betguard.webfill.web_assist_session import (
+            BROWSER_IDLE,
             BROWSER_OPEN,
             DONE,
             IDLE,
@@ -20,6 +21,7 @@ class TestAssistSessionConstants:
         )
 
         assert IDLE == "idle"
+        assert BROWSER_IDLE == "browser_idle"
         assert BROWSER_OPEN == "browser_open"
         assert READY_CHECKED == "ready_checked"
         assert DONE == "done"
@@ -85,6 +87,49 @@ class TestAssistSessionWorker:
         result = cr.wait(timeout=0.1)
         assert result["ok"] is False
         assert "timed out" in result["error"]
+
+    def test_browser_open_blocks_new_start(self) -> None:
+        """Non-DONE, non-IDLE states should block new start."""
+        from betguard.webfill.web_assist_session import (
+            BROWSER_OPEN,
+            CMD_START,
+            _AssistWorker,
+        )
+
+        w = _AssistWorker()
+        w.state = BROWSER_OPEN
+        w.start()
+        try:
+            r = w.dispatch(CMD_START, {"url": "http://localhost"}, timeout=2)
+            assert r["ok"] is False
+            assert "already active" in r.get("error", "")
+        finally:
+            w.shutdown()
+            w.join(timeout=2)
+
+
+class TestPadNumber:
+    """Zero-pad numbers for site format."""
+
+    def test_pad_single_digit(self) -> None:
+        from betguard.webfill.web_assist_session import _pad_number
+
+        assert _pad_number(1) == "01"
+        assert _pad_number(5) == "05"
+        assert _pad_number(9) == "09"
+
+    def test_pad_double_digit_unchanged(self) -> None:
+        from betguard.webfill.web_assist_session import _pad_number
+
+        assert _pad_number(10) == "10"
+        assert _pad_number(17) == "17"
+        assert _pad_number(39) == "39"
+
+    def test_pad_from_string(self) -> None:
+        from betguard.webfill.web_assist_session import _pad_number
+
+        assert _pad_number("3") == "03"
+        assert _pad_number("12") == "12"
 
 
 class TestAssistSessionModule:
