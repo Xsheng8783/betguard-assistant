@@ -401,3 +401,245 @@ def test_find_latest_review_picks_newest(tmp_path: Path, monkeypatch: pytest.Mon
 def test_gitignore_ignores_runs() -> None:
     gitignore = (webui_app.PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8")
     assert "runs/" in gitignore, "runs/ must be in .gitignore"
+
+
+# ---------------------------------------------------------------------------
+# Section K -- /history (read-only) end-to-end
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _isolated_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Redirect HISTORY_DIR/HISTORY_FILE to a tmp path so tests don't
+    write to the project root."""
+    import betguard.webfill.history as hist
+    monkeypatch.setattr(hist, "HISTORY_DIR", tmp_path / "history")
+    monkeypatch.setattr(hist, "HISTORY_FILE", tmp_path / "history" / "orders.jsonl")
+    # Also patch the webui app's import (webui imports history lazily
+    # inside _render_history, so re-monkeypatching here is enough).
+    monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+
+
+def _seed_history(tmp_path: Path, n: int = 3) -> list[dict]:
+    """Write n sample records directly to the (monkeypatched) history
+    file.  Returns the list of records that were written."""
+    import betguard.webfill.history as hist
+    records = []
+    for i in range(n):
+        r = {
+            "history_id": f"h-{i:03d}",
+            "created_at": f"2026-07-07T10:0{i}:00+08:00",
+            "completed_at": f"2026-07-07T10:0{i}:00+08:00",
+            "source": "test-source",
+            "game": "539" if i % 2 == 0 else "天天樂",
+            "play_type": "normal",
+            "original_text": f"06.13.23.22 234.10{i}",
+            "numbers": [6, 13, 23, 22],
+            "stars": [2, 3, 4],
+            "amounts": {"2": 100 + i, "3": 100 + i, "4": 100 + i},
+            "queue_item_index": 0,
+            "status": "DONE",
+            "safety_flags": {
+                "auto_submit": False, "auto_confirm": False,
+                "auto_next": False, "danger_clicked": 0,
+            },
+            "confirmed_by_human": True,
+        }
+        records.append(r)
+    hist.HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    with hist.HISTORY_FILE.open("w", encoding="utf-8") as f:
+        for r in records:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    return records
+
+
+def _get(port: int, path: str) -> tuple[int, str]:
+    conn = HTTPConnection("127.0.0.1", port, timeout=10)
+    try:
+        # path may contain non-ASCII (e.g. ?game=天天樂).  http.client's
+        # default URL encoder is ASCII-only; URL-quote the path manually.
+        quoted = urllib.parse.quote(path, safe="/?=&")
+        conn.request("GET", quoted)
+        r = conn.getresponse()
+        return r.status, r.read().decode("utf-8")
+    finally:
+        conn.close()
+
+
+# K-1: dashboard has a /history link
+def test_dashboard_has_history_link(tmp_path: Path) -> None:
+    handler = build_workbench_handler(project_version="v0.5", git_commit="abc")
+    with _running_server(handler) as port:
+        status, body = _get(port, "/")
+        assert status == 200
+        assert "/history" in body
+        assert "查看歷史紀錄" in body
+
+
+# K-2: /history with no orders.jsonl shows the empty state
+def test_history_empty_when_no_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _isolated_history
+) -> None:
+    # _isolated_history redirects HISTORY_DIR + HISTORY_FILE to tmp_path,
+    # so HISTORY_FILE does not exist on disk.
+    handler = build_workbench_handler(project_version="v0.5", git_commit="abc")
+    with _running_server(handler) as port:
+        status, body = _get(port, "/history")
+        assert status == 200
+        assert "目前尚無歷史紀錄" in body
+        assert "<table" not in body  # no table when empty
+
+
+# K-3: /history renders a record
+def test_history_renders_one_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _isolated_history) -> None:
+    _seed_history(tmp_path, n=1)
+    # Re-monkeypatch webui.RUNS_DIR so the workbench does not see real runs
+    monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+    handler = build_workbench_handler(project_version="v0.5", git_commit="abc")
+    with _running_server(handler) as port:
+        status, body = _get(port, "/history")
+        assert status == 200
+        assert "06.13.23.22 234.100" in body
+        assert "test-source" in body
+        assert "正常" in body or "normal" in body.lower()
+
+
+# K-4: ?q= filters by original_text keyword
+def test_history_filter_by_query(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _isolated_history) -> None:
+    _seed_history(tmp_path, n=3)
+    monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+    handler = build_workbench_handler(project_version="v0.5", git_commit="abc")
+    with _running_server(handler) as port:
+        # 06.13.23.22 appears in all 3 seeded records; pick a more unique
+        # substring from record 1: "234.101"
+        status, body = _get(port, "/history?q=234.101")
+        assert status == 200
+        # Filter narrows the table; the row count line should reflect
+        # fewer than 3 records.
+        assert "1 筆" in body or "篩選後" in body
+        assert "234.101" in body
+        # Records that do NOT contain the keyword should be excluded.
+        assert "234.100" not in body or "篩選後 1 筆" in body
+
+
+# K-5: ?number= filters by parsed number
+def test_history_filter_by_number(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _isolated_history) -> None:
+    _seed_history(tmp_path, n=3)
+    monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+    handler = build_workbench_handler(project_version="v0.5", git_commit="abc")
+    with _running_server(handler) as port:
+        status, body = _get(port, "/history?number=06")
+        assert status == 200
+        # All 3 records have 06 in numbers; expect 3 matches
+        assert "3 筆" in body or "共 3" in body or "234.100" in body
+        # Try a number that does not exist
+        status2, body2 = _get(port, "/history?number=99")
+        assert status2 == 200
+        assert "目前過濾條件下沒有符合的紀錄" in body2
+
+
+# K-6: ?game= filters by game
+def test_history_filter_by_game(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _isolated_history) -> None:
+    _seed_history(tmp_path, n=3)  # alternating 539 / 天天樂
+    monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+    handler = build_workbench_handler(project_version="v0.5", git_commit="abc")
+    with _running_server(handler) as port:
+        status, body = _get(port, "/history?game=539")
+        assert status == 200
+        # 2 of 3 records are 539 (i=0, i=2)
+        # Body must mention the filter reduced the count
+        assert "2 筆" in body
+        status2, body2 = _get(port, "/history?game=天天樂")
+        assert "1 筆" in body2
+
+
+# K-7: ?date= filters by date
+def test_history_filter_by_date(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _isolated_history) -> None:
+    _seed_history(tmp_path, n=3)  # all on 2026-07-07
+    monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+    handler = build_workbench_handler(project_version="v0.5", git_commit="abc")
+    with _running_server(handler) as port:
+        status, body = _get(port, "/history?date=2026-07-07")
+        assert status == 200
+        assert "3 筆" in body
+        status2, body2 = _get(port, "/history?date=2026-07-08")
+        assert "目前過濾條件下沒有符合的紀錄" in body2
+
+
+# K-8: malformed JSONL does not crash the page
+def test_history_handles_malformed_jsonl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _isolated_history) -> None:
+    import betguard.webfill.history as hist
+    hist.HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    with hist.HISTORY_FILE.open("w", encoding="utf-8") as f:
+        f.write('{"history_id": "h-good", "status": "DONE", "completed_at": "2026-07-07T10:00:00+08:00", "original_text": "06.13 234", "numbers": [6, 13], "amounts": {"2": 100}, "game": "539", "play_type": "normal", "source": "未指定", "safety_flags": {"auto_submit": false, "auto_confirm": false, "auto_next": false, "danger_clicked": 0}, "confirmed_by_human": true}\n')
+        f.write("this is not json\n")
+        f.write("more garbage\n")
+    monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+    handler = build_workbench_handler(project_version="v0.5", git_commit="abc")
+    with _running_server(handler) as port:
+        status, body = _get(port, "/history")
+        assert status == 200
+        # The good record still renders
+        assert "06.13 234" in body
+        # A warning is shown about malformed lines
+        assert "壞資料" in body or "警告" in body
+        # The page did not crash
+        assert "<h1>歷史紀錄" in body
+# K-9: /history page exposes no fill / submit / accept-valid actions
+def test_history_page_has_no_danger_actions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _isolated_history
+) -> None:
+    _seed_history(tmp_path, n=1)
+    monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+    handler = build_workbench_handler(project_version="v0.5", git_commit="abc")
+    with _running_server(handler) as port:
+        status, body = _get(port, "/history")
+        assert status == 200
+        # Read-only: no forms with POST.
+        assert 'method="post"' not in body.lower()
+        assert 'method="POST"' not in body
+        # No "送出注單" / "確認對話框" / "auto-submit" UI text.
+        # Note: the descriptive paragraph intentionally mentions
+        # "accept-valid" as a *forbidden* keyword.  The check below
+        # only looks for it as a *button label* (e.g. <button> or <a>
+        # with that text), not as a substring.
+        for forbidden in ["送出注單", "確認對話框", "auto-submit"]:
+            assert forbidden not in body, (
+                f"/history page must not contain {forbidden!r}"
+            )
+        # Explicit UI controls must never be present
+        for forbidden in ["<button>送出", "<button>確認", "<button>填入",
+                          "<button>accept-valid", "<button>assisted-fill",
+                          "<a>accept-valid", "<a>assisted-fill"]:
+            assert forbidden not in body, (
+                f"/history page must not contain {forbidden!r}"
+            )
+
+
+# K-10: /history does not call any CLI or browser
+def test_history_does_not_call_cli_or_browser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _isolated_history) -> None:
+    import subprocess
+    import betguard.webui.app as wa
+
+    calls: list[tuple] = []
+    if hasattr(wa, "subprocess"):
+
+        def fake_run(*args, **kwargs):  # noqa: ANN001
+            calls.append(("wa.subprocess", args, kwargs))
+            raise AssertionError("subprocess called by webui")
+
+        monkeypatch.setattr(wa.subprocess, "run", fake_run)
+    _seed_history(tmp_path, n=1)
+    monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+    handler = build_workbench_handler(project_version="v0.5", git_commit="abc")
+    with _running_server(handler) as port:
+        status, _ = _get(port, "/history")
+        assert status == 200
+    assert calls == []

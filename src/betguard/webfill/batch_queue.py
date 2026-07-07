@@ -97,6 +97,16 @@ def mark_current_done_by_human(queue: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("current item must be WAITING_FOR_HUMAN_CONFIRM before DONE")
 
     item["status"] = DONE
+    # Append-only history write: this is the ONLY path that records
+    # to runs/history/orders.jsonl.  Auto-batch fill (batch_fill_all)
+    # sets item["status"] = "DONE" directly and is intentionally
+    # skipped here.  See batch_fill_all._fill_loop for the comment.
+    try:
+        from betguard.webfill import history as _history
+        _history.record_human_done(updated, item)
+    except ImportError:
+        # history module not available; skip silently (older builds)
+        pass
     next_item = _next_pending_item(updated, int(item.get("index", -1)))
     if next_item is None:
         updated["status"] = COMPLETED

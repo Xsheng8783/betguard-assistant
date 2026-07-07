@@ -130,6 +130,7 @@ def _render_dashboard(version: str, git_commit: str) -> str:
   <a class="danger" href="/latest-review">開啟最新 review.html</a>
   <a class="danger" href="/sop">查看 SOP</a>
   <a class="danger" href="/cli">查看 CLI reference</a>
+  <a class="danger" href="/history">查看歷史紀錄</a>
 </div>
 """
     version_html = f"""
@@ -219,6 +220,201 @@ def _render_result(
 
 def _render_doc(title: str, body: str) -> str:
     return _HTML_HEAD.format(title=title) + f"<pre>{body}</pre>" + _HTML_FOOTER
+
+
+# ---------------------------------------------------------------------------
+# History rendering
+#
+# /history is a strict read-only view.  It only ever *reads* the JSONL
+# produced by betguard.webfill.history.record_human_done.  There is no
+# POST / PUT / DELETE handler for history and no button that triggers
+# fill / submit / accept-valid.  The page is also responsible for
+# rendering a clean empty state and tolerating malformed JSONL lines.
+# ---------------------------------------------------------------------------
+
+
+def _render_history(
+    *,
+    q: str,
+    number: int | str | None,
+    game: str,
+    date: str,
+) -> str:
+    # Local import to avoid import-time cycle (webui is loaded before
+    # tests in some test setups).
+    from betguard.webfill import history as _history
+
+    malformed = 0  # number of lines load_all_records() had to skip
+    try:
+        all_records = _history.load_all_records()
+    except OSError:
+        all_records = []
+    if not _history.HISTORY_FILE.exists():
+        all_records = []
+
+    # We have to know how many lines were skipped for the warning.
+    # load_all_records() already swallows malformed lines internally;
+    # we re-scan to count them for the user-facing warning.
+    if _history.HISTORY_FILE.exists():
+        try:
+            with _history.HISTORY_FILE.open("r", encoding="utf-8") as f:
+                for raw in f:
+                    if not raw.strip():
+                        continue
+                    try:
+                        import json as _json
+                        _json.loads(raw)
+                    except _json.JSONDecodeError:
+                        malformed += 1
+        except OSError:
+            pass
+
+    records = _history.filter_records(
+        all_records,
+        query=q or None,
+        number=number,
+        game=game or None,
+        date=date or None,
+    )
+
+    # Filter form (always visible at the top of the page)
+    q_value = _html_escape(q or "")
+    game_value = _html_escape(game or "")
+    number_value = _html_escape(str(number) if number is not None else "")
+    date_value = _html_escape(date or "")
+    filter_form = f"""
+<form method="get" action="/history" class="links">
+  <input type="text" name="q" value="{q_value}" placeholder="原文關鍵字" size="20">
+  <input type="text" name="number" value="{number_value}" placeholder="號碼 (e.g. 06)" size="6">
+  <input type="text" name="game" value="{game_value}" placeholder="玩法 (e.g. 539)" size="6">
+  <input type="text" name="date" value="{date_value}" placeholder="日期 (YYYY-MM-DD)" size="10">
+  <button type="submit">篩選</button>
+  <a class="danger" href="/history">清除</a>
+</form>
+"""
+
+    if not all_records:
+        body = f"""
+<h1>歷史紀錄 (v1)</h1>
+{filter_form}
+<p style="color:#6b7280;">目前尚無歷史紀錄. 只有「人工逐筆確認 DONE」後的單會寫入這裡, 自動批次 (--real-site-assisted-fill-all) 的 DONE 不會出現.</p>
+"""
+        return _HTML_HEAD.format(title="歷史紀錄") + body + _HTML_FOOTER
+
+    if not records:
+        body = f"""
+<h1>歷史紀錄 (v1)</h1>
+{filter_form}
+<p style="color:#6b7280;">目前過濾條件下沒有符合的紀錄. 共 {len(all_records)} 筆, 篩選後 0 筆.</p>
+"""
+        return _HTML_HEAD.format(title="歷史紀錄") + body + _HTML_FOOTER
+
+    rows = []
+    for r in records:
+        completed = _html_escape(str(r.get("completed_at", "")))
+        source = _html_escape(str(r.get("source", "未指定")))
+        play = _html_escape(str(r.get("play_type", "未指定")))
+        original = str(r.get("original_text", ""))
+        original_short = _html_escape(
+            (original[:50] + "…") if len(original) > 50 else original
+        )
+        # numbers / columns summary
+        numbers = r.get("numbers") or []
+        columns = r.get("columns") or []
+        if columns:
+            numbers_summary = "; ".join(
+                ",".join(str(int(n)) for n in col) for col in columns
+            )
+        else:
+            numbers_summary = ",".join(str(int(n)) for n in numbers)
+        numbers_summary = _html_escape(numbers_summary)
+        # amount summary
+        amounts = r.get("amounts") or {}
+        if amounts:
+            amount_summary = ", ".join(
+                f"{star}={amt}" for star, amt in amounts.items()
+            )
+        elif r.get("money_total") is not None:
+            amount_summary = _html_escape(str(r.get("money_total")))
+        else:
+            amount_summary = "-"
+        amount_summary = _html_escape(amount_summary)
+        status = _html_escape(str(r.get("status", "")))
+        # Expand row: show full original_text and a one-line details dump
+        detail_id = f"d-{_html_escape(str(r.get('history_id', '')))}"
+        detail = _html_escape(
+            "{"
+            + ", ".join(
+                f'"{k}": {_json_dumps(r.get(k))}'
+                for k in (
+                    "history_id", "created_at", "completed_at",
+                    "source", "game", "play_type", "original_text",
+                    "numbers", "stars", "amounts", "unit", "money_total",
+                    "queue_item_index", "status", "safety_flags",
+                    "queue_path", "run_folder", "confirmed_by_human",
+                )
+                if k in r
+            )
+            + "}"
+        )
+        rows.append(f"""
+<tr>
+  <td>{completed}</td>
+  <td>{source}</td>
+  <td>{play}</td>
+  <td title="{_html_escape(original)}">{original_short}</td>
+  <td>{numbers_summary}</td>
+  <td>{amount_summary}</td>
+  <td>{status}</td>
+  <td><a href="#{detail_id}" onclick="document.getElementById('{detail_id}').style.display='block';return false;">展開</a></td>
+</tr>
+<tr id="{detail_id}" style="display:none;">
+  <td colspan="8"><pre style="background:#f9fafb;padding:0.5em;">{detail}</pre></td>
+</tr>
+""")
+
+    table_html = f"""
+<table>
+  <tr>
+    <th>完成時間</th>
+    <th>來源</th>
+    <th>玩法</th>
+    <th>原文摘要</th>
+    <th>號碼 / columns</th>
+    <th>金額</th>
+    <th>狀態</th>
+    <th>查看詳情</th>
+  </tr>
+  {''.join(rows)}
+</table>
+"""
+
+    warning_block = ""
+    if malformed:
+        warning_block = (
+            f'<p style="color:#c33;"><strong>警告:</strong> '
+            f'runs/history/orders.jsonl 有 {malformed} 行壞資料, 已略過. '
+            f'請人工檢查.</p>'
+        )
+
+    body = f"""
+<h1>歷史紀錄 (v1)</h1>
+{filter_form}
+{warning_block}
+<p>共 {len(records)} 筆 (過濾後) / {len(all_records)} 筆 (全部). 這是唯讀查詢頁: 沒有任何「送出」、「確認」、「填入」、「下一筆」、「accept-valid」按鈕.</p>
+{table_html}
+<div class="links">
+  <a class="danger" href="/">回首頁</a>
+</div>
+"""
+    return _HTML_HEAD.format(title="歷史紀錄") + body + _HTML_FOOTER
+
+
+def _json_dumps(value: Any) -> str:
+    """Render a Python value as a compact JSON fragment for inline display."""
+    import json as _json
+
+    return _json.dumps(value, ensure_ascii=False, separators=(", ", ": "))
 
 
 # ---------------------------------------------------------------------------
@@ -506,6 +702,30 @@ def build_workbench_handler(
                     return
                 self._send_html(
                     _render_doc("CLI reference", _html_escape(CLI_REF_PATH.read_text(encoding="utf-8")))
+                )
+                return
+            if path == "/history":
+                qs = urllib.parse.parse_qs(parsed.query)
+                q = (qs.get("q", [""])[0] or "").strip()
+                number = (qs.get("number", [""])[0] or "").strip()
+                game = (qs.get("game", [""])[0] or "").strip()
+                date = (qs.get("date", [""])[0] or "").strip()
+                # Parse number filter as int when possible
+                number_val: int | str | None
+                if number:
+                    try:
+                        number_val = int(number)
+                    except ValueError:
+                        number_val = number
+                else:
+                    number_val = None
+                self._send_html(
+                    _render_history(
+                        q=q,
+                        number=number_val,
+                        game=game,
+                        date=date,
+                    )
                 )
                 return
             if path.startswith("/runs/"):

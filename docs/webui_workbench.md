@@ -131,3 +131,75 @@ python -X utf8 -m betguard.webfill.cli `
 | 看 review.html | 既有 `review_console.py` 渲染的 HTML |
 | 人工 accept valid | `betguard.webfill.cli --batch-review-accept-valid`（**不在工作台範圍**） |
 | 進真站 fill | `betguard.webfill.cli --real-site-assisted-fill`（**絕對不會被工作台呼叫**） |
+
+---
+
+## 歷史紀錄 (v1)
+
+工作台首頁有「查看歷史紀錄」入口, 連到唯讀頁 `/history`。
+
+### 寫入時機
+
+**只有** `batch_queue.mark_current_done_by_human` (人工逐筆確認 DONE) 會寫入。
+`batch_fill_all._fill_loop` 自動 DONE **不會**寫入正式 history。
+
+儲存位置: `runs/history/orders.jsonl` (append-only JSONL, `.gitignore` 已保護)
+
+### 查詢參數
+
+- `?q=原文關鍵字` (substring 搜尋 original_text)
+- `?number=號碼` (在 numbers / columns 裡找)
+- `?game=玩法` (e.g. `539`, `天天樂`, `zhupeng`)
+- `?date=YYYY-MM-DD` (completed_at 開頭 10 碼)
+
+例:
+```
+http://127.0.0.1:8765/history?q=06.13
+http://127.0.0.1:8765/history?number=23&game=539
+http://127.0.0.1:8765/history?date=2026-07-07
+```
+
+### 空狀態
+
+如果 `runs/history/orders.jsonl` 不存在或沒有資料, 頁面顯示「目前尚無歷史紀錄」, **不會**崩潰。
+
+### 壞資料
+
+JSONL 裡有非 JSON 行會被略過, 頁面頂部顯示「警告: 有 N 行壞資料, 已略過」。
+
+### 安全保證
+
+- **Read-only**: `/history` 只有 GET. 沒有 POST / PUT / DELETE handler.
+- **沒有任何動作按鈕**: 不會看到「送出」、「確認」、「填入」、「accept-valid」、「assisted-fill」按鈕.
+- **不觸發 fill / submit / accept-valid**: 純查詢, 連 CLI 都不會 call.
+- **safety_flags 永遠 false / 0**: 不從 item / queue 讀, 寫死.
+- **history 不會驅動 fill**: 不能從 history 反過來建 approved_fill_queue 或進真站.
+
+### 欄位範例
+
+```json
+{
+  "history_id": "h-a3f2b1c8d9e4f5a6",
+  "created_at": "2026-07-07T11:45:30+08:00",
+  "completed_at": "2026-07-07T11:44:55+08:00",
+  "source": "test-source",
+  "game": "539",
+  "play_type": "normal",
+  "original_text": "06.13.23.22 234.100",
+  "numbers": [6, 13, 23, 22],
+  "stars": [2, 3, 4],
+  "amounts": {"2": 100, "3": 100, "4": 100},
+  "money_total": 100,
+  "queue_item_index": 0,
+  "status": "DONE",
+  "safety_flags": {
+    "auto_submit": false,
+    "auto_confirm": false,
+    "auto_next": false,
+    "danger_clicked": 0
+  },
+  "queue_path": "runs/2026-07-07/queue_103522.json",
+  "run_folder": "runs/2026-07-07",
+  "confirmed_by_human": true
+}
+```

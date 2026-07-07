@@ -108,6 +108,14 @@ def run_real_site_assisted_fill_all(
                     break
 
                 # Mark item DONE directly (bypass queue state machine)
+                # NOTE: this DONE is NOT human-confirmed per item.  Per the
+                # history v1 policy, we intentionally do NOT call
+                # history.record_human_done() here.  Auto-batch fill ends an
+                # item as DONE via this code path without per-item manual
+                # verification, so the official history is skipped.
+                # Human per-item confirmation goes through
+                # batch_queue.mark_current_done_by_human which DOES write
+                # to runs/history/orders.jsonl.
                 item["status"] = "DONE"
                 item["fill_completed_at"] = datetime.now(timezone.utc).isoformat()
                 # Move queue's CURRENT to next PENDING item
