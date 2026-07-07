@@ -742,15 +742,18 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     fetch('/workbench', {{
       method: 'POST',
       headers: {{ 'Content-Type': 'application/x-www-form-urlencoded' }},
-      body: 'text=' + encodeURIComponent(text) + '&game=auto'
+      body: 'text=' + encodeURIComponent(text) + '&game=auto&redirect=1',
+      redirect: 'follow'
     }}).then(function(resp) {{
-      if (resp.ok) return resp.text();
-      throw new Error('server returned ' + resp.status);
+      if (resp.redirected) {{
+        window.location.href = resp.url;
+        return;
+      }}
+      return resp.text();
     }}).then(function(html) {{
-      // Replace current page with the result
-      document.open(); document.write(html); document.close();
+      if (html) {{ document.open(); document.write(html); document.close(); }}
     }}).catch(function(err) {{
-      warn.textContent = '無法建立審核: ' + err.message + ' (請確認工作臺已啟動: streamlit run src/betguard/webui/app.py)';
+      warn.textContent = '無法建立審核: ' + err.message + ' (請確認工作臺已啟動)';
     }});
   }}
 </script>

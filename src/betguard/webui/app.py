@@ -808,6 +808,7 @@ def build_workbench_handler(
                 return
             text = (form.get("text", [""])[0] or "").strip()
             game = (form.get("game", ["auto"])[0] or "auto").strip()
+            redirect_review = (form.get("redirect", ["0"])[0] or "0") == "1"
             if not text:
                 self._send_html(_render_workbench_form("空白輸入會被拒絕"), status=400)
                 return
@@ -818,6 +819,10 @@ def build_workbench_handler(
                     _render_workbench_form(f"建立審核批次失敗: {exc}"),
                     status=500,
                 )
+                return
+            if redirect_review:
+                rel = review_path.relative_to(RUNS_DIR)
+                self._send_redirect(f"/runs/{urllib.parse.quote(str(rel))}")
                 return
             self._send_html(
                 _render_result(
