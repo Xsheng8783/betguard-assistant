@@ -854,13 +854,29 @@ def build_workbench_handler(
                 except (UnicodeDecodeError, json.JSONDecodeError):
                     self._send_json({"ok": False, "error": "invalid JSON"})
                     return
-                numbers = data.get("numbers", [])
-                stars = data.get("stars", [])
-                amounts = data.get("amounts", {})
-                if not numbers or not stars:
-                    self._send_json({"ok": False, "error": "missing numbers or stars"})
+                queue_path = (data.get("queue_path") or "").strip()
+                item_index = data.get("item_index")
+                if not queue_path or item_index is None:
+                    self._send_json({"ok": False, "error": "missing queue_path or item_index"})
                     return
-                result = _assist_fill_item(numbers=numbers, stars=stars, amounts=amounts)
+
+                # Resolve queue path relative to PROJECT_ROOT
+                resolved = _resolve_queue_path(queue_path)
+                if resolved is None:
+                    self._send_json({"ok": False, "error": f"queue not found: {queue_path}"})
+                    return
+
+                # Read queue, find item, validate, extract parsed data
+                validation = _validate_assist_fill_item(resolved, int(item_index))
+                if not validation["ok"]:
+                    self._send_json(validation)
+                    return
+
+                result = _assist_fill_item(
+                    numbers=validation["numbers"],
+                    stars=validation["stars"],
+                    amounts=validation["amounts"],
+                )
                 self._send_json(result)
                 return
 
@@ -880,6 +896,106 @@ def _html_escape(s: str) -> str:
 # ---------------------------------------------------------------------------
 # Assist fill (direct call, bypasses CLI FORBIDDEN_FLAGS)
 # ---------------------------------------------------------------------------
+
+
+def _resolve_queue_path(queue_path: str) -> Path | None:
+    """Resolve a queue path relative to PROJECT_ROOT.
+
+    Supports:
+      - Absolute paths (must exist)
+      - Relative paths from CWD or PROJECT_ROOT
+      - Queue JSON inside runs/ subdirectory
+    """
+    candidates: list[Path] = []
+    p = Path(queue_path)
+    if p.is_absolute():
+        candidates.append(p)
+    else:
+        candidates.append(PROJECT_ROOT / p)
+        candidates.append(Path(p))
+    for c in candidates:
+        try:
+            if c.exists() and c.is_file():
+                return c.resolve()
+        except OSError:
+            continue
+    return None
+
+
+def _validate_assist_fill_item(
+    queue_path: Path,
+    item_index: int,
+) -> dict[str, Any]:
+    """Read queue JSON, find item by index, validate it can be assist-filled.
+
+    Returns:
+        {"ok": True, "numbers": [...], "stars": [...], "amounts": {...}}
+        or {"ok": False, "error": "reason"}
+    """
+    import json as _json_module
+
+    try:
+        raw = queue_path.read_text(encoding="utf-8")
+        queue = _json_module.loads(raw)
+    except (OSError, _json_module.JSONDecodeError) as exc:
+        return {"ok": False, "error": f"cannot read queue: {exc}"}
+
+    # Find item in preprocessing.valid_candidates (the review page data)
+    valid_candidates = queue.get("preprocessing", {}).get("valid_candidates", [])
+    if not valid_candidates:
+        return {"ok": False, "error": "queue has no valid_candidates; Needs Review items cannot be assist-filled"}
+
+    matched = None
+    for item in valid_candidates:
+        if item.get("index") == item_index:
+            matched = item
+            break
+
+    if matched is None:
+        return {"ok": False, "error": f"item #{item_index} not found in valid_candidates; may be Needs Review/Invalid/Watchlist"}
+
+    result = matched.get("result", {})
+    if not isinstance(result, dict):
+        return {"ok": False, "error": f"item #{item_index} has no parsed result"}
+
+    if result.get("status") != "ok":
+        return {
+            "ok": False,
+            "error": f"item #{item_index} status is '{result.get('status')}', not a valid candidate; BLOCKED",
+        }
+
+    numbers = result.get("numbers", [])
+    stars = result.get("stars", [])
+    amounts = result.get("amounts", {}) or result.get("bets", {})
+
+    if not numbers:
+        return {"ok": False, "error": f"item #{item_index} parsed result has no numbers; BLOCKED"}
+    if not stars:
+        return {"ok": False, "error": f"item #{item_index} parsed result has no stars; BLOCKED"}
+
+    # Normalize amounts: convert keys to int and values to int
+    normalized_amounts: dict[str, int] = {}
+    if isinstance(amounts, dict):
+        for k, v in amounts.items():
+            try:
+                key = str(int(k))
+            except (ValueError, TypeError):
+                key = str(k)
+            try:
+                if isinstance(v, dict):
+                    val = int(v.get("money", 0))
+                else:
+                    val = int(v)
+            except (ValueError, TypeError):
+                val = 0
+            normalized_amounts[key] = val
+
+    return {
+        "ok": True,
+        "numbers": [int(n) for n in numbers],
+        "stars": [int(s) for s in stars],
+        "amounts": normalized_amounts,
+    }
 
 
 def _assist_fill_item(

@@ -452,7 +452,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       .assist-modal .am-status {{ font-size: 12px; margin-top: 8px; }}
     </style>
 </head>
-<body>
+<body data-queue-path="{_e(str(model.get('queue_path', '')))}">
   <div class="page-header">
     <div>
       <h1>🛡️ Betguard 本地審核台</h1>
@@ -787,14 +787,21 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
 
   // ---- assist fill ----
   var assistItem = null;
+  var assistInProgress = false;
+  var queuePath = document.body.getAttribute('data-queue-path') || '';
   function previewAssist(idx, fragment, summary, numbers, stars, amounts) {{
     assistItem = {{idx: idx, fragment: fragment, summary: summary, numbers: numbers, stars: stars, amounts: amounts}};
     var starNames = {{2: '二星', 3: '三星', 4: '四星'}};
     var preview = '<p><strong>原始：</strong>' + fragment + '</p><p><strong>號碼：</strong>' + numbers.join(',') + '</p>';
+    var hasAmounts = false;
     for (var s in amounts) {{
-      preview += '<p><strong>' + (starNames[parseInt(s)] || s) + '：</strong>' + amounts[s] + ' 元</p>';
+      preview += '<p><strong>' + (starNames[parseInt(s)] || s) + '金額：</strong>' + amounts[s] + ' 元</p>';
+      hasAmounts = true;
     }}
-    preview += '<p style=\"color:var(--slate);font-size:11px\">⚠️ 僅填入號碼與金額，不送出、不確認。需人工核對後手動送出。</p>';
+    if (!hasAmounts) {{
+      preview += '<p><strong style=\\"color:var(--red)\\">⚠️ 無金額資料</strong></p>';
+    }}
+    preview += '<p style=\\"color:var(--slate);font-size:11px\\">⚠️ 僅填入號碼與金額，不送出、不確認。需人工核對後手動送出。</p>';
     document.getElementById('assist-preview').innerHTML = preview;
     document.getElementById('assist-status').textContent = '';
     document.getElementById('assist-confirm-btn').disabled = false;
@@ -806,7 +813,8 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     assistItem = null;
   }}
   function confirmAssist() {{
-    if (!assistItem) return;
+    if (!assistItem || assistInProgress) return;
+    assistInProgress = true;
     var btn = document.getElementById('assist-confirm-btn');
     btn.disabled = true;
     btn.textContent = '執行中...';
@@ -815,7 +823,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     fetch('/assist-fill', {{
       method: 'POST',
       headers: {{'Content-Type': 'application/json'}},
-      body: JSON.stringify({{numbers: assistItem.numbers, stars: assistItem.stars, amounts: assistItem.amounts}})
+      body: JSON.stringify({{queue_path: queuePath, item_index: parseInt(assistItem.idx)}})
     }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
       if (data.ok) {{
         statusEl.textContent = '✅ 已輔助填入，待人工送出';
@@ -832,17 +840,19 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
           renderHistoryPanel(); updateToggleBadge();
         }}
         // Update button state
-        var rowBtn = document.querySelector('.assist-btn[onclick*=\"' + assistItem.idx + '\"]');
+        var rowBtn = document.querySelector('.assist-btn[onclick*=\\"' + assistItem.idx + '\\"]');
         if (rowBtn) {{ rowBtn.textContent = '已輔助填入'; rowBtn.classList.add('done'); }}
       }} else {{
         statusEl.textContent = '❌ 失敗: ' + (data.error || 'unknown');
         btn.disabled = false;
         btn.textContent = '重試';
+        assistInProgress = false;
       }}
     }}).catch(function(err) {{
       statusEl.textContent = '❌ 錯誤: ' + err.message;
       btn.disabled = false;
       btn.textContent = '重試';
+      assistInProgress = false;
     }});
   }}
 </script>
@@ -980,6 +990,7 @@ def _candidate_with_labels(item: dict[str, Any]) -> dict[str, Any]:
         "parsed_summary": item.get("summary", ""),
         "bet_type": result.get("type"),
         "review_labels": review_labels,
+        "result": result,
     }
 
 
@@ -988,8 +999,8 @@ def _candidate_row(item: dict[str, Any]) -> str:
     fragment = _e(str(item.get('original_fragment')))
     summary = _e(str(item.get('parsed_summary')))
     bet_type = _e(str(item.get('bet_type')))
-    # Build assist-fill data attributes for the button
-    parsed = item.get("parsed", {}) or item.get("review_result", {}) or {}
+    # Build assist-fill data attributes from the parsed result
+    parsed = item.get("result", {}) or item.get("review_result", {}) or {}
     numbers = json.dumps(parsed.get("numbers", []))
     stars = json.dumps(parsed.get("stars", []))
     amounts = parsed.get("amounts", {}) or parsed.get("bets", {}) or {}
