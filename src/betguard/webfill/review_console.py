@@ -14,6 +14,7 @@ _LABEL_CN: dict[str, str] = {
     "person_name_suffix": "疑似人名或備註",
     "ambiguous_long_token": "疑似客人唸牌黏住",
     "per_star_amount_split": "疑似星別金額拆分",
+    "car_bet": "車 / 車號",
 }
 
 _LABEL_COLOR: dict[str, str] = {
@@ -23,6 +24,7 @@ _LABEL_COLOR: dict[str, str] = {
     "person_name_suffix": "purple",
     "ambiguous_long_token": "purple",
     "per_star_amount_split": "orange",
+    "car_bet": "slate",
 }
 
 
@@ -49,15 +51,7 @@ def build_review_console_model(queue: dict[str, Any], *, queue_path: str | None 
             "warnings_count": int(preprocessing_summary.get("warnings_count", 0)),
             "ignored_metadata_count": int(preprocessing_summary.get("ignored_metadata_count", 0)),
         },
-        "valid_candidates": [
-            {
-                "index": item.get("index"),
-                "original_fragment": item.get("original_fragment") or item.get("raw"),
-                "parsed_summary": item.get("summary", ""),
-                "bet_type": item.get("result", {}).get("type"),
-            }
-            for item in preprocessing.get("valid_candidates", [])
-        ],
+        "valid_candidates": [_candidate_with_labels(item) for item in preprocessing.get("valid_candidates", [])],
         "watchlist": [_watchlist_entry(item) for item in watchlist_source],
         "invalid_fragments": [_invalid_entry(item) for item in invalid_source],
         "ignored_metadata_lines": list(preprocessing.get("ignored_metadata_lines", [])),
@@ -271,6 +265,22 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       margin: 4px 0; padding-left: 12px; border-left: 2px solid #e2e8f0;
       font-size: 12px; color: var(--slate);
     }}
+    .dismiss-btn {{
+      font-size: 11px; font-weight: 500; cursor: pointer;
+      padding: 4px 12px; border-radius: 12px;
+      background: #f8fafc; color: var(--slate);
+      border: 1px solid #e2e8f0; transition: all 0.15s;
+    }}
+    .dismiss-btn:hover {{ background: var(--green-bg); color: var(--green); border-color: var(--green); }}
+    .review-card.dismissed {{ display: none; }}
+    .controls-bar {{
+      display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; align-items: center;
+    }}
+    .controls-bar button {{
+      font-size: 11px; padding: 3px 10px; border-radius: 10px; border: 1px solid #e2e8f0;
+      background: #fff; color: var(--slate-dark); cursor: pointer;
+    }}
+    .controls-bar button:hover {{ background: #f1f5f9; }}
 
     .label-badge {{
       display: inline-block; padding: 6px 18px; border-radius: 16px; font-size: 15px;
@@ -375,10 +385,17 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
           <span class="chip" data-filter="person_name_suffix" onclick="setFilter('person_name_suffix')">人名備註 {_label_counts.get("person_name_suffix", 0)}</span>
           <span class="chip" data-filter="ambiguous_long_token" onclick="setFilter('ambiguous_long_token')">唸牌黏住 {_label_counts.get("ambiguous_long_token", 0)}</span>
           <span class="chip" data-filter="per_star_amount_split" onclick="setFilter('per_star_amount_split')">星別金額 {_label_counts.get("per_star_amount_split", 0)}</span>
+          <span class="chip" data-filter="uncategorized" onclick="setFilter('uncategorized')">未分類</span>
         </div>
       </div>
       <div class="label-counts" style="margin:10px 0;display:flex;flex-wrap:wrap;gap:8px;align-items:center">
         {_label_count_html}
+      </div>
+      <div class="controls-bar">
+        <button onclick="showDismissed()">顯示已處理</button>
+        <button onclick="hideDismissed()">隱藏已處理</button>
+        <button onclick="restoreAll()">全部復原</button>
+        <span id="dismissed-count" style="font-size:11px;color:var(--slate);margin-left:8px"></span>
       </div>
       <div class="card-list" id="review-cards">{invalid_cards}</div>
     </section>
@@ -416,11 +433,53 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
   </section>
 <script>
   var currentFilter = 'all';
+
+  // ---- localStorage + dismiss logic ----
+  var batchId = (window.location.href.match(/queue_([^/.]+)\.json/) || [])[1] || 'default';
+  var storageKey = 'betguard-dismissed-' + batchId;
+  function loadDismissed() {{
+    try {{ return JSON.parse(localStorage.getItem(storageKey) || '[]'); }} catch(e) {{ return []; }}
+  }}
+  function saveDismissed(list) {{
+    try {{ localStorage.setItem(storageKey, JSON.stringify(list)); }} catch(e) {{}}
+  }}
+  function dismissCard(btn) {{
+    var card = btn.closest('.review-card');
+    if (!card) return;
+    var idx = card.dataset.batchId;
+    card.classList.add('dismissed');
+    var dismissed = loadDismissed();
+    if (dismissed.indexOf(idx) < 0) {{ dismissed.push(idx); }}
+    saveDismissed(dismissed);
+    updateCounts();
+  }}
+  function showDismissed() {{
+    document.querySelectorAll('#review-cards .review-card.dismissed').forEach(function(c) {{ c.classList.add('hidden'); }});
+  }}
+  function hideDismissed() {{
+    document.querySelectorAll('#review-cards .review-card.dismissed').forEach(function(c) {{ c.classList.remove('hidden'); }});
+  }}
+  function restoreAll() {{
+    document.querySelectorAll('#review-cards .review-card.dismissed').forEach(function(c) {{ c.classList.remove('dismissed', 'hidden'); }});
+    localStorage.removeItem(storageKey);
+    updateCounts();
+  }}
+  (function() {{
+    var dismissed = loadDismissed();
+    document.querySelectorAll('#review-cards .review-card').forEach(function(card) {{
+      if (dismissed.indexOf(card.dataset.batchId) >= 0) {{ card.classList.add('dismissed'); }}
+    }});
+    updateCounts();
+  }})();
+  function updateCounts() {{
+    var el = document.getElementById('dismissed-count');
+    var total = document.querySelectorAll('#review-cards .review-card').length;
+    var dismissed = document.querySelectorAll('#review-cards .review-card.dismissed').length;
+    if (el) el.textContent = '已處理: ' + dismissed + ' / 剩餘: ' + (total - dismissed);
+  }}
   function setFilter(f) {{
     currentFilter = f;
-    document.querySelectorAll('.filter-chips .chip').forEach(function(c) {{
-      c.classList.toggle('active', c.dataset.filter === f);
-    }});
+    document.querySelectorAll('.filter-chips .chip').forEach(function(c) {{ c.classList.toggle('active', c.dataset.filter === f); }});
     filterCards();
   }}
   function filterCards() {{
@@ -430,7 +489,12 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     cards.forEach(function(card) {{
       var labels = (card.dataset.labels || '').toLowerCase();
       var frag = (card.dataset.fragment || '').toLowerCase();
-      var matchFilter = currentFilter === 'all' || labels.indexOf(currentFilter) >= 0;
+      var matchFilter;
+      if (currentFilter === 'uncategorized') {{
+        matchFilter = (labels.trim() === '');
+      }} else {{
+        matchFilter = currentFilter === 'all' || labels.indexOf(currentFilter) >= 0;
+      }}
       var matchSearch = !q || frag.indexOf(q) >= 0 || labels.indexOf(q) >= 0;
       card.classList.toggle('hidden', !(matchFilter && matchSearch));
     }});
@@ -471,7 +535,7 @@ def _review_card(item: dict[str, Any], kind: str) -> str:
     line_no = item.get("line_no", "")
     line_tag = f'<span class="card-line">第 {line_no} 行</span>' if line_no else ""
     return (
-        f"<div class='review-card' data-labels='{lb_attr}' data-fragment='{fragment}'>"
+        f"<div class='review-card' data-labels='{lb_attr}' data-fragment='{fragment}' data-batch-id='{_e(idx)}'>"
         f"<div class='card-bar {bar_color}'></div>"
         f"<div class='card-body'>"
         f"<div class='card-meta'><span class='card-idx'>#{idx}</span>{line_tag}</div>"
@@ -481,10 +545,11 @@ def _review_card(item: dict[str, Any], kind: str) -> str:
         f"</div>"
         f"<div class='card-right'>"
         f"<span class='card-status {kind}'>{status_cn}</span>"
-        f"<details class='card-details' style='margin-top:0'><summary>技術原因</summary>"
+        f"<details class='card-details'><summary>技術原因</summary>"
         f"<div style='text-align:left'><strong>解析：</strong>{parsed}</div>"
         f"<div style='text-align:left'><strong>原因：</strong>{reason}</div>"
         f"</details>"
+        f"<button class='dismiss-btn' onclick='dismissCard(this)' title='標記為已處理 (不影響 queue)'>✓ 已處理</button>"
         f"</div>"
         f"</div>"
     )
@@ -530,6 +595,21 @@ def _actions(queue: dict[str, Any], queue_path: str | None) -> list[str]:
         actions.append(f"python -m betguard.webfill.cli --batch-mock-next --queue {path} --pretty")
     actions.append(f"python -m betguard.webfill.cli --batch-audit-export --queue {path} --out audit.json --pretty")
     return actions
+
+
+def _candidate_with_labels(item: dict[str, Any]) -> dict[str, Any]:
+    result = item.get("result", {})
+    review_labels = _extract_review_labels(item)
+    if _is_car_related(item, result):
+        review_labels.append("car_bet")
+        review_labels = list(dict.fromkeys(review_labels))
+    return {
+        "index": item.get("index"),
+        "original_fragment": item.get("original_fragment") or item.get("raw"),
+        "parsed_summary": item.get("summary", ""),
+        "bet_type": result.get("type"),
+        "review_labels": review_labels,
+    }
 
 
 def _candidate_row(item: dict[str, Any]) -> str:
@@ -639,15 +719,35 @@ def _extract_review_labels(item: dict[str, Any]) -> list[str]:
     return labels
 
 
+def _is_car_related(item: dict[str, Any], result: dict[str, Any]) -> bool:
+    """Return True if this item is car-related."""
+    # Check result type
+    if str(result.get("type") or "").lower() in ("car", "全車"):
+        return True
+    # Check parsed summary starts with "車："
+    summary = str(item.get("summary") or "")
+    if summary.startswith("車："):
+        return True
+    # Check original fragment contains "車"
+    fragment = str(item.get("original_fragment") or item.get("raw") or "")
+    if "車" in fragment:
+        return True
+    return False
+
+
 def _watchlist_entry(item: dict[str, Any]) -> dict[str, Any]:
     result = item.get("result", {})
+    review_labels = _extract_review_labels(item)
+    if _is_car_related(item, result):
+        review_labels.append("car_bet")
+        review_labels = list(dict.fromkeys(review_labels))
     entry = {
         "index": item.get("index"), "original_fragment": item.get("original_fragment") or item.get("raw"),
         "parsed_summary": item.get("summary", ""), "bet_type": result.get("type"),
         "numbers": list(result.get("numbers", [])), "stars": list(result.get("stars", [])),
         "reason": _watchlist_reason(item), "warnings": list(item.get("warnings", [])),
         "is_missing_money": _is_missing_money_only(item), "accepted_automatically": False,
-        "review_labels": _extract_review_labels(item),
+        "review_labels": review_labels,
     }
     entry.update(_parsed_amount_view(result))
     return entry
@@ -655,12 +755,19 @@ def _watchlist_entry(item: dict[str, Any]) -> dict[str, Any]:
 
 def _invalid_entry(item: dict[str, Any]) -> dict[str, Any]:
     result = item.get("result", {})
+    review_labels = _extract_review_labels(item)
+    # Car detection: add car_bet label if result type is "car", or
+    # parsed_summary starts with "車：", or the original fragment contains "車".
+    if _is_car_related(item, result):
+        review_labels.append("car_bet")
+        # Remove duplicates
+        review_labels = list(dict.fromkeys(review_labels))
     return {
         "index": item.get("index"), "original_fragment": item.get("original_fragment") or item.get("raw"),
         "parsed_summary": item.get("summary", ""), "numbers": list(result.get("numbers", [])),
         "stars": list(result.get("stars", [])), "reason": _reason_text(item),
         "warnings": list(item.get("warnings", [])), "errors": list(item.get("errors", [])),
-        "is_missing_money": _is_missing_money_only(item), "review_labels": _extract_review_labels(item),
+        "is_missing_money": _is_missing_money_only(item), "review_labels": review_labels,
     }
 
 
