@@ -1011,30 +1011,45 @@ def _assist_fill_item(
     amounts: dict[str, int],
     game: str = "539",
 ) -> dict[str, Any]:
-    """Web assisted fill is currently BLOCKED by the safety guard.
+    """Run the allowlisted web assisted fill executor.
 
-    ``--real-site-assisted-fill`` is in FORBIDDEN_FLAGS and the web
-    workbench must never call it directly.  Real-site fill is only
-    allowed through the explicit CLI path where the user opts in via
-    ``--i-understand-real-site-fill-risk``.
+    Opens a visible browser, waits for the user to log in and navigate
+    (via ``input()`` in the terminal where the workbench server runs),
+    fills numbers via knockout and amounts via Playwright, then stops.
+    Never submits, confirms, or clicks danger buttons.
 
-    The validation / preview path still works: the review page shows
-    numbers, stars, and per-star amounts in the preview modal.  The
-    user can use those to copy-paste into a manual CLI fill session.
-
-    When a safe allowlisted executor is added, this function will be
-    updated to call it instead.
+    The HTTP request blocks while the browser session is active — this
+    is intentional so the web UI can show "已輔助填入" after completion.
     """
-    return {
-        "ok": False,
-        "error": (
-            "web assisted fill executor is blocked by safety guard. "
-            "Real-site fill must be initiated from the CLI with "
-            "--i-understand-real-site-fill-risk. "
-            "Use the preview numbers/stars/amounts shown above to "
-            "manually configure a CLI fill session."
-        ),
-    }
+    try:
+        from betguard.webfill.web_assisted_fill_executor import (
+            execute_web_assisted_fill_one_item,
+        )
+    except ImportError:
+        return {
+            "ok": False,
+            "error": "web assisted fill executor not available (import error)",
+        }
+
+    try:
+        result = execute_web_assisted_fill_one_item(
+            numbers=numbers,
+            stars=stars,
+            amounts=amounts,
+            url="https://www.gts362.com",
+            game=game,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"web assisted fill executor error: {exc}",
+        }
+
+    # Enforce safety invariants regardless of what the executor returns
+    result.setdefault("auto_submit", False)
+    result.setdefault("auto_confirm", False)
+    result.setdefault("danger_buttons_clicked", [])
+    return result
 
 
 # ---------------------------------------------------------------------------
