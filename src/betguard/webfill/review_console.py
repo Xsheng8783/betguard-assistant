@@ -422,6 +422,34 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       .paste-block .btn-clear {{ color: var(--slate); }}
       .paste-block .btn-clear:hover {{ background: #fee2e2; color: var(--red); }}
       .paste-block .paste-warn {{ font-size: 11px; color: var(--slate); }}
+
+      /* ---- assist-fill button + modal ---- */
+      .assist-btn {{
+        font-size: 11px; padding: 2px 10px; border-radius: 10px; cursor: pointer;
+        background: var(--blue); color: #fff; border: none; font-weight: 500;
+      }}
+      .assist-btn:hover {{ background: #1d4ed8; }}
+      .assist-btn.done {{ background: var(--green); cursor: default; }}
+      .assist-modal-overlay {{
+        display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4);
+        z-index: 2000; align-items: center; justify-content: center;
+      }}
+      .assist-modal-overlay.show {{ display: flex; }}
+      .assist-modal {{
+        background: #fff; border-radius: 12px; padding: 24px; max-width: 440px;
+        width: 90%; box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+      }}
+      .assist-modal h3 {{ font-size: 15px; margin-bottom: 12px; }}
+      .assist-modal .am-preview {{ font-size: 12px; color: var(--slate); margin-bottom: 16px; }}
+      .assist-modal .am-actions {{ display: flex; gap: 8px; justify-content: flex-end; }}
+      .assist-modal .am-actions button {{
+        font-size: 13px; padding: 6px 14px; border-radius: 8px; cursor: pointer;
+        border: 1px solid #e2e8f0; background: #fff;
+      }}
+      .assist-modal .btn-confirm {{ background: var(--blue); color: #fff; border-color: var(--blue); }}
+      .assist-modal .btn-confirm:hover {{ background: #1d4ed8; }}
+      .assist-modal .btn-cancel {{ color: var(--slate); }}
+      .assist-modal .am-status {{ font-size: 12px; margin-top: 8px; }}
     </style>
 </head>
 <body>
@@ -756,6 +784,67 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       warn.textContent = '無法建立審核: ' + err.message + ' (請確認工作臺已啟動)';
     }});
   }}
+
+  // ---- assist fill ----
+  var assistItem = null;
+  function previewAssist(idx, fragment, summary, numbers, stars, amounts) {{
+    assistItem = {{idx: idx, fragment: fragment, summary: summary, numbers: numbers, stars: stars, amounts: amounts}};
+    var starNames = {{2: '二星', 3: '三星', 4: '四星'}};
+    var preview = '<p><strong>原始：</strong>' + fragment + '</p><p><strong>號碼：</strong>' + numbers.join(',') + '</p>';
+    for (var s in amounts) {{
+      preview += '<p><strong>' + (starNames[parseInt(s)] || s) + '：</strong>' + amounts[s] + ' 元</p>';
+    }}
+    preview += '<p style=\"color:var(--slate);font-size:11px\">⚠️ 僅填入號碼與金額，不送出、不確認。需人工核對後手動送出。</p>';
+    document.getElementById('assist-preview').innerHTML = preview;
+    document.getElementById('assist-status').textContent = '';
+    document.getElementById('assist-confirm-btn').disabled = false;
+    document.getElementById('assist-confirm-btn').textContent = '確認輔助填入';
+    document.getElementById('assist-modal-overlay').classList.add('show');
+  }}
+  function closeAssistModal() {{
+    document.getElementById('assist-modal-overlay').classList.remove('show');
+    assistItem = null;
+  }}
+  function confirmAssist() {{
+    if (!assistItem) return;
+    var btn = document.getElementById('assist-confirm-btn');
+    btn.disabled = true;
+    btn.textContent = '執行中...';
+    var statusEl = document.getElementById('assist-status');
+    statusEl.textContent = '處理中... 瀏覽器將開啟，請手動登入後按 Enter。';
+    fetch('/assist-fill', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{numbers: assistItem.numbers, stars: assistItem.stars, amounts: assistItem.amounts}})
+    }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
+      if (data.ok) {{
+        statusEl.textContent = '✅ 已輔助填入，待人工送出';
+        btn.textContent = '已完成';
+        // Add to history
+        var history = loadHistory();
+        if (!history.some(function(h) {{ return h.idx === assistItem.idx && h.type === '已輔助填入，待人工送出'; }})) {{
+          history.unshift({{
+            idx: assistItem.idx, time: new Date().toLocaleTimeString(),
+            fragment: assistItem.fragment, summary: assistItem.summary,
+            type: '已輔助填入，待人工送出'
+          }});
+          saveHistory(history);
+          renderHistoryPanel(); updateToggleBadge();
+        }}
+        // Update button state
+        var rowBtn = document.querySelector('.assist-btn[onclick*=\"' + assistItem.idx + '\"]');
+        if (rowBtn) {{ rowBtn.textContent = '已輔助填入'; rowBtn.classList.add('done'); }}
+      }} else {{
+        statusEl.textContent = '❌ 失敗: ' + (data.error || 'unknown');
+        btn.disabled = false;
+        btn.textContent = '重試';
+      }}
+    }}).catch(function(err) {{
+      statusEl.textContent = '❌ 錯誤: ' + err.message;
+      btn.disabled = false;
+      btn.textContent = '重試';
+    }});
+  }}
 </script>
 
   <button id="history-toggle-btn" class="history-toggle" onclick="toggleHistoryPanel()" title="剛剛下注紀錄">
@@ -767,6 +856,18 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       <button onclick="clearHistory()">清空全部</button>
     </div>
     <div id="history-panel-body" class="history-panel-body"></div>
+  </div>
+
+  <div id="assist-modal-overlay" class="assist-modal-overlay">
+    <div class="assist-modal">
+      <h3>🔧 輔助填入預覽</h3>
+      <div class="am-preview" id="assist-preview"></div>
+      <div class="am-status" id="assist-status"></div>
+      <div class="am-actions">
+        <button class="btn-cancel" onclick="closeAssistModal()">取消</button>
+        <button class="btn-confirm" id="assist-confirm-btn" onclick="confirmAssist()">確認輔助填入</button>
+      </div>
+    </div>
   </div>
 </body>
 </html>
@@ -883,12 +984,23 @@ def _candidate_with_labels(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _candidate_row(item: dict[str, Any]) -> str:
+    idx = _e(str(item.get('index')))
+    fragment = _e(str(item.get('original_fragment')))
+    summary = _e(str(item.get('parsed_summary')))
+    bet_type = _e(str(item.get('bet_type')))
+    # Build assist-fill data attributes for the button
+    parsed = item.get("parsed", {}) or item.get("review_result", {}) or {}
+    numbers = json.dumps(parsed.get("numbers", []))
+    stars = json.dumps(parsed.get("stars", []))
+    amounts = parsed.get("amounts", {}) or parsed.get("bets", {}) or {}
+    amounts_json = json.dumps({str(k): int(v.get("money", v)) if isinstance(v, dict) else int(v) for k, v in amounts.items()}) if amounts else "{}"
     return (
         "<tr>"
-        f"<td>{_e(str(item.get('index')))}</td>"
-        f"<td>{_e(str(item.get('original_fragment')))}</td>"
-        f"<td>{_e(str(item.get('parsed_summary')))}</td>"
-        f"<td>{_e(str(item.get('bet_type')))}</td>"
+        f"<td>{idx}</td>"
+        f"<td>{fragment}</td>"
+        f"<td>{summary}</td>"
+        f"<td>{bet_type}</td>"
+        f"<td><button class='assist-btn' onclick='previewAssist(\"{idx}\",\"{fragment}\",\"{summary}\",{numbers},{stars},{amounts_json})'>輔助填入</button></td>"
         "</tr>"
     )
 
