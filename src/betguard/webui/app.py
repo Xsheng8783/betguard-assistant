@@ -867,7 +867,11 @@ def build_workbench_handler(
                     return
 
                 # Read queue, find item, validate, extract parsed data
-                validation = _validate_assist_fill_item(resolved, int(item_index))
+                try:
+                    validation = _validate_assist_fill_item(resolved, int(item_index))
+                except (TypeError, ValueError) as exc:
+                    self._send_json({"ok": False, "error": f"invalid item_index: {exc}"})
+                    return
                 if not validation["ok"]:
                     self._send_json(validation)
                     return
@@ -895,7 +899,7 @@ def _html_escape(s: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Assist fill (direct call, bypasses CLI FORBIDDEN_FLAGS)
+# Assist fill (validation + preview only; execution is blocked by safety guard)
 # ---------------------------------------------------------------------------
 
 
@@ -1007,68 +1011,30 @@ def _assist_fill_item(
     amounts: dict[str, int],
     game: str = "539",
 ) -> dict[str, Any]:
-    """Trigger single-item real-site assisted fill.
+    """Web assisted fill is currently BLOCKED by the safety guard.
 
-    Creates a temporary accepted queue and runs the fill CLI.
-    The fill opens its own browser window — user must manually login
-    and press Enter.  Never auto-submits or auto-confirms.
+    ``--real-site-assisted-fill`` is in FORBIDDEN_FLAGS and the web
+    workbench must never call it directly.  Real-site fill is only
+    allowed through the explicit CLI path where the user opts in via
+    ``--i-understand-real-site-fill-risk``.
+
+    The validation / preview path still works: the review page shows
+    numbers, stars, and per-star amounts in the preview modal.  The
+    user can use those to copy-paste into a manual CLI fill session.
+
+    When a safe allowlisted executor is added, this function will be
+    updated to call it instead.
     """
-    import json as _json_module
-    import tempfile
-    from betguard.formatter import format_bet_summary
-
-    # Build a minimal queue with one accepted item
-    parsed = {
-        "status": "ok",
-        "numbers": numbers,
-        "stars": stars,
-        "amounts": amounts,
-        "game": game,
+    return {
+        "ok": False,
+        "error": (
+            "web assisted fill executor is blocked by safety guard. "
+            "Real-site fill must be initiated from the CLI with "
+            "--i-understand-real-site-fill-risk. "
+            "Use the preview numbers/stars/amounts shown above to "
+            "manually configure a CLI fill session."
+        ),
     }
-    item = {
-        "index": 0,
-        "status": "CURRENT",
-        "original": "",
-        "summary": format_bet_summary(parsed),
-        "parsed": parsed,
-        "parsed_summary": format_bet_summary(parsed),
-        "review_result": parsed,
-        "fill_plan": {},
-        "accepted_by_human": True,
-        "warnings": [],
-        "errors": [],
-    }
-    queue = {
-        "mode": "batch_assisted_fill_queue",
-        "status": "READY",
-        "current_index": 0,
-        "total": 1,
-        "done_count": 0,
-        "items": [item],
-        "summary": {"total": 1, "ok": 1, "blocked": 0, "current_index": 1, "remaining": 1},
-        "final_decision": {"real_site_auto_submit": False, "human_required_each_item": True},
-    }
-
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
-        f.write(_json_module.dumps(queue, ensure_ascii=False))
-        queue_path = f.name
-
-    try:
-        proc = _run_cli([
-            "--real-site-assisted-fill",
-            "--queue", queue_path,
-            "--url", "https://www.gts362.com",
-            "--i-understand-real-site-fill-risk",
-            "--pretty",
-        ])
-        if proc.returncode != 0:
-            return {"ok": False, "error": proc.stderr.strip()[:500] or f"rc={proc.returncode}"}
-        return {"ok": True, "numbers": numbers, "stars": stars, "amounts": amounts}
-    finally:
-        try:
-            Path(queue_path).unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 # ---------------------------------------------------------------------------
