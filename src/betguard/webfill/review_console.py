@@ -277,6 +277,14 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       border: 1px solid #e2e8f0; transition: all 0.15s;
     }}
     .dismiss-btn:hover {{ background: var(--green-bg); color: var(--green); border-color: var(--green); }}
+    .history-btn {{
+      font-size: 11px; font-weight: 500; cursor: pointer;
+      padding: 4px 12px; border-radius: 12px;
+      background: #eff6ff; color: var(--blue);
+      border: 1px solid #bfdbfe; transition: all 0.15s;
+    }}
+    .history-btn:hover {{ background: var(--blue); color: #fff; }}
+    .history-btn.done {{ background: var(--green-bg); color: var(--green); border-color: var(--green); cursor: default; }}
     .review-card.dismissed {{ display: none; }}
     .controls-bar {{
       display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; align-items: center;
@@ -336,6 +344,55 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       body {{ padding: 12px; }}
       .stats-grid {{ grid-template-columns: repeat(3, 1fr); }}
       .safety-card ul {{ grid-template-columns: 1fr; }}
+    }}
+
+    /* ---- 剛剛下注紀錄 side panel ---- */
+    .history-panel {{
+      position: fixed; right: 0; top: 0; width: 360px; height: 100vh;
+      background: var(--white); box-shadow: -2px 0 12px rgba(0,0,0,0.08);
+      z-index: 1000; transform: translateX(100%); transition: transform 0.25s;
+      display: flex; flex-direction: column;
+    }}
+    .history-panel.open {{ transform: translateX(0); }}
+    .history-panel-header {{
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 16px 20px; border-bottom: 1px solid #e2e8f0;
+      background: #f8fafc; flex-shrink: 0;
+    }}
+    .history-panel-header h3 {{ font-size: 14px; font-weight: 600; }}
+    .history-panel-header button {{
+      font-size: 11px; padding: 3px 10px; border-radius: 8px;
+      border: 1px solid #e2e8f0; background: #fff; cursor: pointer; color: var(--slate);
+    }}
+    .history-panel-header button:hover {{ background: #fee2e2; color: var(--red); border-color: #fecaca; }}
+    .history-panel-body {{
+      flex: 1; overflow-y: auto; padding: 12px 16px;
+    }}
+    .history-item {{
+      background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;
+      padding: 10px 12px; margin-bottom: 8px; font-size: 12px;
+    }}
+    .history-item .hi-time {{ color: var(--slate); font-size: 10px; }}
+    .history-item .hi-fragment {{ font-weight: 600; font-size: 14px; margin: 4px 0; }}
+    .history-item .hi-summary {{ color: var(--slate); font-size: 11px; }}
+    .history-item .hi-type {{ font-size: 10px; margin-top: 4px; }}
+    .history-item .hi-del {{
+      float: right; cursor: pointer; color: var(--slate); font-size: 10px;
+      padding: 2px 6px; border-radius: 4px; border: 1px solid #e2e8f0; background: #fff;
+    }}
+    .history-item .hi-del:hover {{ color: var(--red); border-color: var(--red); }}
+    .history-toggle {{
+      position: fixed; right: 12px; bottom: 20px; z-index: 1001;
+      background: var(--blue); color: #fff; border: none; border-radius: 50%;
+      width: 44px; height: 44px; font-size: 18px; cursor: pointer;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    }}
+    .history-toggle.has-items {{ background: var(--green); }}
+    .history-toggle .count-badge {{
+      position: absolute; top: -4px; right: -4px;
+      background: var(--red); color: #fff; font-size: 9px; font-weight: 700;
+      width: 18px; height: 18px; border-radius: 50%; display: flex;
+      align-items: center; justify-content: center;
     }}
   </style>
 </head>
@@ -508,10 +565,124 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     }});
   }}
   document.querySelector('.search-box').addEventListener('input', filterCards);
+
+  // ---- 剛剛下注紀錄 ----
+  var historyStorageKey = 'betguard-history-' + batchId;
+  function loadHistory() {{
+    try {{ return JSON.parse(localStorage.getItem(historyStorageKey) || '[]'); }} catch(e) {{ return []; }}
+  }}
+  function saveHistory(list) {{
+    try {{ localStorage.setItem(historyStorageKey, JSON.stringify(list)); }} catch(e) {{}}
+  }}
+  function addToHistory(btn) {{
+    var card = btn.closest('.review-card');
+    if (!card) return;
+    var idx = card.dataset.batchId;
+    var history = loadHistory();
+    if (history.some(function(h) {{ return h.idx === idx; }})) {{
+      alert('此筆已記錄');
+      return;
+    }}
+    var frag = card.querySelector('.card-fragment') ? card.querySelector('.card-fragment').textContent : '';
+    var summary = '';
+    var details = card.querySelector('.card-details div');
+    if (details) summary = details.textContent.replace('解析：', '').trim();
+    var typeEl = card.querySelector('.card-status');
+    var kind = typeEl ? typeEl.className.replace('card-status ', '') : '';
+    var kindMap = {{invalid: '需人工確認', watch: '待觀察'}};
+    var typeText = kindMap[kind] || '正常';
+    if (kind === 'invalid') typeText = typeEl ? typeEl.textContent.trim() : typeText;
+    history.unshift({{
+      idx: idx, time: new Date().toLocaleTimeString(),
+      fragment: frag, summary: summary, type: typeText
+    }});
+    saveHistory(history);
+    btn.textContent = '已記錄'; btn.classList.add('done');
+    btn.onclick = function() {{ alert('此筆已記錄'); }};
+    renderHistoryPanel();
+    updateToggleBadge();
+  }}
+  function removeFromHistory(idx) {{
+    var history = loadHistory().filter(function(h) {{ return h.idx !== idx; }});
+    saveHistory(history);
+    renderHistoryPanel();
+    updateToggleBadge();
+    var card = document.querySelector('.review-card[data-batch-id=\"' + idx + '\"]');
+    if (card) {{
+      var btn = card.querySelector('.history-btn');
+      if (btn) {{ btn.textContent = '已手動下注'; btn.classList.remove('done'); btn.onclick = function() {{ addToHistory(btn); }}; }}
+    }}
+  }}
+  function clearHistory() {{
+    if (!confirm('確定清除所有紀錄？')) return;
+    localStorage.removeItem(historyStorageKey);
+    document.querySelectorAll('.review-card .history-btn.done').forEach(function(btn) {{
+      btn.textContent = '已手動下注'; btn.classList.remove('done');
+      btn.onclick = function() {{ addToHistory(btn); }};
+    }});
+    renderHistoryPanel(); updateToggleBadge();
+  }}
+  function toggleHistoryPanel() {{
+    var panel = document.getElementById('history-side-panel');
+    panel.classList.toggle('open');
+  }}
+  function renderHistoryPanel() {{
+    var body = document.getElementById('history-panel-body');
+    if (!body) return;
+    var history = loadHistory();
+    if (history.length === 0) {{
+      body.innerHTML = '<div class=\"empty-block\">尚無紀錄。點擊卡片上的「已手動下注」按鈕加入。</div>';
+      return;
+    }}
+    var html = '';
+    history.forEach(function(h) {{
+      html += '<div class=\"history-item\">' +
+        '<button class=\"hi-del\" onclick=\"removeFromHistory(\\'' + h.idx + '\\')\">✕</button>' +
+        '<div class=\"hi-time\">' + h.time + ' · #' + h.idx + '</div>' +
+        '<div class=\"hi-fragment\">' + (h.fragment || '') + '</div>' +
+        '<div class=\"hi-summary\">' + (h.summary || '') + '</div>' +
+        '<div class=\"hi-type\">' + (h.type || '') + '</div>' +
+        '</div>';
+    }});
+    body.innerHTML = html;
+  }}
+  function updateToggleBadge() {{
+    var toggle = document.getElementById('history-toggle-btn');
+    var badge = document.getElementById('history-count-badge');
+    if (!toggle || !badge) return;
+    var count = loadHistory().length;
+    badge.textContent = count;
+    badge.style.display = count > 0 ? 'flex' : 'none';
+    toggle.classList.toggle('has-items', count > 0);
+  }}
+  (function() {{
+    renderHistoryPanel(); updateToggleBadge();
+    var history = loadHistory();
+    var doneIds = history.map(function(h) {{ return h.idx; }});
+    document.querySelectorAll('#review-cards .review-card, .card-list .review-card').forEach(function(card) {{
+      var idx = card.dataset.batchId;
+      if (doneIds.indexOf(idx) >= 0) {{
+        var btn = card.querySelector('.history-btn');
+        if (btn) {{ btn.textContent = '已記錄'; btn.classList.add('done'); btn.onclick = function() {{ alert('此筆已記錄'); }}; }}
+      }}
+    }});
+  }})();
 </script>
+
+  <button id="history-toggle-btn" class="history-toggle" onclick="toggleHistoryPanel()" title="剛剛下注紀錄">
+    📋<span id="history-count-badge" class="count-badge" style="display:none">0</span>
+  </button>
+  <div id="history-side-panel" class="history-panel">
+    <div class="history-panel-header">
+      <h3>📋 剛剛下注紀錄</h3>
+      <button onclick="clearHistory()">清空全部</button>
+    </div>
+    <div id="history-panel-body" class="history-panel-body"></div>
+  </div>
 </body>
 </html>
 """
+
 
 
 def _review_card(item: dict[str, Any], kind: str) -> str:
@@ -558,6 +729,7 @@ def _review_card(item: dict[str, Any], kind: str) -> str:
         f"<div style='text-align:left'><strong>原因：</strong>{reason}</div>"
         f"</details>"
         f"<button class='dismiss-btn' onclick='dismissCard(this)' title='標記為已處理 (不影響 queue)'>✓ 已處理</button>"
+        f"<button class='history-btn' onclick='addToHistory(this)' title='加入剛剛下注紀錄 (僅存瀏覽器)'>已手動下注</button>"
         f"</div>"
         f"</div>"
     )
