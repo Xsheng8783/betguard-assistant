@@ -3,6 +3,7 @@
 venv/
 Lib/
 Scripts/
+!scripts/
 pyvenv.cfg
 .pytest_cache/
 __pycache__/
@@ -37,3 +38,4 @@ amount_summary.txt
 
 # Local workbench artifacts (created by `python -m betguard.webui.app`)
 runs/
+dist/
