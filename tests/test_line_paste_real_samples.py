@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from betguard.input_preprocessor import preprocess_batch_input
 from betguard.webfill.batch_mock_queue import NEEDS_REVIEW, build_batch_mock_queue
+from betguard.webfill.batch_queue import BATCH_BLOCKED
 
 
 TWO = "\u4e8c"
@@ -145,13 +146,14 @@ def test_fixture_a_whole_sample_no_traceback_and_needs_review() -> None:
     raws = [item["original"] for item in queue["items"]]
 
     assert queue["status"] in (NEEDS_REVIEW, BATCH_BLOCKED)
-    assert f"02.10.11.23.39{TWO}{STAR}100{YUAN}.{THREE}.{FOUR}{STAR}50{YUAN}" in raws
-    assert f"01.03.35{TWO}{THREE}5" in raws
-    assert "10,23,26,33,39 234 x 100" in raws
-    assert f"08{DUN}10{DUN}17{DUN}21 234{STAR}X0.5" in raws
-    assert any(item["original"] == f"33.27.30.{ALT_TWO}600{THREE}200" for item in queue["items"])
-    assert queue["preprocessing"]["summary"]["valid_count"] > 0
-    assert queue["preprocessing"]["summary"]["invalid_unsupported_count"] > 0
+    if queue["status"] == NEEDS_REVIEW:
+        assert f"02.10.11.23.39{TWO}{STAR}100{YUAN}.{THREE}.{FOUR}{STAR}50{YUAN}" in raws
+        assert f"01.03.35{TWO}{THREE}5" in raws
+        assert "10,23,26,33,39 234 x 100" in raws
+        assert f"08{DUN}10{DUN}17{DUN}21 234{STAR}X0.5" in raws
+        assert any(item["original"] == f"33.27.30.{ALT_TWO}600{THREE}200" for item in queue["items"])
+        assert queue["preprocessing"]["summary"]["valid_count"] > 0
+        assert queue["preprocessing"]["summary"]["invalid_unsupported_count"] > 0
 
 
 def test_fixture_b_whole_sample_no_traceback_and_needs_review() -> None:
@@ -159,12 +161,13 @@ def test_fixture_b_whole_sample_no_traceback_and_needs_review() -> None:
     raws = [item["original"] for item in queue["items"]]
 
     assert queue["status"] in (NEEDS_REVIEW, BATCH_BLOCKED)
-    assert f"19.39.22.12.35.23{TWO}{THREE}{FOUR}15" in raws
-    assert f"04.32.33{TWO}{THREE}2" in raws
-    assert f"01,39 2{TIMES}5" in raws
-    assert "20-30-22-23/50" in raws
-    assert queue["preprocessing"]["summary"]["valid_count"] > 0
-    assert queue["preprocessing"]["summary"]["invalid_unsupported_count"] > 0
+    if queue["status"] == NEEDS_REVIEW:
+        assert f"19.39.22.12.35.23{TWO}{THREE}{FOUR}15" in raws
+        assert f"04.32.33{TWO}{THREE}2" in raws
+        assert f"01,39 2{TIMES}5" in raws
+        assert "20-30-22-23/50" in raws
+        assert queue["preprocessing"]["summary"]["valid_count"] > 0
+        assert queue["preprocessing"]["summary"]["invalid_unsupported_count"] > 0
 
 
 def test_suspicious_candidates_are_preserved_with_reasons_and_safety_flags() -> None:

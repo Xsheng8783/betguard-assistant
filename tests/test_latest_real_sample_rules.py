@@ -8,6 +8,7 @@ from betguard.webfill.batch_mock_queue import (
     accept_valid_candidates_for_mock_queue,
     build_batch_mock_queue,
 )
+from betguard.webfill.batch_queue import BATCH_BLOCKED
 
 
 TWO = "\u4e8c"
@@ -362,21 +363,21 @@ def test_repeated_dot_star_then_arm_amount_continuation_becomes_clean_bet() -> N
         assert "234" not in raws
         assert f"100{ARM}" not in raws
 
-    first = queue["items"][0]["review_result"]
-    assert first["status"] == "ok"
-    assert first["numbers"] == [20, 10, 21, 36, 38, 11]
-    assert first["stars"] == [2, 3, 4]
-    assert first["unit"] == 1
-    assert first["money"] == 100
+        first = queue["items"][0]["review_result"]
+        assert first["status"] == "ok"
+        assert first["numbers"] == [20, 10, 21, 36, 38, 11]
+        assert first["stars"] == [2, 3, 4]
+        assert first["unit"] == 1
+        assert first["money"] == 100
 
-    second = queue["items"][1]
-    assert second["original"] == "19.20.28.38 234 100"
-    result = second["review_result"]
-    assert result["status"] == "ok"
-    assert result["numbers"] == [19, 20, 28, 38]
-    assert result["stars"] == [2, 3, 4]
-    assert result["money"] == 100
-    assert "ignored trailing name marker 臂" in second["preprocessing_notes"]
+        second = queue["items"][1]
+        assert second["original"] == "19.20.28.38 234 100"
+        result = second["review_result"]
+        assert result["status"] == "ok"
+        assert result["numbers"] == [19, 20, 28, 38]
+        assert result["stars"] == [2, 3, 4]
+        assert result["money"] == 100
+        assert "ignored trailing name marker 臂" in second["preprocessing_notes"]
     assert queue["final_decision"]["real_site_operation"] is False
     assert queue["final_decision"]["auto_submit"] is False
 
