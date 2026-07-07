@@ -530,6 +530,41 @@ def _normalize_write_word_multiplier(value: str, notes: list[str]) -> str:
     return updated
 
 
+def _normalize_per_star_each(value: str, notes: list[str]) -> str:
+    """Expand per-star '各' (each) patterns to individual star-amount pairs.
+
+    Converts "23星各2" → "二星2 三星2", "234星各5" → "二星5 三星5 四星5".
+    Also normalizes leftover single numeric stars in the same fragment.
+    """
+    updated = value
+    match = re.search(r"(?<!\d)([234]{2,3})星各(\d+(?:\.\d+)?)(?!\d)", updated)
+    if match:
+        star_str = match.group(1)
+        each = match.group(2)
+        parts = [f"{NUMERIC_STAR_WORDS[ch]}星{each}" for ch in star_str]
+        replacement = " ".join(parts)
+        updated = updated[:match.start()] + replacement + updated[match.end():]
+        notes.append("normalized per-star each")
+
+        # After 各 expansion, also normalize remaining single numeric stars
+        # in the same fragment (e.g. "4星X1" → "四星1")
+        updated2 = re.sub(
+            r"(?:(?<=\s)|^)([234])星[xX×*](\d+(?:\.\d+)?)",
+            lambda m: f"{NUMERIC_STAR_WORDS[m.group(1)]}星{m.group(2)}",
+            updated,
+        )
+        updated2 = re.sub(
+            r"(?:(?<=\s)|^)([234])星(?!各)",
+            lambda m: f"{NUMERIC_STAR_WORDS[m.group(1)]}星",
+            updated2,
+        )
+        if updated2 != updated:
+            notes.append("normalized remaining numeric stars")
+        return updated2
+
+    return updated
+
+
 def _normalize_235_star_typo(value: str, notes: list[str]) -> str:
     match = re.fullmatch(r"235\s*-\s*(\d+(?:\.\d+)?)", value.strip())
     if not match:
@@ -612,6 +647,7 @@ def _clean_line_content(line: str) -> tuple[str, list[str]]:
     value = updated
 
     value = _normalize_write_word_multiplier(value, notes)
+    value = _normalize_per_star_each(value, notes)
     value = _normalize_235_star_typo(value, notes)
     value = _strip_decorative_star_parens(value, notes)
     value = _normalize_numeric_per_star_groups(value, notes)
@@ -853,12 +889,24 @@ def _review_classification_labels(value: str) -> list[str]:
         labels.append("review_label:ambiguous_long_token")
 
     # 6) per_star_amount_split: per-star amount patterns
-    #    e.g. "23星各2 4星X1" or "二三星各100"
+    #    Matches both raw form ("23星各2 4星X1") and normalized form ("二星2 三星2 四星1").
     if re.search(
         r"(?:[234二三四兩]{2,3}|二三四|兩三四)[星]?\s*各\s*\d+",
         value,
+    ) or re.search(
+        r"(?:[二三四兩]星\d+(?:\.\d+)?\s*){2,}",
+        value,
     ):
         labels.append("review_label:per_star_amount_split")
+
+    # 7) write_shorthand: 寫 multiplier patterns like 28寫10
+    if re.search(r"\d{2}\s*寫\s*\d+", value):
+        labels.append("review_label:write_shorthand")
+
+    # 8) tail_write_shorthand: tail + per-column write patterns
+    #    e.g. "其它8尾各寫2" or "尾X寫N"
+    if re.search(r"尾\s*各?\s*寫\s*\d+", value):
+        labels.append("review_label:tail_write_shorthand")
 
     return labels
 

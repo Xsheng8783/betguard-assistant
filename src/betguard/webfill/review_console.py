@@ -15,6 +15,8 @@ _LABEL_CN: dict[str, str] = {
     "ambiguous_long_token": "疑似客人唸牌黏住",
     "per_star_amount_split": "疑似星別金額拆分",
     "car_bet": "車 / 車號",
+    "write_shorthand": "寫法簡寫",
+    "tail_write_shorthand": "尾數寫法",
 }
 
 _LABEL_COLOR: dict[str, str] = {
@@ -25,6 +27,8 @@ _LABEL_COLOR: dict[str, str] = {
     "ambiguous_long_token": "purple",
     "per_star_amount_split": "orange",
     "car_bet": "slate",
+    "write_shorthand": "orange",
+    "tail_write_shorthand": "orange",
 }
 
 
@@ -111,7 +115,8 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
 
     _label_count_html_parts = []
     for lb_key in ("non_539_candidate", "suspected_non_539_due_to_range", "suspected_tiantianle",
-                   "person_name_suffix", "ambiguous_long_token", "per_star_amount_split"):
+                   "person_name_suffix", "ambiguous_long_token", "per_star_amount_split",
+                   "car_bet", "write_shorthand", "tail_write_shorthand"):
         cnt = _label_counts.get(lb_key, 0)
         cn = _LABEL_CN.get(lb_key, lb_key)
         color = _LABEL_COLOR.get(lb_key, "slate")
@@ -385,6 +390,9 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
           <span class="chip" data-filter="person_name_suffix" onclick="setFilter('person_name_suffix')">人名備註 {_label_counts.get("person_name_suffix", 0)}</span>
           <span class="chip" data-filter="ambiguous_long_token" onclick="setFilter('ambiguous_long_token')">唸牌黏住 {_label_counts.get("ambiguous_long_token", 0)}</span>
           <span class="chip" data-filter="per_star_amount_split" onclick="setFilter('per_star_amount_split')">星別金額 {_label_counts.get("per_star_amount_split", 0)}</span>
+          <span class="chip" data-filter="car_bet" onclick="setFilter('car_bet')">車 / 車號 {_label_counts.get("car_bet", 0)}</span>
+          <span class="chip" data-filter="write_shorthand" onclick="setFilter('write_shorthand')">寫法簡寫 {_label_counts.get("write_shorthand", 0)}</span>
+          <span class="chip" data-filter="tail_write_shorthand" onclick="setFilter('tail_write_shorthand')">尾數寫法 {_label_counts.get("tail_write_shorthand", 0)}</span>
           <span class="chip" data-filter="uncategorized" onclick="setFilter('uncategorized')">未分類</span>
         </div>
       </div>
