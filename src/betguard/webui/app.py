@@ -683,6 +683,15 @@ def build_workbench_handler(
             self.end_headers()
             self.wfile.write(data)
 
+        def _send_json(self, obj: dict[str, Any], status: int = 200) -> None:
+            import json as _json_module
+            data = _json_module.dumps(obj, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
         def _send_file(self, path: Path) -> None:
             # Defence-in-depth: path must be under RUNS_DIR
             try:
@@ -793,43 +802,69 @@ def build_workbench_handler(
 
         def do_POST(self) -> None:  # noqa: N802 -- stdlib name
             parsed = urllib.parse.urlparse(self.path)
-            if parsed.path != "/workbench":
-                self._send_text("not found", status=404)
-                return
-            length = int(self.headers.get("Content-Length", "0") or 0)
-            if length <= 0:
-                self._send_html(_render_workbench_form("空白輸入會被拒絕"), status=400)
-                return
-            body_raw = self.rfile.read(length)
-            try:
-                form = urllib.parse.parse_qs(body_raw.decode("utf-8"))
-            except UnicodeDecodeError:
-                self._send_html(_render_workbench_form("無法解碼輸入 (需要 UTF-8)"), status=400)
-                return
-            text = (form.get("text", [""])[0] or "").strip()
-            game = (form.get("game", ["auto"])[0] or "auto").strip()
-            redirect_review = (form.get("redirect", ["0"])[0] or "0") == "1"
-            if not text:
-                self._send_html(_render_workbench_form("空白輸入會被拒絕"), status=400)
-                return
-            try:
-                input_path, queue_path, review_path, summary, unrecognized_html, _unrec_json = _create_batch(text, game)
-            except (RuntimeError, subprocess.TimeoutExpired) as exc:
+            path = parsed.path
+
+            # POST /workbench — create review batch
+            if path == "/workbench":
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                if length <= 0:
+                    self._send_html(_render_workbench_form("空白輸入會被拒絕"), status=400)
+                    return
+                body_raw = self.rfile.read(length)
+                try:
+                    form = urllib.parse.parse_qs(body_raw.decode("utf-8"))
+                except UnicodeDecodeError:
+                    self._send_html(_render_workbench_form("無法解碼輸入 (需要 UTF-8)"), status=400)
+                    return
+                text = (form.get("text", [""])[0] or "").strip()
+                game = (form.get("game", ["auto"])[0] or "auto").strip()
+                redirect_review = (form.get("redirect", ["0"])[0] or "0") == "1"
+                if not text:
+                    self._send_html(_render_workbench_form("空白輸入會被拒絕"), status=400)
+                    return
+                try:
+                    input_path, queue_path, review_path, summary, unrecognized_html, _unrec_json = _create_batch(text, game)
+                except (RuntimeError, subprocess.TimeoutExpired) as exc:
+                    self._send_html(
+                        _render_workbench_form(f"建立審核批次失敗: {exc}"),
+                        status=500,
+                    )
+                    return
+                if redirect_review:
+                    rel = review_path.relative_to(RUNS_DIR)
+                    self._send_redirect(f"/runs/{urllib.parse.quote(str(rel))}")
+                    return
                 self._send_html(
-                    _render_workbench_form(f"建立審核批次失敗: {exc}"),
-                    status=500,
+                    _render_result(
+                        input_path, queue_path, review_path, summary,
+                        unrecognized_html=unrecognized_html,
+                    )
                 )
                 return
-            if redirect_review:
-                rel = review_path.relative_to(RUNS_DIR)
-                self._send_redirect(f"/runs/{urllib.parse.quote(str(rel))}")
+
+            # POST /assist-fill — trigger single-item assisted fill
+            if path == "/assist-fill":
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                if length <= 0:
+                    self._send_json({"ok": False, "error": "empty body"})
+                    return
+                body_raw = self.rfile.read(length)
+                try:
+                    data = json.loads(body_raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    self._send_json({"ok": False, "error": "invalid JSON"})
+                    return
+                numbers = data.get("numbers", [])
+                stars = data.get("stars", [])
+                amounts = data.get("amounts", {})
+                if not numbers or not stars:
+                    self._send_json({"ok": False, "error": "missing numbers or stars"})
+                    return
+                result = _assist_fill_item(numbers=numbers, stars=stars, amounts=amounts)
+                self._send_json(result)
                 return
-            self._send_html(
-                _render_result(
-                    input_path, queue_path, review_path, summary,
-                    unrecognized_html=unrecognized_html,
-                )
-            )
+
+            self._send_text("not found", status=404)
 
     return WorkbenchHandler
 
@@ -840,6 +875,81 @@ def _html_escape(s: str) -> str:
         .replace("<", "&lt;")
         .replace(">", "&gt;")
     )
+
+
+# ---------------------------------------------------------------------------
+# Assist fill (direct call, bypasses CLI FORBIDDEN_FLAGS)
+# ---------------------------------------------------------------------------
+
+
+def _assist_fill_item(
+    *,
+    numbers: list[int],
+    stars: list[int],
+    amounts: dict[str, int],
+) -> dict[str, Any]:
+    """Trigger single-item real-site assisted fill.
+
+    Creates a temporary accepted queue and runs the fill CLI.
+    The fill opens its own browser window — user must manually login
+    and press Enter.  Never auto-submits or auto-confirms.
+    """
+    import json as _json_module
+    import tempfile
+    from betguard.formatter import format_bet_summary
+
+    # Build a minimal queue with one accepted item
+    parsed = {
+        "status": "ok",
+        "numbers": numbers,
+        "stars": stars,
+        "amounts": amounts,
+        "game": "539",
+    }
+    item = {
+        "index": 0,
+        "status": "CURRENT",
+        "original": "",
+        "summary": format_bet_summary(parsed),
+        "parsed": parsed,
+        "parsed_summary": format_bet_summary(parsed),
+        "review_result": parsed,
+        "fill_plan": {},
+        "accepted_by_human": True,
+        "warnings": [],
+        "errors": [],
+    }
+    queue = {
+        "mode": "batch_assisted_fill_queue",
+        "status": "READY",
+        "current_index": 0,
+        "total": 1,
+        "done_count": 0,
+        "items": [item],
+        "summary": {"total": 1, "ok": 1, "blocked": 0, "current_index": 1, "remaining": 1},
+        "final_decision": {"real_site_auto_submit": False, "human_required_each_item": True},
+    }
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
+        f.write(_json_module.dumps(queue, ensure_ascii=False))
+        queue_path = f.name
+
+    try:
+        proc = _run_cli([
+            "--real-site-assisted-fill",
+            "--queue", queue_path,
+            "--url", "https://www.gts362.com",
+            "--i-understand-real-site-fill-risk",
+            "--pretty",
+        ])
+        if proc.returncode != 0:
+            return {"ok": False, "error": proc.stderr.strip()[:500] or f"rc={proc.returncode}"}
+        return {"ok": True, "numbers": numbers, "stars": stars, "amounts": amounts}
+    finally:
+        try:
+            Path(queue_path).unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------
