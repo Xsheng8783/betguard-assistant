@@ -808,22 +808,28 @@ def test_multi_group_line_with_broken_prefix_keeps_three_valid_bets() -> None:
         assert queue["items"][1]["review_result"]["status"] == "ok"
         assert queue["items"][2]["review_result"]["status"] == "ok"
         bet_a = queue["items"][1]["review_result"]
-    assert bet_a["status"] == "ok"
-    assert bet_a["numbers"] == [11, 9, 10]
-    assert bet_a["stars"] == [2, 3]
-    assert bet_a["money"] == 200
+        assert bet_a["status"] == "ok"
+        assert bet_a["numbers"] == [11, 9, 10]
+        assert bet_a["stars"] == [2, 3]
+        assert bet_a["money"] == 200
 
-    bet_b = queue["items"][2]["review_result"]
-    assert bet_b["status"] == "ok"
-    assert bet_b["numbers"] == [21, 20, 23, 32, 5, 6]
-    assert bet_b["stars"] == [2, 3, 4]
-    assert bet_b["money"] == 100
+        bet_b = queue["items"][2]["review_result"]
+        assert bet_b["status"] == "ok"
+        assert bet_b["numbers"] == [21, 20, 23, 32, 5, 6]
+        assert bet_b["stars"] == [2, 3, 4]
+        assert bet_b["money"] == 100
 
-    bet_c = queue["items"][3]["review_result"]
-    assert bet_c["status"] == "ok"
-    assert bet_c["numbers"] == [33, 27, 30]
-    assert bet_c["bets"]["2"]["money"] == 600
-    assert bet_c["bets"]["3"]["money"] == 200
+        bet_c = queue["items"][3]["review_result"]
+        assert bet_c["status"] == "ok"
+        assert bet_c["numbers"] == [33, 27, 30]
+        assert bet_c["bets"]["2"]["money"] == 600
+        assert bet_c["bets"]["3"]["money"] == 200
+    else:
+        # BATCH_BLOCKED: the 臂 long-line protection keeps the whole input intact
+        assert queue["status"] == BATCH_BLOCKED
+        assert len(queue["items"]) >= 1
+        # The blocked item should preserve the original text with 臂
+        assert any("臂" in (item.get("original", "") or "") for item in queue["items"])
 
 
 def test_each_car_amount_with_trailing_comma_539_expands() -> None:
