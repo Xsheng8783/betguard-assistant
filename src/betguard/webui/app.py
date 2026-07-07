@@ -876,6 +876,7 @@ def build_workbench_handler(
                     numbers=validation["numbers"],
                     stars=validation["stars"],
                     amounts=validation["amounts"],
+                    game=validation.get("game", "539"),
                 )
                 self._send_json(result)
                 return
@@ -995,6 +996,7 @@ def _validate_assist_fill_item(
         "numbers": [int(n) for n in numbers],
         "stars": [int(s) for s in stars],
         "amounts": normalized_amounts,
+        "game": result.get("game") or "539",
     }
 
 
@@ -1003,6 +1005,7 @@ def _assist_fill_item(
     numbers: list[int],
     stars: list[int],
     amounts: dict[str, int],
+    game: str = "539",
 ) -> dict[str, Any]:
     """Trigger single-item real-site assisted fill.
 
@@ -1020,7 +1023,7 @@ def _assist_fill_item(
         "numbers": numbers,
         "stars": stars,
         "amounts": amounts,
-        "game": "539",
+        "game": game,
     }
     item = {
         "index": 0,
