@@ -112,6 +112,29 @@ _HTML_FOOTER = """
 """
 
 
+def _build_dashboard_links() -> str:
+    """Return the dashboard button bar HTML, with optional unrecognized link."""
+    lines = [
+        '<div class="links">',
+        '  <a href="/workbench">貼上牌單建立審核</a>',
+        '  <a class="danger" href="/latest-review">開啟最新 review.html</a>',
+    ]
+    latest_unrec = _find_latest_unrecognized()
+    if latest_unrec:
+        rel = latest_unrec.relative_to(RUNS_DIR)
+        lines.append(
+            f'  <a class="danger" href="/runs/{urllib.parse.quote(str(rel))}">'
+            f"開啟最新未辨識報告</a>"
+        )
+    lines += [
+        '  <a class="danger" href="/sop">查看 SOP</a>',
+        '  <a class="danger" href="/cli">查看 CLI reference</a>',
+        '  <a class="danger" href="/history">查看歷史紀錄</a>',
+        '</div>',
+    ]
+    return "\n".join(lines)
+
+
 def _render_dashboard(version: str, git_commit: str) -> str:
     safety_html = """
 <div class="safety">
@@ -124,15 +147,7 @@ def _render_dashboard(version: str, git_commit: str) -> str:
   </ul>
 </div>
 """
-    links_html = """
-<div class="links">
-  <a href="/workbench">貼上牌單建立審核</a>
-  <a class="danger" href="/latest-review">開啟最新 review.html</a>
-  <a class="danger" href="/sop">查看 SOP</a>
-  <a class="danger" href="/cli">查看 CLI reference</a>
-  <a class="danger" href="/history">查看歷史紀錄</a>
-</div>
-"""
+    links_html = _build_dashboard_links()
     version_html = f"""
 <p>
   <strong>版本:</strong> {version}<br>
@@ -616,6 +631,16 @@ def _find_latest_review() -> Path | None:
     if not RUNS_DIR.exists():
         return None
     candidates = sorted(RUNS_DIR.glob("*/*review_*.html"), key=lambda p: p.stat().st_mtime)
+    if not candidates:
+        return None
+    return candidates[-1]
+
+
+def _find_latest_unrecognized() -> Path | None:
+    """Return the most recent unrecognized_*.html under runs/, or None."""
+    if not RUNS_DIR.exists():
+        return None
+    candidates = sorted(RUNS_DIR.glob("*/*unrecognized_*.html"), key=lambda p: p.stat().st_mtime)
     if not candidates:
         return None
     return candidates[-1]

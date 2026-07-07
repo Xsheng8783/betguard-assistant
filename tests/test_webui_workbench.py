@@ -33,8 +33,10 @@ import betguard.webui.app as webui_app
 from betguard.webui.app import (
     FORBIDDEN_FLAGS,
     RUNS_DIR,
+    _build_dashboard_links,
     _create_batch,
     _find_latest_review,
+    _find_latest_unrecognized,
     _git_short_head,
     _project_version,
     _render_result,
@@ -746,3 +748,54 @@ def test_result_page_shows_zero_when_valid(
     )
     assert "未辨識格式: 0" in html
     assert "→ 查看報告" not in html
+
+
+# ---------------------------------------------------------------------------
+# Section M -- dashboard "最新未辨識報告" button
+# ---------------------------------------------------------------------------
+
+
+def test_dashboard_no_unrecognized_button_when_no_reports(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+    links = _build_dashboard_links()
+    assert "開啟最新 review.html" in links
+    assert "未辨識報告" not in links  # no report → no button
+
+
+def test_dashboard_shows_unrecognized_button_when_report_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+    # Create a dummy unrecognized HTML in tmp/runs-like structure
+    day_dir = tmp_path / "2026-07-07"
+    day_dir.mkdir(parents=True)
+    (day_dir / "unrecognized_103000.html").write_text("<html></html>", encoding="utf-8")
+    (day_dir / "unrecognized_103001.html").write_text("<html>newer</html>", encoding="utf-8")
+
+    links = _build_dashboard_links()
+    assert "開啟最新 review.html" in links  # still present
+    assert "開啟最新未辨識報告" in links
+
+    # _find_latest_unrecognized should return the newer one
+    latest = _find_latest_unrecognized()
+    assert latest is not None
+    assert "unrecognized_103001" in latest.name
+
+
+def test_dashboard_unrecognized_button_has_no_danger_actions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+    day_dir = tmp_path / "2026-07-07"
+    day_dir.mkdir(parents=True)
+    (day_dir / "unrecognized_100000.html").write_text("<html></html>", encoding="utf-8")
+    links = _build_dashboard_links()
+    for forbidden in [
+        "accept-valid", "assisted-fill", "送出注單", "確認對話框",
+        "送出", "填入", "auto-submit", "DONE",
+    ]:
+        assert forbidden not in links, f"dashboard must not contain {forbidden!r}"
+
+
+def test_dashboard_original_buttons_still_present(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+    links = _build_dashboard_links()
+    for label in ["貼上牌單建立審核", "開啟最新 review.html", "查看 SOP",
+                   "查看 CLI reference", "查看歷史紀錄"]:
+        assert label in links, f"dashboard must contain {label!r}"
