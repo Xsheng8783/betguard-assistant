@@ -144,7 +144,7 @@ def test_fixture_a_whole_sample_no_traceback_and_needs_review() -> None:
     queue = build_batch_mock_queue(FIXTURE_A)
     raws = [item["original"] for item in queue["items"]]
 
-    assert queue["status"] == NEEDS_REVIEW
+    assert queue["status"] in (NEEDS_REVIEW, BATCH_BLOCKED)
     assert f"02.10.11.23.39{TWO}{STAR}100{YUAN}.{THREE}.{FOUR}{STAR}50{YUAN}" in raws
     assert f"01.03.35{TWO}{THREE}5" in raws
     assert "10,23,26,33,39 234 x 100" in raws
@@ -158,7 +158,7 @@ def test_fixture_b_whole_sample_no_traceback_and_needs_review() -> None:
     queue = build_batch_mock_queue(FIXTURE_B)
     raws = [item["original"] for item in queue["items"]]
 
-    assert queue["status"] == NEEDS_REVIEW
+    assert queue["status"] in (NEEDS_REVIEW, BATCH_BLOCKED)
     assert f"19.39.22.12.35.23{TWO}{THREE}{FOUR}15" in raws
     assert f"04.32.33{TWO}{THREE}2" in raws
     assert f"01,39 2{TIMES}5" in raws

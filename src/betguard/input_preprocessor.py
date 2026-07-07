@@ -109,6 +109,28 @@ def preprocess_batch_input(text_or_lines: str | Iterable[str]) -> dict[str, Any]
             ignored_metadata_lines.append({"line_no": line_no, "raw": line, "cleaned": cleaned})
             continue
 
+        # --- 臂 long-string protection ---
+        # When a line contains "臂" AND has 12+ digits (suggesting multiple
+        # bets stuck together), keep it as ONE Needs Review item instead of
+        # splitting into fragments.  The parser may extract parts of it
+        # successfully, but we don't want those partials going to fill flow.
+        if "臂" in cleaned and len(re.findall(r"\d", cleaned)) >= 30:
+            logical_lines.append(
+                {
+                    "line_no": line_no,
+                    "raw": cleaned,
+                    "original_lines": [line],
+                    "preprocessing_notes": notes
+                    + ["review_label:customer_bi_raw_line",
+                       "arm long string preserved as single review item"],
+                }
+            )
+            if pending is not None:
+                logical_lines.append(pending)
+                pending = None
+            continue
+        # --- end arm protection ---
+
         if "removed LINE time/sender prefix" in notes:
             hk_context = False
         if cleaned.startswith("港") or cleaned.lower().startswith("hk"):
@@ -178,6 +200,21 @@ def preprocess_batch_input(text_or_lines: str | Iterable[str]) -> dict[str, Any]
 
     candidate_bet_lines: list[dict[str, Any]] = []
     for logical_index, logical in enumerate(logical_lines, start=1):
+        # Arm long-string protection: keep the whole line as one fragment
+        # so the parser/validator can report it as a single Needs Review item.
+        notes = logical.get("preprocessing_notes", [])
+        if "review_label:customer_bi_raw_line" in notes:
+            candidate_bet_lines.append(
+                {
+                    "line_no": logical.get("line_no"),
+                    "logical_index": logical_index,
+                    "fragment_index": 1,
+                    "raw": logical["raw"],
+                    "original_lines": logical.get("original_lines"),
+                    "preprocessing_notes": notes,
+                }
+            )
+            continue
         if _is_dotdot_grouped_number_bet(logical["raw"]):
             # One grouped normal bet written with ".." between number groups. Join
             # the number groups and keep the trailing star.amount so the parser
@@ -711,17 +748,24 @@ def _looks_like_continuation(value: str) -> bool:
 
 
 def _pending_has_confirmed_amount(value: str) -> bool:
-    return bool(
-        re.search(
-            r"\s(?:[234](?:[.,、，]?[234]){0,2}|[234]星)[xX×*]?\d+(?:\.\d+)?(?:支|元|塊)?$",
-            value,
-        )
-        or re.search(r"\s(?:234|23|34)\s+\d+(?:\.\d+)?(?:支|元|塊)?$", value)
-        or re.search(
-            r"(?:二三四|兩三四|二三|兩三|三四|二星|兩星|三星|四星)\d+(?:\.\d+)?(?:支|元|塊)?$",
-            value.replace(" ", ""),
-        )
-    )
+    # Check 1: numeric star with EXPLICIT multiplier (e.g. " 234x100", " 23X0.5")
+    # Requiring the multiplier avoids false-positives like "32" being read
+    # as star=3 amount=2 when it is actually part of a multi-digit number.
+    if re.search(
+        r"\s(?:[234](?:[.,、，]?[234]){0,2}|[234]星)[xX×*]\d+(?:\.\d+)?(?:支|元|塊)?$",
+        value,
+    ):
+        return True
+    # Check 2: explicit star group followed by amount (e.g. " 234 100", " 234.100")
+    if re.search(r"\s(?:234|23|34)[.\s]+\d+(?:\.\d+)?(?:支|元|塊)?$", value):
+        return True
+    # Check 3: Chinese star suffix (e.g. "二三100")
+    if re.search(
+        r"(?:二三四|兩三四|二三|兩三|三四|二星|兩星|三星|四星)\d+(?:\.\d+)?(?:支|元|塊)?$",
+        value.replace(" ", ""),
+    ):
+        return True
+    return False
 
 
 def _looks_like_star_amount_continuation(compact: str) -> bool:
