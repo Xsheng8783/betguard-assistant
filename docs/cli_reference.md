@@ -2,6 +2,20 @@
 
 All commands listed here are local review, mock, or export commands. They do not operate the real website.
 
+## Local Web Workbench
+
+For a small dashboard that lets you paste betting text and create a review
+batch without typing CLI flags, see [docs/webui_workbench.md](webui_workbench.md).
+
+```bash
+python -X utf8 -m betguard.webui.app --port 8765
+# open http://127.0.0.1:8765/
+```
+
+The workbench only runs the existing `--new-batch-from-file` and
+`--review-report-html` flows. It never calls `--batch-review-accept-valid`,
+`--real-site-assisted-fill`, or any other safety-critical flag.
+
 ## Demo Pack
 
 ```bash

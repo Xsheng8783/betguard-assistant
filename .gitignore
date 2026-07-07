@@ -34,3 +34,6 @@ overrides/
 site_profile*.json
 fill_plan*.json
 amount_summary.txt
+
+# Local workbench artifacts (created by `python -m betguard.webui.app`)
+runs/
