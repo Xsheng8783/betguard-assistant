@@ -134,6 +134,51 @@ python -X utf8 -m betguard.webfill.cli `
 
 ---
 
+## 未辨識格式報告 (v1)
+
+建立審核批次時，自動產生 `runs/YYYY-MM-DD/unrecognized_HHMMSS.(html|json)`。
+
+### 原則
+
+- **自動產生、可選查看** — 不會變成必須步驟
+- 不影響原本流程：貼牌單 → 建立審核 → 開 review.html
+- review.html 仍然是主要操作頁
+
+### 顯示時機
+
+- 有 Needs Review / Invalid / Watchlist 時：顯示「N 筆 → 查看報告」連結
+- 全部 valid 時：只顯示「未辨識格式：0」
+
+### 分類
+
+自動依原因分類（最多 5 筆範例）：
+
+| 類別 | 說明 |
+|------|------|
+| 缺少金額 | missing money / amount |
+| 號碼數量不足 | requires at least N numbers |
+| 四星號碼不足 | 四星需要至少 4 個號碼 |
+| 兩碼 shorthand | customer-specific 1000/600 |
+| slash‑group 注碰 | zhupeng / 住碰 |
+| 疑似串接兩筆 | concatenated / suspicious |
+| 星別格式不支援 | unsupported star format |
+| 金額格式不明 | ambiguous / unclear amount |
+| 號碼超出範圍 | number out of range 1-39 |
+| 港/HK 前綴 | game prefix manual review |
+| 特殊字元 | unsupported characters |
+| 其他未分類 | fallback |
+
+### 安全保證
+
+- **Read‑only** — 報告頁只有 GET，沒有 POST / PUT / DELETE
+- **沒有任何動作按鈕** — 不會看到「送出」、「確認」、「填入」、「accept‑valid」、「assisted‑fill」、「DONE」、「auto‑next」
+- **不觸發 fill / submit / accept‑valid** — 純查詢
+- **不會自動修正** — 不會自動把未辨識項目升 Valid
+- **不會填入真站**
+- 用途是統計哪些格式常出錯，方便未來人工決定是否補 parser
+
+---
+
 ## 歷史紀錄 (v1)
 
 工作台首頁有「查看歷史紀錄」入口, 連到唯讀頁 `/history`。

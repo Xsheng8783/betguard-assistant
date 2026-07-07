@@ -184,6 +184,8 @@ def _render_result(
     queue_path: Path,
     review_path: Path,
     summary: dict[str, Any],
+    *,
+    unrecognized_html: Path | None = None,
 ) -> str:
     valid = summary.get("valid_count", 0)
     needs_review = summary.get("needs_review_count", 0)
@@ -193,8 +195,19 @@ def _render_result(
     review_url = f"/runs/{urllib.parse.quote(queue_path.parent.name)}/{urllib.parse.quote(queue_path.name)}".replace(
         f"/{queue_path.name}", f"/{review_path.name}"
     )
+    total_unrecognized = needs_review + invalid + watchlist
+    unrecognized_block_html = ""
+    if total_unrecognized > 0 and unrecognized_html and unrecognized_html.exists():
+        rel = unrecognized_html.relative_to(RUNS_DIR)
+        unrecognized_block_html = (
+            f'<p>未辨識格式: <a href="/runs/{urllib.parse.quote(str(rel))}">'
+            f"{total_unrecognized} 筆 → 查看報告</a></p>"
+        )
+    else:
+        unrecognized_block_html = "<p>未辨識格式: 0</p>"
     body = f"""
 <h1>審核批次已建立</h1>
+{unrecognized_block_html}
 <table>
   <tr><th>input 檔</th><td><code>{input_path}</code></td></tr>
   <tr><th>queue 檔</th><td><code>{queue_path}</code></td></tr>
@@ -491,10 +504,12 @@ def _project_version() -> str:
 # ---------------------------------------------------------------------------
 
 
-def _create_batch(text: str, game: str) -> tuple[Path, Path, Path, dict[str, Any]]:
+def _create_batch(text: str, game: str) -> tuple[
+    Path, Path, Path, dict[str, Any], Path | None, Path | None
+]:
     """Create a review batch via the existing CLI flows.
 
-    Returns: (input_path, queue_path, review_path, summary_dict)
+    Returns: (input_path, queue_path, review_path, summary_dict, unrecognized_html_path|None, unrecognized_json_path|None)
     Raises on failure.
     """
     if game not in ALLOWED_GAME_OPTIONS:
@@ -544,7 +559,23 @@ def _create_batch(text: str, game: str) -> tuple[Path, Path, Path, dict[str, Any
     # we only ever set NEEDS_REVIEW and never call accept-valid)
     summary = _summarize_queue(queue_path)
 
-    return input_path, queue_path, review_path, summary
+    # Step 4: auto-generate unrecognized-format report (optional, never blocks)
+    unrecognized_html: Path | None = None
+    unrecognized_json: Path | None = None
+    try:
+        from betguard.webfill.unrecognized_report import write_report_files
+
+        unrec_html, unrec_json, _unrec_data = write_report_files(
+            queue_path,
+            input_path=input_path,
+        )
+        unrecognized_html = unrec_html
+        unrecognized_json = unrec_json
+    except Exception:
+        # Report generation is best-effort; never fail the batch for it.
+        pass
+
+    return input_path, queue_path, review_path, summary, unrecognized_html, unrecognized_json
 
 
 def _summarize_queue(queue_path: Path) -> dict[str, Any]:
@@ -756,14 +787,19 @@ def build_workbench_handler(
                 self._send_html(_render_workbench_form("空白輸入會被拒絕"), status=400)
                 return
             try:
-                input_path, queue_path, review_path, summary = _create_batch(text, game)
+                input_path, queue_path, review_path, summary, unrecognized_html, _unrec_json = _create_batch(text, game)
             except (RuntimeError, subprocess.TimeoutExpired) as exc:
                 self._send_html(
                     _render_workbench_form(f"建立審核批次失敗: {exc}"),
                     status=500,
                 )
                 return
-            self._send_html(_render_result(input_path, queue_path, review_path, summary))
+            self._send_html(
+                _render_result(
+                    input_path, queue_path, review_path, summary,
+                    unrecognized_html=unrecognized_html,
+                )
+            )
 
     return WorkbenchHandler
 

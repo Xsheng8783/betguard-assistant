@@ -37,6 +37,7 @@ from betguard.webui.app import (
     _find_latest_review,
     _git_short_head,
     _project_version,
+    _render_result,
     _run_cli,
     build_workbench_handler,
 )
@@ -227,7 +228,7 @@ def test_batch_creation_does_not_invoke_real_site(
     monkeypatch.setattr(webui_app, "_summarize_queue", fake_summarize)
 
     # Drive _create_batch directly
-    _input, _queue, _review, summary = _create_batch("06.13.23.22 234.100", "auto")
+    _input, _queue, _review, summary, _unrec_html, _unrec_json = _create_batch("06.13.23.22 234.100", "auto")
     assert summary["queue_status"] == "NEEDS_REVIEW"
 
     for call_args in captured_calls:
@@ -272,7 +273,7 @@ def test_queue_status_is_never_promoted(
     monkeypatch.setattr(webui_app, "_run_cli", fake_run_cli)
     monkeypatch.setattr(webui_app, "_summarize_queue", fake_summarize)
 
-    _input, _queue, _review, summary = _create_batch("06.13.23.22 234.100", "auto")
+    _input, _queue, _review, summary, _unrec_html, _unrec_json = _create_batch("06.13.23.22 234.100", "auto")
     assert summary["queue_status"] == "NEEDS_REVIEW"
     assert summary["queue_status"] != "WAITING_FOR_HUMAN_CONFIRM"
     assert summary["queue_status"] != "READY_FOR_HUMAN_REVIEW"
@@ -643,3 +644,105 @@ def test_history_does_not_call_cli_or_browser(
         status, _ = _get(port, "/history")
         assert status == 200
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# Section L -- unrecognized report e2e
+# ---------------------------------------------------------------------------
+
+
+# Minimal helpers shared with test_unrecognized_report.py
+def _make_item(
+    *,
+    index: int = 0,
+    status: str = "BLOCKED",
+    original_text: str = "17.29.1000",
+    errors: list[str] | None = None,
+    warnings: list[str] | None = None,
+) -> dict:
+    return {
+        "index": index,
+        "status": status,
+        "original_text": original_text,
+        "errors": errors or [],
+        "warnings": warnings or [],
+    }
+
+
+def _make_queue(items: list[dict], *, valid_count: int = 0) -> dict:
+    return {
+        "items": items,
+        "preprocessing": {
+            "summary": {
+                "valid_count": valid_count,
+                "needs_review_count": sum(
+                    1 for i in items if i.get("status", "").lower() == "needs_review"
+                ),
+                "invalid_unsupported_count": sum(
+                    1 for i in items if i.get("status", "").lower() == "blocked"
+                ),
+            },
+            "watchlist_count": 0,
+        },
+    }
+
+
+def test_result_page_shows_unrecognized_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When batch has Needs Review items, the result page must show a link to
+    the unrecognized report."""
+    from betguard.webfill import unrecognized_report as _ur
+
+    # Redirect runs to tmp
+    monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+
+    # Build a fake queue with blocked items
+    data = _ur.build_report_data(
+        _make_queue(
+            [
+                _make_item(index=0, status="BLOCKED", errors=["missing money"]),
+                _make_item(index=1, status="BLOCKED", errors=["requires at least 3 numbers"]),
+            ],
+            valid_count=1,
+        )
+    )
+    # Write queue to file and generate report from that file
+    qp = tmp_path / "queue_test.json"
+    qp.write_text(json.dumps(
+        _make_queue(
+            [{"index": 0, "status": "BLOCKED", "original_text": "x", "errors": ["missing money"], "warnings": []}],
+            valid_count=0,
+        )
+    ), encoding="utf-8")
+    html_path, json_path, _data = _ur.write_report_files(
+        qp,
+        input_path=tmp_path / "input.txt",
+        out_dir=tmp_path,
+        stamp="test00",
+    )
+
+    summary = {"valid_count": 1, "needs_review_count": 2, "invalid_count": 0,
+               "watchlist_count": 0, "queue_status": "NEEDS_REVIEW"}
+    html = _render_result(
+        Path("dummy_input.txt"), Path("dummy_queue.json"),
+        Path("dummy_review.html"), summary,
+        unrecognized_html=html_path,
+    )
+    assert "未辨識格式" in html
+    assert "2 筆 → 查看報告" in html
+
+
+def test_result_page_shows_zero_when_valid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """All valid batch: no report link, just '0' marker."""
+    monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+    summary = {"valid_count": 5, "needs_review_count": 0, "invalid_count": 0,
+               "watchlist_count": 0, "queue_status": "READY_FOR_QUEUE"}
+    html = _render_result(
+        Path("dummy_input.txt"), Path("dummy_queue.json"),
+        Path("dummy_review.html"), summary,
+    )
+    assert "未辨識格式: 0" in html
+    assert "→ 查看報告" not in html
