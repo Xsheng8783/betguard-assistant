@@ -863,6 +863,25 @@ def test_assist_fill_start_rejects_unknown_manual_id(tmp_path: Path, monkeypatch
         assert "manual candidate not found" in body.get("error", "")
 
 
+def test_assist_fill_start_queue_path_responds_without_hanging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Queue-based /assist-fill/start must answer promptly instead of hanging.
+
+    Regression: v0.5.18 added a body read for manual_candidate_id but the queue
+    branch re-read the (already consumed) body, blocking forever on the socket.
+    A bogus queue_path keeps this test on the validation path — no browser.
+    """
+    monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+    handler = build_workbench_handler(project_version="test", git_commit="test")
+    with _running_server(handler) as port:
+        status, body = _post_json(port, "/assist-fill/start", {
+            "queue_path": "runs/does-not-exist/queue.json",
+            "item_index": 0,
+        }, timeout=5)
+        assert status == 200
+        assert body["ok"] is False
+        assert "queue not found" in body.get("error", "")
+
+
 def test_assist_fill_start_accepts_registered_manual_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Registered manual candidate should be accepted by assist-fill/start.
     The fill may fail (no browser) but must NOT reject with 'candidate not found'."""

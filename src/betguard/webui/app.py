@@ -922,11 +922,20 @@ def build_workbench_handler(
                 self._send_json({"ok": False, "error": "invalid JSON"})
                 return None
 
-        def _validate_candidate(self) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-            """Parse body, resolve queue, validate item. Returns (error_response, validation)."""
-            data = self._read_json_body()
+        def _validate_candidate(
+            self, data: dict[str, Any] | None = None
+        ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+            """Parse body, resolve queue, validate item. Returns (error_response, validation).
+
+            ``data`` is the already-parsed JSON body when the caller has read it;
+            the request body can only be read from the socket once, so a second
+            ``_read_json_body()`` would block forever waiting for bytes that
+            never arrive.
+            """
             if data is None:
-                return (None, None)  # error already sent
+                data = self._read_json_body()
+                if data is None:
+                    return (None, None)  # error already sent
             queue_path = (data.get("queue_path") or "").strip()
             item_index = data.get("item_index")
             if not queue_path or item_index is None:
@@ -985,8 +994,8 @@ def build_workbench_handler(
                     "game": candidate.get("game", "539"),
                 }
             else:
-                # Queue path: existing flow
-                _err, validation = self._validate_candidate()
+                # Queue path: reuse the body read above — reading it twice hangs
+                _err, validation = self._validate_candidate(data)
                 if validation is None:
                     return
 
