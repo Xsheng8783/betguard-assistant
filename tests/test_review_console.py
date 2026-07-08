@@ -313,6 +313,39 @@ def test_review_console_daily_report_contains_required_counts() -> None:
         assert label in html_text
 
 
+def test_review_console_comfort_summary_counts_are_read_only() -> None:
+    queue = build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}100\n17.29.1000")
+    model = build_review_console_model(queue)
+    summary = model["comfort_summary"]
+
+    assert summary["total_count"] == model["preprocessing"]["candidate_count"]
+    assert summary["assistable_count"] == model["preprocessing"]["valid_count"]
+    assert summary["needs_review_count"] == model["preprocessing"]["needs_review_count"]
+    assert summary["invalid_count"] == model["preprocessing"]["invalid_count"]
+    assert summary["watchlist_count"] == model["preprocessing"]["watchlist_count"]
+    assert summary["locally_handled_count"] == 0
+    assert summary["unprocessed_count"] == summary["assistable_count"]
+    assert summary["safety_reminder"] == "只輔助填入，不會送出或確認"
+
+
+def test_review_console_status_overview_html_contains_comfort_cards() -> None:
+    queue = build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}100\n17.29.1000")
+    html_text = render_review_console_html(queue)
+
+    for label in [
+        "狀態總覽",
+        "總筆數",
+        "可輔助填入",
+        "已記錄 / 已處理",
+        "尚未處理",
+        "Needs Review",
+        "Invalid",
+        "Watchlist",
+        "只輔助填入，不會送出或確認",
+    ]:
+        assert label in html_text
+
+
 def test_review_console_core_buttons_still_present_after_daily_report_change() -> None:
     queue = build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}100")
     html_text = render_review_console_html(queue)

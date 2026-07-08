@@ -41,19 +41,46 @@ def build_review_console_model(queue: dict[str, Any], *, queue_path: str | None 
     all_not_ok = list(preprocessing.get("invalid_fragments", []))
     watchlist_source = [item for item in all_not_ok if _fragment_status(item) == "warning"]
     invalid_source = [item for item in all_not_ok if _fragment_status(item) != "warning"]
+    candidate_count = int(preprocessing_summary.get("candidate_count", queue.get("summary", {}).get("total", 0)))
+    valid_count = int(preprocessing_summary.get("valid_count", queue.get("summary", {}).get("ok", 0)))
+    invalid_count = int(preprocessing_summary.get("invalid_unsupported_count", 0))
+    watchlist_count = len(watchlist_source)
+    needs_review_count = len(invalid_source)
+    locally_handled_count = sum(
+        1
+        for item in queue.get("items", [])
+        if (
+            item.get("selected_numbers")
+            or item.get("selected_columns")
+            or item.get("selected_car_number") is not None
+            or item.get("filled_amount") is not None
+            or item.get("filled_amounts")
+        )
+    )
+    unprocessed_count = max(valid_count - locally_handled_count, 0)
     model = {
         "mode": "local_review_console",
         "status": queue.get("status"),
         "queue_path": queue_path,
         "preprocessing": {
             "status": preprocessing.get("status") or queue.get("preprocessing_status"),
-            "candidate_count": int(preprocessing_summary.get("candidate_count", queue.get("summary", {}).get("total", 0))),
-            "valid_count": int(preprocessing_summary.get("valid_count", queue.get("summary", {}).get("ok", 0))),
-            "invalid_count": int(preprocessing_summary.get("invalid_unsupported_count", 0)),
-            "watchlist_count": len(watchlist_source),
-            "needs_review_count": len(invalid_source),
+            "candidate_count": candidate_count,
+            "valid_count": valid_count,
+            "invalid_count": invalid_count,
+            "watchlist_count": watchlist_count,
+            "needs_review_count": needs_review_count,
             "warnings_count": int(preprocessing_summary.get("warnings_count", 0)),
             "ignored_metadata_count": int(preprocessing_summary.get("ignored_metadata_count", 0)),
+        },
+        "comfort_summary": {
+            "total_count": candidate_count,
+            "assistable_count": valid_count,
+            "locally_handled_count": locally_handled_count,
+            "unprocessed_count": unprocessed_count,
+            "needs_review_count": needs_review_count,
+            "invalid_count": invalid_count,
+            "watchlist_count": watchlist_count,
+            "safety_reminder": "只輔助填入，不會送出或確認",
         },
         "valid_candidates": [_candidate_with_labels(item) for item in preprocessing.get("valid_candidates", [])],
         "watchlist": [_watchlist_entry(item) for item in watchlist_source],
@@ -105,6 +132,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     actions_html = "".join(f"<li><code>{_e(action)}</code></li>" for action in model["actions"]) or "<li>無可用指令</li>"
     audit = model["audit"]
     source_json = _e(json.dumps(model, ensure_ascii=False, indent=2))
+    comfort = model["comfort_summary"]
     daily_report_stats = json.dumps(
         {
             "candidateCount": model["preprocessing"]["candidate_count"],
@@ -204,7 +232,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     .label-count {{ display: inline-flex; align-items: center; gap: 2px; cursor: pointer; opacity: 0.7; transition: opacity 0.15s; }}
     .label-count:hover {{ opacity: 1; }}
 
-    .stats-grid {{ display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; }}
+    .stats-grid {{ display: grid; grid-template-columns: repeat(8, 1fr); gap: 10px; }}
     .stat-card {{
       background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px;
       padding: 14px 10px; text-align: center; font-size: 12px; color: var(--slate);
@@ -215,6 +243,9 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     .stat-card.valid {{ border-color: var(--green-border); }} .stat-card.valid strong {{ color: var(--green); }}
     .stat-card.watch {{ border-color: var(--yellow-border); }} .stat-card.watch strong {{ color: var(--yellow); }}
     .stat-card.invalid {{ border-color: var(--red-border); }} .stat-card.invalid strong {{ color: var(--red); }}
+    .stat-card.pending {{ border-color: var(--blue-border); }} .stat-card.pending strong {{ color: var(--blue); }}
+    .stat-card.safety {{ border-color: var(--green-border); background: var(--green-bg); }}
+    .stat-card.safety strong {{ color: var(--green); font-size: 18px; line-height: 1.25; }}
 
     .safety-card {{
       background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);
@@ -353,7 +384,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     }}
     @media (max-width: 700px) {{
       body {{ padding: 12px; }}
-      .stats-grid {{ grid-template-columns: repeat(3, 1fr); }}
+      .stats-grid {{ grid-template-columns: repeat(2, 1fr); }}
       .safety-card ul {{ grid-template-columns: 1fr; }}
     }}
 
@@ -502,13 +533,16 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
 
   <div class="top-row">
     <section class="card">
-      <h2>📊 審核狀態</h2>
+      <h2>狀態總覽</h2>
       <div class="stats-grid">
-        <div class="stat-card">總筆數<strong>{model["preprocessing"]["candidate_count"]}</strong></div>
-        <div class="stat-card valid">正確<strong>{model["preprocessing"]["valid_count"]}</strong></div>
-        <div class="stat-card invalid">需人工確認<strong>{model["preprocessing"]["needs_review_count"]}</strong></div>
-        <div class="stat-card">警告<strong>{model["preprocessing"]["warnings_count"]}</strong></div>
-        <div class="stat-card">已忽略<strong>{model["preprocessing"]["ignored_metadata_count"]}</strong></div>
+        <div class="stat-card">總筆數<strong>{comfort["total_count"]}</strong></div>
+        <div class="stat-card valid">可輔助填入<strong>{comfort["assistable_count"]}</strong></div>
+        <div class="stat-card valid">已記錄 / 已處理<strong>{comfort["locally_handled_count"]}</strong></div>
+        <div class="stat-card pending">尚未處理<strong>{comfort["unprocessed_count"]}</strong></div>
+        <div class="stat-card invalid">Needs Review<strong>{comfort["needs_review_count"]}</strong></div>
+        <div class="stat-card invalid">Invalid<strong>{comfort["invalid_count"]}</strong></div>
+        <div class="stat-card watch">Watchlist<strong>{comfort["watchlist_count"]}</strong></div>
+        <div class="stat-card safety">安全提醒<strong>{_e(str(comfort["safety_reminder"]))}</strong></div>
       </div>
     </section>
     <section class="safety-card">
