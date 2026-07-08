@@ -233,27 +233,31 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     .label-count {{ display: inline-flex; align-items: center; gap: 2px; cursor: pointer; opacity: 0.7; transition: opacity 0.15s; }}
     .label-count:hover {{ opacity: 1; }}
 
-    .stats-grid {{ display: grid; grid-template-columns: repeat(8, 1fr); gap: 10px; }}
-    .stat-card {{
-      background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px;
-      padding: 14px 10px; text-align: center; font-size: 12px; color: var(--slate);
-      transition: transform 0.1s;
+    .stats-inline {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 13px; }}
+    .stats-inline .stat-chip {{
+      display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px;
+      border-radius: 14px; background: #f1f5f9; border: 1px solid #e2e8f0;
+      font-size: 12px; white-space: nowrap;
     }}
-    .stat-card:hover {{ transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.06); }}
-    .stat-card strong {{ display: block; font-size: 32px; font-weight: 700; color: #0f172a; margin-top: 4px; }}
-    .stat-card.valid {{ border-color: var(--green-border); }} .stat-card.valid strong {{ color: var(--green); }}
-    .stat-card.watch {{ border-color: var(--yellow-border); }} .stat-card.watch strong {{ color: var(--yellow); }}
-    .stat-card.invalid {{ border-color: var(--red-border); }} .stat-card.invalid strong {{ color: var(--red); }}
-    .stat-card.pending {{ border-color: var(--blue-border); }} .stat-card.pending strong {{ color: var(--blue); }}
-    .stat-card.safety {{ border-color: var(--green-border); background: var(--green-bg); }}
-    .stat-card.safety strong {{ color: var(--green); font-size: 18px; line-height: 1.25; }}
+    .stats-inline .stat-chip strong {{ font-weight: 700; }}
+    .stats-inline .stat-chip.green {{ border-color: #bbf7d0; background: #f0fdf4; }}
+    .stats-inline .stat-chip.green strong {{ color: #059669; }}
+    .stats-inline .stat-chip.red {{ border-color: #fecaca; background: #fef2f2; }}
+    .stats-inline .stat-chip.red strong {{ color: #dc2626; }}
+    .stats-inline .stat-chip.amber {{ border-color: #fed7aa; background: #fff7ed; }}
+    .stats-inline .stat-chip.amber strong {{ color: #c2410c; }}
+    .stats-inline .stat-chip.blue {{ border-color: #bfdbfe; background: #eff6ff; }}
+    .stats-inline .stat-chip.blue strong {{ color: #2563eb; }}
 
-    .safety-banner {{
+    .safety-card {{
       background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);
-      border: 1px solid #86efac; border-radius: 8px;
-      padding: 10px 18px; margin-bottom: 16px; text-align: center;
-      color: #166534; font-size: 13px; font-weight: 500;
+      border: 1px solid #86efac; border-radius: var(--radius);
+      padding: 10px 16px; margin-bottom: 16px;
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
     }}
+    .safety-card h2 {{ color: #166534; font-size: 13px; font-weight: 600; white-space: nowrap; }}
+    .safety-card ul {{ display: flex; flex-wrap: wrap; gap: 8px; list-style: none; padding: 0; margin: 0; }}
+    .safety-card li {{ color: #166534; font-size: 12px; font-weight: 500; }}
 
     /* Review cards - WIDE horizontal */
     .card-list {{ display: flex; flex-direction: column; gap: 16px; }}
@@ -389,7 +393,6 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     }}
     @media (max-width: 700px) {{
       body {{ padding: 12px; }}
-      .stats-grid {{ grid-template-columns: repeat(2, 1fr); }}
       .full-width-row {{ flex-direction: column; }}
     }}
 
@@ -524,15 +527,18 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     </div>
   </div>
 
-  <div class="full-width-row">
-    <section class="card" style="border-left: 4px solid var(--blue);flex:1">
-      <h2><span class="badge valid" style="background:#dbeafe;color:#1e40af">📝 待輔助填入</span></h2>
+  <div class="full-width-row" style="margin-bottom:16px">
+    <section class="card" style="border-left: 4px solid var(--blue);flex:3">
+      <h2 style="display:flex;align-items:center;gap:12px">
+        <span class="badge valid" style="background:#dbeafe;color:#1e40af;font-size:14px">📝 待輔助填入</span>
+        <a href="/workbench" style="font-size:11px;color:var(--blue);text-decoration:underline;font-weight:400">＋ 貼新牌單</a>
+      </h2>
       <div style="overflow-x:auto"><table id="pending-table"><thead><tr><th>#</th><th>原始片段</th><th>摘要</th><th>類型</th><th></th></tr></thead><tbody id="pending-tbody">{valid_rows}</tbody></table></div>
       <div class="empty-block" id="pending-empty" style="display:none">全部已輔助填入 ✅</div>
     </section>
     <section class="card" style="border-left: 4px solid var(--green);flex:1">
-      <h2><span class="badge valid">✅ 已輔助填入</span></h2>
-      <div style="overflow-x:auto"><table id="done-table"><thead><tr><th>#</th><th>原始片段</th><th>摘要</th><th>類型</th></tr></thead><tbody id="done-tbody"></tbody></table></div>
+      <h2><span class="badge valid" style="font-size:12px">✅ 已輔助填入</span></h2>
+      <div style="overflow-x:auto;max-height:300px;overflow-y:auto"><table id="done-table"><thead><tr><th>#</th><th>原始片段</th><th>摘要</th></tr></thead><tbody id="done-tbody"></tbody></table></div>
       <div class="empty-block" id="done-empty">尚無已輔助填入項目</div>
     </section>
   </div>
@@ -550,21 +556,25 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
   </details>
 
   <div class="top-row">
-    <section class="card">
-      <h2>狀態總覽</h2>
-      <div class="stats-grid">
-        <div class="stat-card">總筆數<strong>{comfort["total_count"]}</strong></div>
-        <div class="stat-card valid">可輔助填入<strong>{comfort["assistable_count"]}</strong></div>
-        <div class="stat-card valid">已記錄 / 已處理<strong>{comfort["locally_handled_count"]}</strong></div>
-        <div class="stat-card pending">尚未處理<strong>{comfort["unprocessed_count"]}</strong></div>
-        <div class="stat-card invalid">Needs Review<strong>{comfort["needs_review_count"]}</strong></div>
-        <div class="stat-card invalid">Invalid<strong>{comfort["invalid_count"]}</strong></div>
-        <div class="stat-card watch">Watchlist<strong>{comfort["watchlist_count"]}</strong></div>
-        <div class="stat-card safety">安全提醒<strong>{_e(str(comfort["safety_reminder"]))}</strong></div>
+    <section class="card" style="padding:10px 16px">
+      <div class="stats-inline">
+        <span class="stat-chip">📊 共 <strong>{comfort["total_count"]}</strong> 筆</span>
+        <span class="stat-chip green">✅ 可填入 <strong>{comfort["assistable_count"]}</strong></span>
+        <span class="stat-chip blue">📝 未處理 <strong>{comfort["unprocessed_count"]}</strong></span>
+        <span class="stat-chip red">⚠️ 需確認 <strong>{comfort["needs_review_count"]}</strong></span>
+        <span class="stat-chip amber">👀 Watchlist <strong>{comfort["watchlist_count"]}</strong></span>
+        <span class="stat-chip">❌ Invalid <strong>{comfort["invalid_count"]}</strong></span>
       </div>
     </section>
-    <section class="safety-banner">
-      🔒 系統不會自動送出、不會自動確認、不會自動完成。不合格項目不進輔助填入。每筆仍需人工核對後手動送出。
+    <section class="safety-card">
+      <h2>🔒 安全狀態</h2>
+      <ul>
+        <li>✅ 不自動送出</li>
+        <li>✅ 不自動確認</li>
+        <li>✅ 不自動完成</li>
+        <li>✅ 不合格項目不進輔助填入</li>
+        <li>✅ 每筆仍需人工核對</li>
+      </ul>
     </section>
   </div>
 
@@ -897,17 +907,25 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
   }}
 
     // ---- row splitting: pending → done ----
-    function moveRowToDone(idx) {{
-      var row = document.querySelector('#pending-tbody .assist-row-' + idx);
-      if (!row) return;
-      var doneTbody = document.getElementById('done-tbody');
-      if (doneTbody) {{
-        doneTbody.appendChild(row);
-        var btn = row.querySelector('.assist-btn');
-        if (btn) {{ btn.textContent = '已輔助填入'; btn.classList.add('done'); }}
+      function isRowAssisted(idx) {{
+        var history = loadHistory();
+        return history.some(function(h) {{ return String(h.idx) === String(idx) && h.type === '已輔助填入，待人工送出'; }});
       }}
-      updateSectionVisibility();
-    }}
+      function moveRowToDone(idx) {{
+        var row = document.querySelector('#pending-tbody .assist-row-' + idx);
+        if (!row) {{
+          // Row not in pending — may have already been moved, or idx is stale.
+          // Clean up stale history entries that don't match any current row.
+          return;
+        }}
+        var doneTbody = document.getElementById('done-tbody');
+        if (doneTbody) {{
+          doneTbody.appendChild(row);
+          var btn = row.querySelector('.assist-btn');
+          if (btn) {{ btn.textContent = '已輔助填入'; btn.classList.add('done'); }}
+        }}
+        updateSectionVisibility();
+      }}
     function updateSectionVisibility() {{
       var pendingTbody = document.getElementById('pending-tbody');
       var doneTbody = document.getElementById('done-tbody');
@@ -925,10 +943,12 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       }}
     }}
     (function() {{
-      // Move already-done rows on page load
-      var history = loadHistory();
-      var doneIds = history.filter(function(h) {{ return h.type === '已輔助填入，待人工送出'; }}).map(function(h) {{ return String(h.idx); }});
-      doneIds.forEach(function(id) {{ moveRowToDone(id); }});
+      // Move already-done rows on page load (only if they exist in pending table)
+      loadHistory().filter(function(h) {{ return h.type === '已輔助填入，待人工送出'; }})
+        .forEach(function(h) {{
+          var row = document.querySelector('#pending-tbody .assist-row-' + String(h.idx));
+          if (row) moveRowToDone(String(h.idx));
+        }});
     }})();
 
     // ---- export history ----

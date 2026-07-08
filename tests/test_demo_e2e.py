@@ -48,8 +48,9 @@ def test_generated_review_html_contains_review_sections_and_safety(tmp_path) -> 
     assert "待輔助填入" in html
     assert "已輔助填入" in html
     assert "需人工確認" in html
-    assert "系統不會自動送出" in html
-    assert "不會自動確認" in html
+    assert "不自動送出" in html
+    assert "不自動確認" in html
+    assert "不自動完成" in html
     assert "不進輔助填入" in html
     assert "live selector" not in html.lower()
 

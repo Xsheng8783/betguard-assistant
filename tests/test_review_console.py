@@ -333,15 +333,12 @@ def test_review_console_status_overview_html_contains_comfort_cards() -> None:
     html_text = render_review_console_html(queue)
 
     for label in [
-        "狀態總覽",
-        "總筆數",
-        "可輔助填入",
-        "已記錄 / 已處理",
-        "尚未處理",
-        "Needs Review",
-        "Invalid",
+        "共",
+        "可填入",
+        "未處理",
+        "需確認",
         "Watchlist",
-        "只輔助填入，不會送出或確認",
+        "Invalid",
     ]:
         assert label in html_text
 
