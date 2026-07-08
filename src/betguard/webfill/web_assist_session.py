@@ -241,6 +241,49 @@ class _AssistWorker(threading.Thread):
             self.filled_amounts = []
             result.set({"ok": True, "state": BROWSER_OPEN, "reused": False})
 
+    def _collect_diagnostics(self) -> dict[str, Any]:
+        """Collect page state for error diagnostics (no side effects)."""
+        info: dict[str, Any] = {}
+        if self._page is None:
+            info["page_available"] = False
+            return info
+        info["page_available"] = True
+        try:
+            url = self._page.evaluate("() => window.location.href")
+            info["url"] = str(url)[:200]
+        except Exception:
+            info["url"] = "unable to read"
+        try:
+            body = self._page.evaluate("() => document.body ? document.body.innerText : ''")
+            body_text = str(body)[:500] if body else ""
+            info["page_has_539"] = "539" in body_text
+            info["page_has_tiantianle"] = "天天樂" in body_text
+            info["page_has_234_star"] = "二三四星" in body_text or "2 3 4 星" in body_text
+            info["page_has_lianpeng"] = "連碰" in body_text
+            info["page_has_zhupeng"] = "柱碰" in body_text or "住碰" in body_text
+        except Exception:
+            pass
+        # Check if our target numbers are clickable
+        try:
+            padded = [_pad_number(n) for n in self.numbers]
+            found = self._page.evaluate(
+                """(nums) => {
+                    var inputs = document.querySelectorAll('input[type=text], input:not([type])');
+                    var found = [];
+                    nums.forEach(function(n) {
+                        for (var i = 0; i < inputs.length; i++) {
+                            if (inputs[i].value === n) { found.push(n); break; }
+                        }
+                    });
+                    return found;
+                }""",
+                padded,
+            )
+            info["numbers_found_in_inputs"] = list(found) if found else []
+        except Exception:
+            pass
+        return info
+
     def _handle_check_ready(self, result: _CommandResult) -> None:
         if self.state != BROWSER_OPEN:
             result.set({"ok": False, "error": f"session is in state '{self.state}', expected '{BROWSER_OPEN}'"})
@@ -255,6 +298,7 @@ class _AssistWorker(threading.Thread):
                 "ok": True,
                 "state": READY_CHECKED,
                 "danger_detected": self.danger_detected,
+                "diagnostic": self._collect_diagnostics(),
             })
         except Exception as exc:
             result.set({"ok": False, "error": f"page check failed: {exc}"})
@@ -267,10 +311,17 @@ class _AssistWorker(threading.Thread):
             if self._page is None:
                 result.set({"ok": False, "error": "page is not available"})
                 return
+            # Pre-fill diagnostic: check if numbers/amounts are likely findable
+            pre_diag = self._collect_diagnostics()
             # Zero-pad numbers 1-9 to "01"-"09" (site uses two-digit format)
             padded = [_pad_number(n) for n in self.numbers]
-            _fast_select_numbers_knockout(self._page, padded)
-            self.filled_amounts = _fill_amounts_on_b03(self._page, self.amounts)
+            try:
+                _fast_select_numbers_knockout(self._page, padded)
+                self.filled_amounts = _fill_amounts_on_b03(self._page, self.amounts)
+            except Exception as exc:
+                pre_diag["fill_error"] = str(exc)
+                result.set({"ok": False, "error": f"fill execution error: {exc}", "diagnostic": pre_diag})
+                return
             self.state = BROWSER_IDLE  # browser stays open for reuse
 
             # Verify selection (informational only — does NOT block success)

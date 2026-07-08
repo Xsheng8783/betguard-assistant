@@ -1313,6 +1313,27 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
         }} else {{
           var errMsg = data.error || 'unknown';
           if (data.warnings && data.warnings.length) errMsg += ' | ' + data.warnings.join('; ');
+          // Append diagnostic info if available
+          var diag = data.diagnostic;
+          var diagText = '';
+          if (diag) {{
+            if (diag.page_available === false) {{
+              diagText = ' | 瀏覽器頁面已失效，請重新按「開啟下牌網站」';
+            }} else {{
+              var parts = [];
+              if (diag.url) parts.push('網址: ' + diag.url.split('/').pop());
+              if (diag.page_has_tiantianle) parts.push('✅ 天天樂');
+              else if (diag.page_has_539) parts.push('✅ 539');
+              else parts.push('⚠️ 未偵測到遊戲');
+              if (diag.page_has_lianpeng) parts.push('連碰模式');
+              else if (diag.page_has_zhupeng) parts.push('柱碰模式');
+              else parts.push('⚠️ 未偵測到頁面模式');
+              if (diag.numbers_found_in_inputs && diag.numbers_found_in_inputs.length)
+                parts.push('號碼已顯示: ' + diag.numbers_found_in_inputs.join(','));
+              diagText = ' | ' + parts.join('; ');
+            }}
+            errMsg += diagText;
+          }}
           if (statusEl) {{
             statusEl.textContent = '❌ ' + translateError(errMsg);
             statusEl.className = 'am-status assist-error';
