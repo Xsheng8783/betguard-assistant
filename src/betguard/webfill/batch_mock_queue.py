@@ -511,6 +511,13 @@ def _apply_preprocessing_warnings(result: dict[str, Any], candidate: dict[str, A
     ]
     if not notes:
         return result
+
+    # Column (zhu_peng) bets with parsed stars and money are valid;
+    # the "hyphen amount requires manual review" note is a false positive
+    # for column bet formats like "11-28/33-39 234.100".
+    if result.get("type") == "column" and result.get("stars") and result.get("money"):
+        return result
+
     updated = dict(result)
     warnings = list(updated.get("warnings", []))
     for note in notes:

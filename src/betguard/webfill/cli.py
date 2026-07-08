@@ -204,9 +204,9 @@ def build_b03_mapping_from_discovery(url: str, selected_page: str) -> dict:
 
 
 def _get_first_current(queue: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the first CURRENT item, or None."""
+    """Return the first CURRENT or WAITING_FOR_HUMAN_CONFIRM item, or None."""
     for item in queue.get("items", []):
-        if item.get("status") == "CURRENT":
+        if item.get("status") in ("CURRENT", "WAITING_FOR_HUMAN_CONFIRM"):
             return item
     return None
 
@@ -692,6 +692,23 @@ def main() -> None:
         from betguard.webfill.zhu_peng_pipeline import zhu_peng_preflight, zhu_peng_columns_from_item
         queue = load_queue_state(args.queue_path)
         item = _get_first_current(queue) or {}
+        # If current item lacks the "columns" key (zhu_peng format),
+        # fall back to approved_fill_queue which has proper column data.
+        if not item.get("columns"):
+            afq = queue.get("approved_fill_queue", [])
+            for afq_item in afq:
+                if afq_item.get("accepted_by_human") and afq_item.get("columns"):
+                    item = afq_item
+                    break
+        # Normalize star_amounts → amounts if needed
+        if not item.get("amounts") and item.get("star_amounts"):
+            amounts = {}
+            for s, sa in item["star_amounts"].items():
+                if isinstance(sa, dict) and "money" in sa:
+                    amounts[int(s)] = sa["money"]
+            if amounts:
+                item = dict(item)
+                item["amounts"] = amounts
         report = zhu_peng_preflight(item)
         report["columns"] = zhu_peng_columns_from_item(item)
         if args.pretty:
