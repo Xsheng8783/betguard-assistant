@@ -550,14 +550,14 @@ def _create_batch(text: str, game: str) -> tuple[
     input_path.write_text(text, encoding="utf-8")
 
     # Step 1: --new-batch-from-file
+    # The CLI has no --game flag; the parser detects the game per line.
+    # Passing one made every non-auto selection fail with rc=2 (usage error).
     new_batch_args = [
         "--new-batch-from-file", str(input_path),
         "--queue", str(queue_path),
         "--overwrite",
         "--pretty",
     ]
-    if game != "auto":
-        new_batch_args += ["--game", game]
     proc1 = _run_cli(new_batch_args)
     if proc1.returncode != 0:
         raise RuntimeError(

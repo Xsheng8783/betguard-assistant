@@ -133,6 +133,22 @@ def test_valid_text_creates_input_file(tmp_path: Path, monkeypatch: pytest.Monke
         assert content == text
 
 
+def test_workbench_game_539_selection_creates_batch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Selecting 539 in the game dropdown must not break batch creation.
+
+    Regression: the workbench passed --game to the CLI, which has no such
+    flag, so every non-auto game selection failed with rc=2 (usage error).
+    """
+    runs_tmp = tmp_path / "runs"
+    monkeypatch.setattr(webui_app, "RUNS_DIR", runs_tmp)
+
+    handler = build_workbench_handler(project_version="test", git_commit="test")
+    with _running_server(handler) as port:
+        status, _body = _post_workbench(port, text="11 22 33 23X1", game="539")
+        assert status == 302  # redirects to review, not 500
+        assert list(runs_tmp.rglob("queue_*.json")), "no queue_*.json produced"
+
+
 # ---------------------------------------------------------------------------
 # Section C -- batch creation produces queue + review.html
 # ---------------------------------------------------------------------------
