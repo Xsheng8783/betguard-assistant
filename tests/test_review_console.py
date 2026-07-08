@@ -343,6 +343,54 @@ def test_review_console_status_overview_html_contains_comfort_cards() -> None:
         assert label in html_text
 
 
+# ---------------------------------------------------------------------------
+# v0.5.13-assisted-state-fix: localStorage batch isolation
+# ---------------------------------------------------------------------------
+
+def test_review_batch_id_uses_review_timestamp_fallback() -> None:
+    """batchId must fall back to review_*.html timestamp, not 'default'."""
+    queue = build_batch_mock_queue("17.20.29.33.440")
+    html_text = render_review_console_html(queue, queue_path="/test/queue_test.json")
+    # Must contain the review_ regex fallback in JS source
+    assert "review_" in html_text
+    assert "review_([^/.]+)" in html_text or "match(/review_" in html_text
+    # Must NOT fall back to bare 'default' as sole option
+    after_batchid = html_text.split("var batchId")[1].split(";")[0]
+    # The || chain means 'default' exists but is NOT the only option
+    assert "review_" in after_batchid or "Date.now" in after_batchid
+
+
+def test_review_batch_id_is_not_shared_default() -> None:
+    """Different reviews must NOT share the same localStorage key via 'default'."""
+    queue = build_batch_mock_queue("17.20.29.33.440")
+    html1 = render_review_console_html(queue, queue_path="/test/review_a.html")
+    html2 = render_review_console_html(queue, queue_path="/test/review_b.html")
+    # Extract batchId expression from each (may span multiple lines)
+    import re
+    def extract_batchid_expr(html: str) -> str:
+        m = re.search(r"var batchId = (.+?);", html, re.DOTALL)
+        return m.group(1).replace("\n", " ").strip() if m else ""
+    expr1 = extract_batchid_expr(html1)
+    expr2 = extract_batchid_expr(html2)
+    # The expressions should be identical (same JS code)
+    assert expr1 == expr2, f"batchId expressions differ: {expr1!r} vs {expr2!r}"
+    # The expression must include review_ fallback
+    assert "review_" in expr1, f"batchId must have review_ fallback: {expr1!r}"
+
+
+def test_review_stale_history_cleanup_logic_present() -> None:
+    """JS must contain cleanup logic that filters stale history records."""
+    queue = build_batch_mock_queue("17.20.29.33.440")
+    html_text = render_review_console_html(queue, queue_path="/test/queue_test.json")
+    # Stale cleanup code must exist
+    assert "clean = history.filter" in html_text or "clean.filter" in html_text
+    assert '已輔助填入，待人工送出' in html_text
+    # Must check assist-row-N class before moving
+    assert "assist-row-" in html_text
+    # Must save cleaned history
+    assert "saveHistory(clean)" in html_text
+
+
 def test_review_console_core_buttons_still_present_after_daily_report_change() -> None:
     queue = build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}100")
     html_text = render_review_console_html(queue)

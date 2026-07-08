@@ -633,7 +633,9 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
   var dailyReportStats = {daily_report_stats};
 
   // ---- localStorage + dismiss logic ----
-  var batchId = (window.location.href.match(/queue_([^/.]+)\.json/) || [])[1] || 'default';
+  var batchId = (window.location.href.match(/queue_([^/.]+)\.json/) || [])[1]
+    || (window.location.href.match(/review_([^/.]+)\.html/) || [])[1]
+    || 'betguard-' + Date.now();
   var storageKey = 'betguard-dismissed-' + batchId;
   function loadDismissed() {{
     try {{ return JSON.parse(localStorage.getItem(storageKey) || '[]'); }} catch(e) {{ return []; }}
@@ -943,8 +945,21 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       }}
     }}
     (function() {{
+      // Clean up stale history: remove records whose idx doesn't match any current candidate row
+      var allIdx = [];
+      document.querySelectorAll('#pending-tbody tr, #done-tbody tr').forEach(function(r) {{
+        var m = r.className.match(/assist-row-(\d+)/);
+        if (m) allIdx.push(m[1]);
+      }});
+      var history = loadHistory();
+      var clean = history.filter(function(h) {{
+        return h.type !== '已輔助填入，待人工送出' || allIdx.indexOf(String(h.idx)) >= 0;
+      }});
+      if (clean.length !== history.length) {{
+        saveHistory(clean);
+      }}
       // Move already-done rows on page load (only if they exist in pending table)
-      loadHistory().filter(function(h) {{ return h.type === '已輔助填入，待人工送出'; }})
+      clean.filter(function(h) {{ return h.type === '已輔助填入，待人工送出'; }})
         .forEach(function(h) {{
           var row = document.querySelector('#pending-tbody .assist-row-' + String(h.idx));
           if (row) moveRowToDone(String(h.idx));
