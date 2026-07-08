@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+import subprocess
 
 from betguard.webfill.batch_mock_queue import build_batch_mock_queue
 from betguard.webfill.review_console import (
@@ -284,3 +286,68 @@ def test_review_console_does_not_import_real_site() -> None:
         "playwright",
     ]:
         assert forbidden not in src, f"review_console must not reference {forbidden!r}"
+
+
+def test_review_console_daily_report_and_clear_csv_controls_present() -> None:
+    queue = build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}100\n17.29.1000")
+    html_text = render_review_console_html(queue)
+    assert "exportHistory()" in html_text
+    assert "downloadDailyReport()" in html_text
+    assert "今日檢查報告" in html_text
+    assert "日期,時間,序號,原始片段,號碼,二星金額,三星金額,四星金額,狀態,人工核對提醒" in html_text
+    assert "系統只輔助填入，不會送出或確認" in html_text
+
+
+def test_review_console_daily_report_contains_required_counts() -> None:
+    queue = build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}100\n17.29.1000")
+    html_text = render_review_console_html(queue)
+    for label in [
+        "今日總筆數",
+        "已輔助填入數",
+        "尚未處理數",
+        "Needs Review",
+        "Invalid",
+        "Watchlist",
+        "安全提醒",
+    ]:
+        assert label in html_text
+
+
+def test_review_console_core_buttons_still_present_after_daily_report_change() -> None:
+    queue = build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}100")
+    html_text = render_review_console_html(queue)
+    assert "openBettingSite()" in html_text
+    assert "開啟下牌網站" in html_text
+    assert "previewAssist(" in html_text
+    assert "輔助填入" in html_text
+
+
+def test_review_console_generated_javascript_has_no_syntax_error(tmp_path) -> None:
+    queue = build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}100\n17.29.1000")
+    html_text = render_review_console_html(queue)
+    scripts = "\n".join(re.findall(r"<script>(.*?)</script>", html_text, flags=re.S))
+    assert "String.fromCharCode(10)" in scripts
+    assert "'日期,時間,序號,原始片段,號碼,二星金額,三星金額,四星金額,狀態,人工核對提醒\n" not in scripts
+    script_path = tmp_path / "review_console.js"
+    script_path.write_text(scripts, encoding="utf-8")
+    result = subprocess.run(
+        ["node", "--check", str(script_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_review_items_still_do_not_enter_assist_buttons() -> None:
+    queue = build_batch_mock_queue(f"17.29.1000\n06.13.23.22 {TWO_THREE}100")
+    model = build_review_console_model(queue)
+    html_text = render_review_console_html(queue)
+    invalid_indexes = [str(item["index"]) for item in model["invalid_fragments"] + model["watchlist"]]
+    valid_indexes = [str(item["index"]) for item in model["valid_candidates"]]
+    assert invalid_indexes
+    assert valid_indexes
+    for idx in invalid_indexes:
+        assert f'data-assist-index="{idx}"' not in html_text
+    for idx in valid_indexes:
+        assert f'data-assist-index="{idx}"' in html_text

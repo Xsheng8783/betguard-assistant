@@ -105,6 +105,17 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     actions_html = "".join(f"<li><code>{_e(action)}</code></li>" for action in model["actions"]) or "<li>無可用指令</li>"
     audit = model["audit"]
     source_json = _e(json.dumps(model, ensure_ascii=False, indent=2))
+    daily_report_stats = json.dumps(
+        {
+            "candidateCount": model["preprocessing"]["candidate_count"],
+            "validCount": model["preprocessing"]["valid_count"],
+            "needsReviewCount": model["preprocessing"]["needs_review_count"],
+            "invalidCount": model["preprocessing"]["invalid_count"],
+            "watchlistCount": model["preprocessing"]["watchlist_count"],
+            "safetyReminder": "系統只輔助填入，不會送出或確認",
+        },
+        ensure_ascii=False,
+    )
 
     # Compute label category counts
     _all_review_items = model["invalid_fragments"] + model["watchlist"]
@@ -392,6 +403,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     .history-inline-item .hi-amounts {{ font-size: 12px; margin: 2px 0; }}
     .history-inline-item .hi-amount {{ display: inline-block; background: #dbeafe; color: #1e40af; padding: 1px 6px; border-radius: 4px; margin-right: 4px; font-size: 11px; }}
     .history-inline-item .hi-type {{ font-size: 11px; color: var(--green); font-weight: 600; margin-top: 4px; }}
+    .daily-report-box {{ margin-top: 10px; padding: 10px; background: #f8fafc; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; color: var(--ink); white-space: pre-line; }}
     .history-toggle {{
       position: fixed; right: 12px; bottom: 20px; z-index: 1001;
       background: var(--blue); color: #fff; border: none; border-radius: 50%;
@@ -562,8 +574,9 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       {current_html}{last_mock_html}
     </section>
     <section class="card">
-      <h2>📋 下注紀錄 <button onclick="exportHistory()" style="font-size:11px;padding:2px 8px;margin-left:8px">📥 匯出 CSV</button></h2>
+      <h2>📋 下注紀錄 <button onclick="exportHistory()" style="font-size:11px;padding:2px 8px;margin-left:8px">📥 匯出 CSV</button><button onclick="downloadDailyReport()" style="font-size:11px;padding:2px 8px;margin-left:4px">🧾 今日檢查報告</button></h2>
       <div id="history-inline-body" style="max-height:400px;overflow-y:auto"></div>
+      <div id="daily-report-preview" class="daily-report-box" style="display:none"></div>
     </section>
   </div>
 
@@ -573,6 +586,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
   </details>
 <script>
   var currentFilter = 'all';
+  var dailyReportStats = {daily_report_stats};
 
   // ---- localStorage + dismiss logic ----
   var batchId = (window.location.href.match(/queue_([^/.]+)\.json/) || [])[1] || 'default';
@@ -863,23 +877,76 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     }})();
 
     // ---- export history ----
+    function csvCell(value) {{
+      var s = String(value == null ? '' : value);
+      var unsafeCsvChars = new RegExp('[",' + String.fromCharCode(13) + String.fromCharCode(10) + ']');
+      if (unsafeCsvChars.test(s)) s = '"' + s.replace(/"/g, '""') + '"';
+      return s;
+    }}
+
+    function assistedHistoryItems(history) {{
+      return history.filter(function(h) {{ return String(h.type || '').indexOf('已輔助填入') >= 0; }});
+    }}
+
     function exportHistory() {{
       var history = loadHistory();
       if (history.length === 0) {{ alert('尚無紀錄可匯出'); return; }}
-      var starNames = {{2: '二星', 3: '三星', 4: '四星'}};
       var NL = String.fromCharCode(10);
-      var csv = '時間,原始片段,號碼,二星金額,三星金額,四星金額,狀態' + NL;
+      var csv = '日期,時間,序號,原始片段,號碼,二星金額,三星金額,四星金額,狀態,人工核對提醒' + NL;
       history.forEach(function(h) {{
         var nums = (h.numbers || []).map(function(n) {{ return (n < 10 ? '0' : '') + n; }}).join(' ');
         var amts = h.amounts || {{}};
-        csv += (h.time || '') + ',' + (h.fragment || '').replace(/,/g, ' ') + ',' + nums + ','
-          + (amts['2'] || '') + ',' + (amts['3'] || '') + ',' + (amts['4'] || '') + ','
-          + (h.type || '') + NL;
+        var row = [
+          new Date().toISOString().slice(0, 10),
+          h.time || '',
+          h.idx || '',
+          h.fragment || '',
+          nums,
+          amts['2'] || '',
+          amts['3'] || '',
+          amts['4'] || '',
+          h.type || '',
+          dailyReportStats.safetyReminder
+        ];
+        csv += row.map(csvCell).join(',') + NL;
       }});
       var blob = new Blob([csv], {{type: 'text/csv;charset=utf-8'}});
       var url = URL.createObjectURL(blob);
       var a = document.createElement('a');
       a.href = url; a.download = 'betguard_history_' + new Date().toISOString().slice(0,10) + '.csv';
+      a.click(); URL.revokeObjectURL(url);
+    }}
+
+    function buildDailyReportText() {{
+      var history = loadHistory();
+      var assistedCount = assistedHistoryItems(history).length;
+      var todayTotal = dailyReportStats.candidateCount || 0;
+      var unprocessedCount = Math.max(todayTotal - assistedCount, 0);
+      var NL = String.fromCharCode(10);
+      return [
+        'BetGuard 今日檢查報告',
+        '日期: ' + new Date().toISOString().slice(0, 10),
+        '今日總筆數: ' + todayTotal,
+        '已輔助填入數: ' + assistedCount,
+        '尚未處理數: ' + unprocessedCount,
+        'Needs Review: ' + (dailyReportStats.needsReviewCount || 0),
+        'Invalid: ' + (dailyReportStats.invalidCount || 0),
+        'Watchlist: ' + (dailyReportStats.watchlistCount || 0),
+        '安全提醒: ' + dailyReportStats.safetyReminder
+      ].join(NL);
+    }}
+
+    function downloadDailyReport() {{
+      var text = buildDailyReportText();
+      var preview = document.getElementById('daily-report-preview');
+      if (preview) {{
+        preview.textContent = text;
+        preview.style.display = '';
+      }}
+      var blob = new Blob([text], {{type: 'text/plain;charset=utf-8'}});
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url; a.download = 'betguard_daily_check_' + new Date().toISOString().slice(0,10) + '.txt';
       a.click(); URL.revokeObjectURL(url);
     }}
 
@@ -1064,6 +1131,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       <h3>📋 剛剛下注紀錄</h3>
       <div style="display:flex;gap:4px">
         <button onclick="exportHistory()">📥 匯出 CSV</button>
+        <button onclick="downloadDailyReport()">🧾 今日檢查報告</button>
         <button onclick="clearHistory()">清空全部</button>
       </div>
     </div>

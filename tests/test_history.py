@@ -23,9 +23,12 @@ from betguard.webfill import batch_queue, batch_fill_all
 from betguard.webfill.history import (
     HISTORY_DIR,
     HISTORY_FILE,
+    SAFETY_REMINDER,
+    export_records_csv,
     record_human_done,
     load_all_records,
     filter_records,
+    summarize_records_for_date,
 )
 
 
@@ -389,3 +392,34 @@ def test_filter_no_match() -> None:
     records = _seed_records()
     out = filter_records(records, query="zzz nothing matches zzz")
     assert out == []
+
+
+def test_summarize_records_for_date_includes_daily_safety_counts() -> None:
+    records = _seed_records()
+    summary = summarize_records_for_date(
+        records,
+        date="2026-07-07",
+        needs_review_count=2,
+        invalid_count=1,
+        watchlist_count=3,
+        expected_total=7,
+    )
+    assert summary == {
+        "date": "2026-07-07",
+        "total_count": 7,
+        "assisted_count": 2,
+        "unprocessed_count": 5,
+        "needs_review_count": 2,
+        "invalid_count": 1,
+        "watchlist_count": 3,
+        "safety_reminder": SAFETY_REMINDER,
+    }
+
+
+def test_export_records_csv_has_clear_manual_check_columns() -> None:
+    csv_text = export_records_csv([_seed_records()[0]])
+    lines = csv_text.splitlines()
+    assert lines[0] == "日期,時間,序號,原始片段,號碼,二星金額,三星金額,四星金額,狀態,人工核對提醒"
+    assert "2026-07-07,10:00:00,0" in lines[1]
+    assert "06 13 23 22" in lines[1]
+    assert SAFETY_REMINDER in lines[1]

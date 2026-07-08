@@ -20,6 +20,8 @@ import hashlib
 import json
 import os
 import sys
+import csv
+import io
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -39,6 +41,8 @@ HARD_CODED_SAFETY_FLAGS = {
     "auto_next": False,
     "danger_clicked": 0,
 }
+
+SAFETY_REMINDER = "系統只輔助填入，不會送出或確認"
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +285,74 @@ def filter_records(
     return out
 
 
+def summarize_records_for_date(
+    records: list[dict[str, Any]],
+    *,
+    date: str,
+    needs_review_count: int = 0,
+    invalid_count: int = 0,
+    watchlist_count: int = 0,
+    expected_total: int | None = None,
+) -> dict[str, Any]:
+    """Build a read-only daily check summary from local history records."""
+    today_records = filter_records(records, date=date)
+    assisted_count = sum(1 for record in today_records if record.get("status") == "DONE")
+    total = expected_total if expected_total is not None else len(today_records)
+    return {
+        "date": date,
+        "total_count": total,
+        "assisted_count": assisted_count,
+        "unprocessed_count": max(total - assisted_count, 0),
+        "needs_review_count": int(needs_review_count),
+        "invalid_count": int(invalid_count),
+        "watchlist_count": int(watchlist_count),
+        "safety_reminder": SAFETY_REMINDER,
+    }
+
+
+def export_records_csv(records: list[dict[str, Any]]) -> str:
+    """Return a human-checkable CSV export for local history records."""
+    output = io.StringIO()
+    writer = csv.writer(output, lineterminator="\n")
+    writer.writerow([
+        "日期",
+        "時間",
+        "序號",
+        "原始片段",
+        "號碼",
+        "二星金額",
+        "三星金額",
+        "四星金額",
+        "狀態",
+        "人工核對提醒",
+    ])
+    for record in records:
+        completed_at = str(record.get("completed_at") or record.get("created_at") or "")
+        amounts = record.get("amounts") or {}
+        numbers = " ".join(_format_number(number) for number in record.get("numbers") or [])
+        writer.writerow([
+            completed_at[:10],
+            completed_at[11:19] if len(completed_at) >= 19 else "",
+            record.get("queue_item_index", ""),
+            record.get("original_text", ""),
+            numbers,
+            amounts.get("2", ""),
+            amounts.get("3", ""),
+            amounts.get("4", ""),
+            record.get("status", ""),
+            SAFETY_REMINDER,
+        ])
+    return output.getvalue()
+
+
+def _format_number(value: Any) -> str:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return f"{number:02d}" if 0 <= number < 10 else str(number)
+
+
 __all__ = [
     "HISTORY_DIR",
     "HISTORY_FILE",
@@ -288,4 +360,6 @@ __all__ = [
     "record_human_done",
     "load_all_records",
     "filter_records",
+    "summarize_records_for_date",
+    "export_records_csv",
 ]
