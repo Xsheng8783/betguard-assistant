@@ -89,7 +89,7 @@ class TestAssistSessionWorker:
         assert "timed out" in result["error"]
 
     def test_browser_open_blocks_new_start(self) -> None:
-        """Non-DONE, non-IDLE states should block new start."""
+        """Non-IDLE, non-BROWSER_IDLE states with alive browser block new start."""
         from betguard.webfill.web_assist_session import (
             BROWSER_OPEN,
             CMD_START,
@@ -98,11 +98,39 @@ class TestAssistSessionWorker:
 
         w = _AssistWorker()
         w.state = BROWSER_OPEN
+        # Mock: browser is alive so we hit the "already active" path
+        w._browser = True  # truthy, not None
+        w._page = True
+        w._is_browser_alive = lambda: True
         w.start()
         try:
             r = w.dispatch(CMD_START, {"url": "http://localhost"}, timeout=2)
             assert r["ok"] is False
             assert "already active" in r.get("error", "")
+        finally:
+            w.shutdown()
+            w.join(timeout=2)
+
+    def test_stale_browser_auto_recovers_on_start(self) -> None:
+        """Dead browser in non-IDLE state → auto-cleanup → try re-launch."""
+        from betguard.webfill.web_assist_session import (
+            BROWSER_OPEN,
+            CMD_START,
+            IDLE,
+            _AssistWorker,
+        )
+
+        w = _AssistWorker()
+        w.state = BROWSER_OPEN
+        # Browser is dead → _is_browser_alive returns False
+        w._browser = None
+        w._page = None
+        w.start()
+        try:
+            r = w.dispatch(CMD_START, {"url": "http://localhost"}, timeout=5)
+            # Either "already active" or "browser start failed" depending on playwright availability
+            # Key assertion: state is now IDLE (cleanup happened)
+            assert w.state == IDLE, f"Expected IDLE after stale cleanup, got {w.state}"
         finally:
             w.shutdown()
             w.join(timeout=2)
@@ -130,6 +158,23 @@ class TestPadNumber:
 
         assert _pad_number("3") == "03"
         assert _pad_number("12") == "12"
+
+
+class TestBrowserAlive:
+    """v0.5.15: stale browser detection."""
+
+    def test_is_browser_alive_returns_false_when_no_browser(self) -> None:
+        from betguard.webfill.web_assist_session import _AssistWorker
+
+        w = _AssistWorker()
+        assert w._is_browser_alive() is False
+        assert w._browser is None
+
+    def test_worker_state_machine_has_idle_and_browser_idle(self) -> None:
+        from betguard.webfill.web_assist_session import BROWSER_IDLE, IDLE
+
+        assert IDLE == "idle"
+        assert BROWSER_IDLE == "browser_idle"
 
 
 class TestAssistSessionModule:

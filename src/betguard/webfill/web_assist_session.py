@@ -170,24 +170,45 @@ class _AssistWorker(threading.Thread):
 
     # ---- Command handlers (run on worker thread) ----
 
+    def _is_browser_alive(self) -> bool:
+        """Check if the controlled browser is still connected and responsive."""
+        if self._browser is None or self._page is None:
+            return False
+        try:
+            self._page.evaluate("() => 1")
+            return True
+        except Exception:
+            return False
+
     def _handle_start(self, payload: dict[str, Any], result: _CommandResult) -> None:
-        # BROWSER_IDLE → reuse existing browser, skip launch
+        # BROWSER_IDLE → reuse existing browser, skip launch (if alive)
         if self.state == BROWSER_IDLE:
-            if payload.get("open_site_only"):
-                result.set({"ok": True, "state": BROWSER_IDLE, "reused": True})
+            if not self._is_browser_alive():
+                self._cleanup()
+                self.state = IDLE
+                # Fall through to IDLE → launch new
+            else:
+                if payload.get("open_site_only"):
+                    result.set({"ok": True, "state": BROWSER_IDLE, "reused": True})
+                    return
+                self.numbers = list(payload.get("numbers", []))
+                self.stars = list(payload.get("stars", []))
+                self.amounts = dict(payload.get("amounts", {}))
+                self.state = BROWSER_OPEN
+                self.danger_detected = []
+                self.filled_amounts = []
+                result.set({"ok": True, "state": BROWSER_OPEN, "reused": True})
                 return
-            self.numbers = list(payload.get("numbers", []))
-            self.stars = list(payload.get("stars", []))
-            self.amounts = dict(payload.get("amounts", {}))
-            self.state = BROWSER_OPEN
-            self.danger_detected = []
-            self.filled_amounts = []
-            result.set({"ok": True, "state": BROWSER_OPEN, "reused": True})
-            return
 
         if self.state != IDLE:
-            result.set({"ok": False, "error": "another assisted fill job is already active; please cancel it first"})
-            return
+            # Stale state (BROWSER_OPEN/READY_CHECKED with dead browser) → auto-recover
+            if not self._is_browser_alive():
+                self._cleanup()
+                self.state = IDLE
+                # Fall through to IDLE → launch new browser
+            else:
+                result.set({"ok": False, "error": "another assisted fill job is already active; please cancel it first"})
+                return
 
         # IDLE → launch new browser
         try:

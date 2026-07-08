@@ -266,7 +266,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       background: var(--white); border-radius: 12px; overflow: hidden;
       box-shadow: 0 1px 3px rgba(0,0,0,0.04);
       transition: box-shadow 0.15s;
-      min-height: 90px;
+      min-height: 120px;
     }}
     .review-card:hover {{ box-shadow: 0 2px 12px rgba(0,0,0,0.08); }}
     .review-card .card-bar {{
@@ -281,14 +281,20 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     .review-card .card-bar.invalid {{ background: var(--red); }}
 
     .review-card .card-body {{
-      padding: 18px 24px; display: flex; flex-direction: column; gap: 10px;
+      padding: 22px 28px; display: flex; flex-direction: column; gap: 12px;
     }}
     .card-meta {{ display: flex; align-items: center; gap: 10px; }}
     .card-meta .card-idx {{ font-size: 12px; font-weight: 600; color: var(--slate); }}
     .card-meta .card-line {{ font-size: 11px; color: var(--slate); background: #f1f5f9; padding: 2px 8px; border-radius: 8px; }}
     .review-card .card-fragment {{
-      font-size: 28px; font-weight: 800; color: #0f172a; line-height: 1.3;
+      font-size: 32px; font-weight: 800; color: #0f172a; line-height: 1.3;
       word-break: break-word; letter-spacing: 0.5px;
+    }}
+    .review-card .card-human-review {{
+      font-size: 12px; font-weight: 600; color: #dc2626;
+      background: #fef2f2; border: 1px solid #fecaca;
+      padding: 3px 8px; border-radius: 6px;
+      display: inline-flex; align-items: center; gap: 4px;
     }}
     .review-card .card-labels {{ display: flex; flex-wrap: wrap; gap: 4px; }}
     .review-card .card-en-label {{
@@ -1078,11 +1084,14 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
         body: JSON.stringify({{}})
       }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
         if (data.ok) {{
+          if (btn) {{
+            btn.disabled = false;
+            btn.textContent = '🌐 重新開啟下牌網站';
+            btn.style.background = '';
+          }}
           if (data.reused) {{
-            if (btn) {{ btn.textContent = '🌐 下牌網站已開啟（重用）'; btn.style.background = '#059669'; }}
-            if (statusEl) statusEl.textContent = '✅ 下牌網站已開啟，請確認目前在二三四星頁面';
+            if (statusEl) statusEl.textContent = '✅ 下牌網站仍在線上，請確認目前在二三四星頁面';
           }} else {{
-            if (btn) {{ btn.textContent = '🌐 下牌網站已開啟'; btn.style.background = '#059669'; }}
             if (statusEl) statusEl.textContent = '✅ 下牌網站已開啟，請手動登入並切到 539 或天天樂二三四星頁面';
           }}
         }} else {{
@@ -1281,6 +1290,7 @@ def _review_card(item: dict[str, Any], kind: str) -> str:
         f"<div class='card-meta'><span class='card-idx'>#{idx}</span>{line_tag}</div>"
         f"<div class='card-fragment'>{fragment}</div>"
         f"<div class='card-labels'>{label_html}</div>"
+        f"<div class='card-human-review'>⚠️ 請人工確認</div>"
         f"<div class='card-en-label'>{en_label_text}</div>"
         f"</div>"
         f"<div class='card-right'>"

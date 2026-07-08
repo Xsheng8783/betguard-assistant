@@ -400,6 +400,71 @@ def test_review_console_core_buttons_still_present_after_daily_report_change() -
     assert "輔助填入" in html_text
 
 
+# --- v0.5.15: enlarged review cards ---
+
+def test_review_cards_show_human_review_prompt() -> None:
+    """Needs Review cards must display '請人工確認' prompt."""
+    queue = build_batch_mock_queue("17.29.1000\n99.98.97 234.100")
+    html_text = render_review_console_html(queue)
+    assert "請人工確認" in html_text
+    assert "card-human-review" in html_text
+
+
+def test_review_cards_have_larger_font_and_min_height() -> None:
+    """Review cards must be visually enlarged when data is present."""
+    queue = build_batch_mock_queue("17.29.1000")
+    html_text = render_review_console_html(queue)
+    assert "min-height: 120px" in html_text
+    assert "font-size: 32px" in html_text
+
+
+# --- v0.5.15: filter chip correctness ---
+
+def test_filter_chips_match_card_labels() -> None:
+    """Filter chips with non-zero count must have matching data-labels on cards."""
+    queue = build_batch_mock_queue("17.29.1000\n99.98.97 234.100\n5HalfCar")
+    html_text = render_review_console_html(queue)
+    import re
+
+    # Collect card label values
+    card_labels = set()
+    for m in re.finditer(r'data-labels=\'([^\']*)\'', html_text):
+        for lb in m.group(1).split():
+            if lb:
+                card_labels.add(lb)
+
+    # Every non-zero-count chip must have at least one matching card
+    # Parse filter-chips section specifically
+    fc_section = re.search(r'class="filter-chips">(.*?)</div>', html_text, re.DOTALL)
+    if fc_section:
+        chips_html = fc_section.group(1)
+        chip_pairs = re.findall(r'data-filter="([^"]+)"[^>]*>([^<]+)<', chips_html)
+        for cf, text in chip_pairs:
+            if cf in ('all', 'uncategorized'):
+                continue
+            count_match = re.search(r'\d+$', text.strip())
+            if count_match and int(count_match.group()) == 0:
+                continue  # zero-count hidden by auto-collapse
+            assert cf in card_labels, f"Chip '{cf}' (count>0) has no matching card (labels: {sorted(card_labels)})"
+
+
+def test_review_cards_have_data_labels_for_needs_review() -> None:
+    """Needs Review / Invalid / Watchlist cards must have data-labels attribute with category."""
+    queue = build_batch_mock_queue("17.29.1000\n99.98.97 234.100")
+    html_text = render_review_console_html(queue)
+    # The review-cards section must have at least one card with data-labels
+    assert "data-labels='" in html_text or 'data-labels="' in html_text
+    assert "setFilter(" in html_text
+
+
+def test_review_cards_still_show_original_fragment() -> None:
+    """Review cards must still contain the original fragment text."""
+    queue = build_batch_mock_queue("17.29.1000")
+    html_text = render_review_console_html(queue)
+    assert "17.29.1000" in html_text
+    assert "card-fragment" in html_text
+
+
 def test_review_console_generated_javascript_has_no_syntax_error(tmp_path) -> None:
     queue = build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}100\n17.29.1000")
     html_text = render_review_console_html(queue)
