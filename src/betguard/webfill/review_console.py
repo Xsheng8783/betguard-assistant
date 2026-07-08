@@ -867,13 +867,14 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       var history = loadHistory();
       if (history.length === 0) {{ alert('尚無紀錄可匯出'); return; }}
       var starNames = {{2: '二星', 3: '三星', 4: '四星'}};
-      var csv = '\uFEFF時間,原始片段,號碼,二星金額,三星金額,四星金額,狀態\n';
+      var NL = String.fromCharCode(10);
+      var csv = '時間,原始片段,號碼,二星金額,三星金額,四星金額,狀態' + NL;
       history.forEach(function(h) {{
         var nums = (h.numbers || []).map(function(n) {{ return (n < 10 ? '0' : '') + n; }}).join(' ');
         var amts = h.amounts || {{}};
         csv += (h.time || '') + ',' + (h.fragment || '').replace(/,/g, ' ') + ',' + nums + ','
           + (amts['2'] || '') + ',' + (amts['3'] || '') + ',' + (amts['4'] || '') + ','
-          + (h.type || '') + '\n';
+          + (h.type || '') + NL;
       }});
       var blob = new Blob([csv], {{type: 'text/csv;charset=utf-8'}});
       var url = URL.createObjectURL(blob);
