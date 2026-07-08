@@ -178,9 +178,10 @@ class TestFrontendDiagnosticDisplay:
         assert "重試輔助填入" in html_text
 
     def test_column_still_shows_cli_not_assist(self) -> None:
+        """Column bets now show proper preview + can start assist (not just CLI)."""
         html_text = self._html_for("11/22/33/13 234.100")
         assert '"column"' in html_text
-        assert "CLI" in html_text
+        assert "住碰" in html_text or "柱碰" in html_text
 
 
 # ── net: error response shape ────────────────────────────────────────────

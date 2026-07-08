@@ -34,6 +34,7 @@ DONE = "done"
 CMD_START = "start"
 CMD_CHECK_READY = "check_ready"
 CMD_EXECUTE_FILL = "execute_fill"
+CMD_ZHU_PENG_EXECUTE = "execute_zhu_peng"
 CMD_CLOSE = "close"
 
 WORKER_TIMEOUT = 30  # seconds to wait for worker to process a command
@@ -163,6 +164,8 @@ class _AssistWorker(threading.Thread):
             self._handle_check_ready(result)
         elif cmd == CMD_EXECUTE_FILL:
             self._handle_execute_fill(result)
+        elif cmd == CMD_ZHU_PENG_EXECUTE:
+            self._handle_zhu_peng_execute(payload, result)
         elif cmd == CMD_CLOSE:
             self._handle_close(result)
         else:
@@ -356,6 +359,29 @@ class _AssistWorker(threading.Thread):
             })
         except Exception as exc:
             result.set({"ok": False, "error": f"fill execution error: {exc}"})
+
+    def _handle_zhu_peng_execute(self, payload: dict[str, Any], result: _CommandResult) -> None:
+        """Execute ZhuPeng column fill via knockout JS (same as CLI path)."""
+        from betguard.webfill.zhu_peng_pipeline import zhu_peng_fill_execute
+
+        if self.state != READY_CHECKED:
+            result.set({"ok": False, "error": f"session is in state '{self.state}', expected '{READY_CHECKED}'"})
+            return
+        try:
+            if self._page is None:
+                result.set({"ok": False, "error": "page is not available"})
+                return
+            item = payload.get("item", {})
+            fill_report = zhu_peng_fill_execute(self._page, item)
+            fill_report.setdefault("auto_submit", False)
+            fill_report.setdefault("auto_confirm", False)
+            fill_report.setdefault("danger_buttons_clicked", [])
+            fill_report.setdefault("danger_buttons_detected", self.danger_detected)
+            fill_report["ok"] = not fill_report.get("blocked", False)
+            self.state = BROWSER_IDLE
+            result.set(fill_report)
+        except Exception as exc:
+            result.set({"ok": False, "error": f"zhu peng execute error: {exc}"})
 
     def _handle_close(self, result: _CommandResult) -> None:
         self._cleanup()

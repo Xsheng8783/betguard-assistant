@@ -994,20 +994,154 @@ def build_workbench_handler(
                     "game": candidate.get("game", "539"),
                 }
             else:
-                # Queue path: reuse the body read above — reading it twice hangs
-                _err, validation = self._validate_candidate(data)
-                if validation is None:
-                    return
+                # Queue path: detect bet_type before validation
+                bet_type = data.get("bet_type") or "normal"
+                if bet_type == "column":
+                    # Column bets skip normal _validate_candidate (which requires flat "numbers")
+                    validation = {"ok": True, "bet_type": "column",
+                                  "url": "https://www.gts362.com",
+                                  "game": data.get("game", "539")}
+                else:
+                    _err, validation = self._validate_candidate(data)
+                    if validation is None:
+                        return
 
             if not validation.get("ok"):
                 self._send_json(validation)
                 return
 
             from betguard.webfill.web_assist_session import (
-                CMD_CHECK_READY, CMD_EXECUTE_FILL, CMD_START, get_assist_session,
+                CMD_CHECK_READY, CMD_EXECUTE_FILL, CMD_START, CMD_ZHU_PENG_EXECUTE,
+                get_assist_session,
             )
 
             worker = get_assist_session()
+
+            # ── Column/zhu-peng path ──
+            if bet_type == "column":
+                queue_path_str = (data.get("queue_path") or "").strip()
+                item_index = data.get("item_index")
+                if not queue_path_str or item_index is None:
+                    self._send_json({"ok": False, "error": "missing queue_path or item_index"})
+                    return
+                resolved = _resolve_queue_path(queue_path_str)
+                if resolved is None:
+                    self._send_json({"ok": False, "error": f"queue not found: {queue_path_str}"})
+                    return
+                import json as _json_module
+                from datetime import datetime, timezone
+                try:
+                    queue = _json_module.loads(resolved.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    self._send_json({"ok": False, "error": f"cannot read queue: {exc}"})
+                    return
+
+                # 1) Verify item is a Valid Candidate (not Needs Review/Invalid/Watchlist)
+                valid_candidates = queue.get("preprocessing", {}).get("valid_candidates", [])
+                vc_item = None
+                for vc in valid_candidates:
+                    if vc.get("index") == item_index:
+                        vc_item = vc
+                        break
+                if vc_item is None:
+                    self._send_json({"ok": False, "error": f"item #{item_index} is not a Valid Candidate (may be Needs Review/Invalid/Watchlist); BLOCKED"})
+                    return
+                vc_result = vc_item.get("result", {})
+                if vc_result.get("status") != "ok":
+                    self._send_json({"ok": False, "error": f"item #{item_index} status is not 'ok'; BLOCKED"})
+                    return
+                if vc_result.get("type") != "column":
+                    self._send_json({"ok": False, "error": f"item #{item_index} type is not 'column'; BLOCKED"})
+                    return
+
+                # 2) Auto-create approved_fill_queue entry if missing (Web UI button = human confirm)
+                afq = queue.get("approved_fill_queue") or []
+                if not isinstance(afq, list):
+                    afq = []
+                zhu_item = None
+                for afi in afq:
+                    if afi.get("index") == item_index and afi.get("accepted_by_human"):
+                        zhu_item = afi
+                        break
+
+                if zhu_item is None:
+                    # Build AFQ entry from valid_candidates data
+                    accepted_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+                    stars = vc_result.get("stars") or []
+                    money = vc_result.get("money")
+                    unit = vc_result.get("unit")
+                    star_amounts = {}
+                    if money is not None and stars:
+                        star_amounts = {str(s): {"unit": unit, "money": money} for s in stars}
+                    zhu_item = {
+                        "index": vc_item.get("index"),
+                        "original_fragment": vc_item.get("original_fragment") or vc_item.get("raw", ""),
+                        "original_line": vc_item.get("original_line") or vc_item.get("raw", ""),
+                        "original_lines": list(vc_item.get("original_lines") or [vc_item.get("raw", "")]),
+                        "review_result": dict(vc_result),
+                        "bet_type": vc_result.get("type"),
+                        "numbers": list(vc_result.get("numbers") or []),
+                        "columns": list(vc_result.get("columns") or []),
+                        "stars": list(stars),
+                        "money": money,
+                        "unit": unit,
+                        "star_amounts": star_amounts,
+                        "accepted_at": accepted_at,
+                        "accepted_by_human": True,
+                        "approved_source": {
+                            "from_webui_assist_button": True,
+                            "source": "webui_column_assist",
+                            "original_fragment": vc_item.get("original_fragment") or vc_item.get("raw", ""),
+                            "bet_type": "column",
+                        },
+                        "audit_snapshot": {
+                            "batch_id": queue.get("audit", {}).get("batch_id"),
+                            "queue_status": queue.get("status"),
+                            "review_action": "webui_column_assist",
+                        },
+                    }
+                    # Save to queue
+                    afq.append(zhu_item)
+                    queue["approved_fill_queue"] = afq
+                    try:
+                        resolved.write_text(_json_module.dumps(queue, ensure_ascii=False, indent=2), encoding="utf-8")
+                    except OSError:
+                        pass  # best-effort save; fill proceeds anyway
+
+                # 3) Normalize + preflight + execute (same as CLI)
+                from betguard.webfill.zhu_peng_pipeline import zhu_peng_preflight
+                from betguard.webfill.cli import _normalize_zhu_peng_item as _norm_zhu
+                zhu_item = _norm_zhu(queue, zhu_item)
+                pre = zhu_peng_preflight(zhu_item)
+                if pre["status"] != "READY_FOR_HUMAN_REVIEW":
+                    pre["auto_submit"] = False
+                    pre["auto_confirm"] = False
+                    self._send_json(pre)
+                    return
+
+                start_payload = {
+                    "numbers": zhu_item.get("numbers", []),
+                    "stars": zhu_item.get("stars", []),
+                    "amounts": zhu_item.get("amounts", {}),
+                    "url": validation.get("url", "https://www.gts362.com"),
+                    "game": zhu_item.get("game", "539"),
+                }
+                start_result = worker.dispatch(CMD_START, start_payload)
+                if not start_result.get("ok"):
+                    self._send_json(start_result)
+                    return
+                ready_result = worker.dispatch(CMD_CHECK_READY, None)
+                if not ready_result.get("ok"):
+                    self._send_json(ready_result)
+                    return
+                exec_result = worker.dispatch(CMD_ZHU_PENG_EXECUTE, {"item": zhu_item})
+                exec_result.setdefault("auto_submit", False)
+                exec_result.setdefault("auto_confirm", False)
+                exec_result.setdefault("danger_buttons_clicked", [])
+                self._send_json(exec_result)
+                return
+
+            # ── Normal bet path ──
             start_result = worker.dispatch(CMD_START, {
                 "numbers": validation["numbers"],
                 "stars": validation["stars"],
@@ -1020,7 +1154,6 @@ def build_workbench_handler(
                 self._send_json(start_result)
                 return
 
-            # Auto chain: check_ready → execute
             ready_result = worker.dispatch(CMD_CHECK_READY, None)
             print(f"[assist] ready: ok={ready_result.get('ok')} danger={len(ready_result.get('danger_detected', []))}", flush=True)
             if not ready_result.get("ok"):

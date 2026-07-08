@@ -1197,24 +1197,31 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       assistItem = {{idx: idx, fragment: fragment, summary: summary, numbers: numbers, stars: stars, amounts: amounts, betType: betType || ''}};
       assistInProgress = false;
 
-      // Column/zhu-peng items → friendly CLI redirect
+      // Column/zhu-peng items → show column preview + enable start
       if (betType === 'column') {{
-        var preview = '<p style="color:#d97706;font-weight:600">🔧 這是柱碰 / 注碰項目</p>'
-          + '<p><strong>原始：</strong>' + fragment + '</p>'
-          + '<p><strong>號碼：</strong>' + numbers.map(function(n) {{ return (n < 10 ? '0' : '') + n; }}).join(',') + '</p>'
-          + '<p style="color:var(--slate);font-size:12px;margin-top:8px">'
-          + 'Web UI 一鍵填入尚未支援柱碰。<br>'
-          + '請使用 CLI 指令：</p>'
-          + '<pre style="background:#f1f5f9;padding:8px;border-radius:6px;font-size:11px;overflow-x:auto">'
-          + 'python -X utf8 -m betguard.webfill.cli --queue <i>&lt;queue&gt;</i> --zhu-peng-assisted-fill --i-understand-real-site-fill-risk --url http://www.gts362.com</pre>'
-          + '<p style="color:var(--green);font-size:11px">✅ 不自動送出、不自動確認</p>';
+        var starNames = {{2: '二星', 3: '三星', 4: '四星'}};
+        var preview = '<p style="color:#d97706;font-weight:600">🔧 柱碰 / 注碰項目</p>'
+          + '<p><strong>原始：</strong>' + fragment + '</p>';
+        if (numbers && numbers.length) {{
+          preview += '<p><strong>號碼：</strong>';
+          for (var ci = 0; ci < numbers.length; ci++) {{
+            var colNums = numbers[ci];
+            if (colNums && colNums.length) {{
+              preview += '第' + (ci+1) + '柱: ' + colNums.map(function(n) {{ return (n < 10 ? '0' : '') + n; }}).join(',') + (ci < numbers.length-1 ? '｜' : '');
+            }}
+          }}
+          preview += '</p>';
+        }}
+        var hasAmt = false;
+        for (var s in amounts) {{
+          preview += '<p><strong>' + (starNames[parseInt(s)] || s) + '金額：</strong>' + amounts[s] + ' 元</p>';
+          hasAmt = true;
+        }}
+        if (!hasAmt) preview += '<p><strong style="color:var(--red)">⚠️ 無金額資料</strong></p>';
+        preview += '<p style="color:var(--slate);font-size:11px">⚠️ 請先按「開啟下牌網站」登入並切到天天樂/539 二三四星住碰頁面。系統只會填入號碼與金額，不送出、不確認。</p>';
         document.getElementById('assist-preview').innerHTML = preview;
-        document.getElementById('assist-status').textContent = '柱碰請使用 CLI';
         document.getElementById('assist-modal-overlay').classList.add('show');
-        var btnStart = document.getElementById('assist-btn-start');
-        var btnCancel = document.getElementById('assist-btn-cancel');
-        if (btnStart) btnStart.style.display = 'none';
-        if (btnCancel) btnCancel.style.display = 'none';
+        setAssistStage('start');
         return;
       }}
 
@@ -1262,12 +1269,6 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
 
     function startAssist() {{
       if (!assistItem || assistInProgress) return;
-      // Column/zhu-peng items are not supported via Web UI one-button flow
-      if (assistItem.betType === 'column') {{
-        document.getElementById('assist-preview').innerHTML = '<p style="color:#d97706;font-weight:600">🔧 柱碰 / 注碰項目</p><p>Web UI 一鍵填入尚未支援柱碰，請使用 CLI 指令。</p>';
-        document.getElementById('assist-status').textContent = '柱碰請使用 CLI';
-        return;
-      }}
       assistInProgress = true;
       var statusEl = document.getElementById('assist-status');
       setAssistStage('executing');
@@ -1277,7 +1278,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       if (assistItem.idx && String(assistItem.idx).indexOf('manual-') === 0) {{
         reqBody = {{manual_candidate_id: assistItem.idx}};
       }} else {{
-        reqBody = {{queue_path: queuePath, item_index: parseInt(assistItem.idx)}};
+        reqBody = {{queue_path: queuePath, item_index: parseInt(assistItem.idx), bet_type: assistItem.betType || 'normal'}};
       }}
       // Abort after 20 seconds to avoid infinite loading
       var controller = new AbortController();
