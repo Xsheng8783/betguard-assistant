@@ -90,6 +90,8 @@ def reparse_text(text: str, *, game: str = "auto") -> dict[str, Any]:
         "amounts": amounts,
         "summary": _format_summary(parsed),
         "source": "manual_correction",
+        "type": getattr(parsed, "type", "normal"),
+        "columns": getattr(parsed, "columns", None),
     }
 
 

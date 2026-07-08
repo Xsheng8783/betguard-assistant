@@ -974,11 +974,41 @@ def build_workbench_handler(
             Supports both queue-based candidates (queue_path + item_index) and
             manually corrected candidates (manual_candidate_id).
             """
+            try:
+                self._assist_fill_start_inner()
+            except Exception as exc:
+                self._send_json({
+                    "ok": False,
+                    "error": f"assist_fill_start error: {exc}",
+                    "diagnostic": {
+                        "stage": "assist_fill_start",
+                        "exception_type": type(exc).__name__,
+                    },
+                })
+                try:
+                    import traceback
+                    traceback.print_exc()
+                except Exception:
+                    pass
+
+        def _assist_fill_start_inner(self) -> None:
+            """Inner implementation — wrapped by try/except in caller."""
             data = self._read_json_body()
             if data is None:
                 return
 
             manual_id = (data.get("manual_candidate_id") or "").strip()
+
+            # ── Initialize bet_type early (must be set before any use) ──
+            bet_type = (data.get("bet_type") or "").strip()
+            if not bet_type:
+                # Try to derive from manual candidate if available
+                if manual_id:
+                    candidate = _lookup_manual_candidate(manual_id)
+                    if candidate:
+                        bet_type = candidate.get("bet_type") or candidate.get("type") or ""
+                if not bet_type:
+                    bet_type = "normal"  # safe default
 
             if manual_id:
                 # Manual correction path: look up registered candidate
@@ -994,8 +1024,7 @@ def build_workbench_handler(
                     "game": candidate.get("game", "539"),
                 }
             else:
-                # Queue path: detect bet_type before validation
-                bet_type = data.get("bet_type") or "normal"
+                # Queue path: use previously initialized bet_type
                 if bet_type == "column":
                     # Column bets skip normal _validate_candidate (which requires flat "numbers")
                     validation = {"ok": True, "bet_type": "column",
@@ -1235,6 +1264,7 @@ def build_workbench_handler(
                     "summary": result.get("summary", ""),
                     "game": game,
                     "source": "manual_correction",
+                    "bet_type": result.get("bet_type") or result.get("type") or "normal",
                 })
                 result["manual_candidate_id"] = cid
 
