@@ -300,6 +300,23 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     .review-card .card-en-label {{
       font-size: 11px; color: #94a3b8; margin-top: 4px;
     }}
+    .card-state-btns {{
+      display: flex; flex-direction: column; gap: 4px; margin-top: 6px;
+    }}
+    .card-state-btns button {{
+      font-size: 11px; padding: 3px 8px; border-radius: 6px; cursor: pointer;
+      border: 1px solid #e2e8f0; background: #fff; white-space: nowrap;
+    }}
+    .btn-state-done.active {{ background: #059669; color: #fff; border-color: #059669; }}
+    .btn-state-manual.active {{ background: #2563eb; color: #fff; border-color: #2563eb; }}
+    .btn-edit {{ color: #64748b; }}
+    .btn-edit:hover {{ background: #f1f5f9; }}
+    .edit-panel {{
+      margin-top: 8px; padding: 8px; background: #f8fafc;
+      border: 1px solid #e2e8f0; border-radius: 8px;
+    }}
+    .review-card.state-done {{ opacity: 0.6; }}
+    .review-card.state-manual {{ border-left: 4px solid var(--blue); opacity: 0.8; }}
 
     .review-card .card-right {{
       padding: 18px 20px; display: flex; flex-direction: column;
@@ -607,10 +624,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
         {_label_count_html}
       </div>
       <div class="controls-bar">
-        <button onclick="showDismissed()">顯示已處理</button>
-        <button onclick="hideDismissed()">隱藏已處理</button>
-        <button onclick="restoreAll()">全部復原</button>
-        <span id="dismissed-count" style="font-size:11px;color:var(--slate);margin-left:8px"></span>
+        <button onclick="var cards=document.querySelectorAll('.review-card.state-done,.review-card.state-manual');cards.forEach(function(c){{c.classList.toggle('hidden')}})">切換顯示已處理</button>
       </div>
       <div class="card-list" id="review-cards">{invalid_cards}</div>
     </section>
@@ -638,82 +652,60 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
   var currentFilter = 'all';
   var dailyReportStats = {daily_report_stats};
 
-  // ---- localStorage + dismiss logic ----
+  // ---- localStorage + review card state ----
   var batchId = (window.location.href.match(/queue_([^/.]+)\.json/) || [])[1]
     || (window.location.href.match(/review_([^/.]+)\.html/) || [])[1]
     || 'betguard-' + Date.now();
-  var storageKey = 'betguard-dismissed-' + batchId;
-  function loadDismissed() {{
-    try {{ return JSON.parse(localStorage.getItem(storageKey) || '[]'); }} catch(e) {{ return []; }}
+  var cardStateKey = 'betguard-card-state-' + batchId;
+  function loadCardStates() {{
+    try {{ return JSON.parse(localStorage.getItem(cardStateKey) || '{{}}'); }} catch(e) {{ return {{}}; }}
   }}
-  function saveDismissed(list) {{
-    try {{ localStorage.setItem(storageKey, JSON.stringify(list)); }} catch(e) {{}}
+  function saveCardStates(states) {{
+    try {{ localStorage.setItem(cardStateKey, JSON.stringify(states)); }} catch(e) {{}}
   }}
-  function dismissCard(btn) {{
-    var card = btn.closest('.review-card');
+  function getCardState(idx) {{ return loadCardStates()[String(idx)] || null; }}
+  function setCardState(idx, state) {{
+    var states = loadCardStates();
+    if (state === null) {{ delete states[String(idx)]; }}
+    else {{ states[String(idx)] = state; }}
+    saveCardStates(states);
+    updateCardButtons(idx);
+  }}
+  function updateCardButtons(idx) {{
+    var card = document.querySelector('.review-card[data-batch-id="' + idx + '"]');
     if (!card) return;
-    var idx = card.dataset.batchId;
-    card.classList.add('dismissed');
-    // Toggle buttons: hide ✓已處理, show ↩取消已處理
-    var doneBtn = card.querySelector('.dismiss-btn:not(.undo-btn)');
-    var undoBtn = card.querySelector('.undo-btn');
-    if (doneBtn) doneBtn.style.display = 'none';
-    if (undoBtn) undoBtn.style.display = '';
-    var dismissed = loadDismissed();
-    if (dismissed.indexOf(idx) < 0) {{ dismissed.push(idx); }}
-    saveDismissed(dismissed);
-    updateCounts();
+    var state = getCardState(idx);
+    var doneBtn = card.querySelector('.btn-state-done');
+    var manualBtn = card.querySelector('.btn-state-manual');
+    if (doneBtn) doneBtn.classList.toggle('active', state === 'done');
+    if (manualBtn) manualBtn.classList.toggle('active', state === 'manual');
+    card.classList.toggle('state-done', state === 'done');
+    card.classList.toggle('state-manual', state === 'manual');
   }}
-  function undoDismiss(btn) {{
-    var card = btn.closest('.review-card');
-    if (!card) return;
-    var idx = card.dataset.batchId;
-    card.classList.remove('dismissed');
-    var doneBtn = card.querySelector('.dismiss-btn:not(.undo-btn)');
-    var undoBtn = card.querySelector('.undo-btn');
-    if (doneBtn) doneBtn.style.display = '';
-    if (undoBtn) undoBtn.style.display = 'none';
-    var dismissed = loadDismissed().filter(function(d) {{ return d !== idx; }});
-    saveDismissed(dismissed);
-    updateCounts();
-  }}
-  function showDismissed() {{
-    document.querySelectorAll('#review-cards .review-card:not(.dismissed)').forEach(function(c) {{ c.classList.add('hidden'); }});
-    document.querySelectorAll('#review-cards .review-card.dismissed').forEach(function(c) {{ c.classList.remove('hidden'); }});
-  }}
-  function hideDismissed() {{
-    document.querySelectorAll('#review-cards .review-card.dismissed').forEach(function(c) {{ c.classList.add('hidden'); }});
-    document.querySelectorAll('#review-cards .review-card:not(.dismissed)').forEach(function(c) {{ c.classList.remove('hidden'); }});
-  }}
-  function restoreAll() {{
-    document.querySelectorAll('#review-cards .review-card.dismissed').forEach(function(c) {{
-      c.classList.remove('dismissed', 'hidden');
-      var doneBtn = c.querySelector('.dismiss-btn:not(.undo-btn)');
-      var undoBtn = c.querySelector('.undo-btn');
-      if (doneBtn) doneBtn.style.display = '';
-      if (undoBtn) undoBtn.style.display = 'none';
-    }});
-    localStorage.removeItem(storageKey);
-    updateCounts();
+  function toggleCardState(idx, newState) {{
+    var cur = getCardState(idx);
+    setCardState(idx, cur === newState ? null : newState);
   }}
   (function() {{
-    var dismissed = loadDismissed();
-    document.querySelectorAll('#review-cards .review-card').forEach(function(card) {{
-      if (dismissed.indexOf(card.dataset.batchId) >= 0) {{
-        card.classList.add('dismissed');
-        var doneBtn = card.querySelector('.dismiss-btn:not(.undo-btn)');
-        var undoBtn = card.querySelector('.undo-btn');
-        if (doneBtn) doneBtn.style.display = 'none';
-        if (undoBtn) undoBtn.style.display = '';
-      }}
-    }});
-    updateCounts();
+    var states = loadCardStates();
+    Object.keys(states).forEach(function(idx) {{ updateCardButtons(idx); }});
   }})();
-  function updateCounts() {{
-    var el = document.getElementById('dismissed-count');
-    var total = document.querySelectorAll('#review-cards .review-card').length;
-    var dismissed = document.querySelectorAll('#review-cards .review-card.dismissed').length;
-    if (el) el.textContent = '已處理: ' + dismissed + ' / 剩餘: ' + (total - dismissed);
+  // ---- edit panel ----
+  function toggleEditPanel(idx) {{
+    var panel = document.getElementById('edit-panel-' + idx);
+    if (!panel) return;
+    var isOpen = panel.style.display !== 'none';
+    panel.style.display = isOpen ? 'none' : '';
+    if (!isOpen) {{
+      var textarea = panel.querySelector('textarea');
+      if (textarea && !textarea.value) {{
+        var card = document.querySelector('.review-card[data-batch-id="' + idx + '"]');
+        if (card) {{
+          var frag = card.querySelector('.card-fragment');
+          if (frag) textarea.value = frag.textContent || '';
+        }}
+      }}
+    }}
   }}
   function setFilter(f) {{
     currentFilter = f;
@@ -1299,9 +1291,18 @@ def _review_card(item: dict[str, Any], kind: str) -> str:
         f"<div style='text-align:left'><strong>解析：</strong>{parsed}</div>"
         f"<div style='text-align:left'><strong>原因：</strong>{reason}</div>"
         f"</details>"
-        f"<button class='dismiss-btn' onclick='dismissCard(this)' title='標記為已處理 (不影響 queue)'>✓ 已處理</button>"
-        f"<button class='dismiss-btn undo-btn' onclick='undoDismiss(this)' style='display:none' title='取消已處理'>↩ 取消已處理</button>"
-        f"<button class='history-btn' onclick='addToHistory(this)' title='加入剛剛下注紀錄 (僅存瀏覽器)'>已手動下注</button>"
+        f"<div class='card-state-btns'>"
+        f"<button class='btn-state-done' onclick=\"toggleCardState('{idx}','done')\">✓ 已處理</button>"
+        f"<button class='btn-state-manual' onclick=\"toggleCardState('{idx}','manual')\">✏️ 已手動下注</button>"
+        f"<button class='btn-edit' onclick=\"toggleEditPanel('{idx}')\">[編輯修正]</button>"
+        f"</div>"
+        f"<div class='edit-panel' id='edit-panel-{idx}' style='display:none'>"
+        f"<textarea placeholder='修正後文字...' style='width:100%;min-height:60px;font-size:13px'></textarea>"
+        f"<div style='display:flex;gap:4px;margin-top:4px'>"
+        f"<button onclick=\"alert('重新解析功能尚未開放')\" style='font-size:11px'>重新解析</button>"
+        f"<button onclick=\"toggleEditPanel('{idx}')\" style='font-size:11px'>取消</button>"
+        f"</div>"
+        f"</div>"
         f"</div>"
         f"</div>"
     )

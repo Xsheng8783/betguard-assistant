@@ -205,12 +205,14 @@ def test_is_car_related_detects_che_in_fragment() -> None:
 
 # --- dismissed button ---
 
-def test_review_card_has_dismiss_button() -> None:
-    """Every review card must include a '已處理' button."""
+def test_review_card_has_state_toggle_buttons() -> None:
+    """Every review card must include state toggle buttons (已處理/已手動下注/編輯修正)."""
     queue = build_batch_mock_queue("17.29.1000\n99.98.97 234.100")
     html_text = render_review_console_html(queue)
-    assert "dismissCard" in html_text
+    assert "toggleCardState" in html_text
     assert "已處理" in html_text
+    assert "已手動下注" in html_text
+    assert "toggleEditPanel" in html_text
 
 
 def test_review_card_has_batch_id_data_attr() -> None:
@@ -229,7 +231,7 @@ def test_localStorage_key_is_batch_specific() -> None:
         queue_path="runs/2026-07-07/queue_123456.json",
     )
     assert "queue_123456" in html_text
-    assert "betguard-dismissed-" in html_text
+    assert "betguard-card-state-" in html_text
 
 
 # --- controls bar ---
@@ -238,8 +240,7 @@ def test_controls_bar_present() -> None:
     """The controls bar with 顯示/隱藏/復原 buttons exists."""
     queue = build_batch_mock_queue("17.29.1000")
     html_text = render_review_console_html(queue)
-    for label in ["顯示已處理", "隱藏已處理", "全部復原"]:
-        assert label in html_text, f"controls bar missing: {label!r}"
+    assert "切換顯示已處理" in html_text
 
 
 # --- 未分類 chip ---
