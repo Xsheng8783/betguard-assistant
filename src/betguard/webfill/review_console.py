@@ -204,7 +204,8 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     }}
 
     .top-row {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }}
-    .bottom-row {{ display: grid; grid-template-columns: 25fr 75fr; gap: 20px; margin-bottom: 20px; min-height: 400px; }}
+    .full-width-row {{ display: flex; gap: 20px; margin-bottom: 20px; }}
+    .bottom-row {{ display: grid; grid-template-columns: 1fr; gap: 20px; margin-bottom: 20px; }}
     .full-row {{ margin-bottom: 20px; }}
 
     .card {{
@@ -247,13 +248,12 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     .stat-card.safety {{ border-color: var(--green-border); background: var(--green-bg); }}
     .stat-card.safety strong {{ color: var(--green); font-size: 18px; line-height: 1.25; }}
 
-    .safety-card {{
+    .safety-banner {{
       background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);
-      border: 1px solid #86efac; border-radius: var(--radius); padding: 18px 22px;
+      border: 1px solid #86efac; border-radius: 8px;
+      padding: 10px 18px; margin-bottom: 16px; text-align: center;
+      color: #166534; font-size: 13px; font-weight: 500;
     }}
-    .safety-card h2 {{ color: #166534; }}
-    .safety-card ul {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; list-style: none; }}
-    .safety-card li {{ color: #166534; font-size: 12px; font-weight: 500; }}
 
     /* Review cards - WIDE horizontal */
     .card-list {{ display: flex; flex-direction: column; gap: 16px; }}
@@ -360,6 +360,11 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       font-size: 14px; border: 1px dashed #e2e8f0; border-radius: var(--radius);
     }}
 
+    .collapsed-section .card-list {{ display: none; }}
+    .collapsed-section .filter-bar {{ display: none; }}
+    .collapsed-section .controls-bar {{ display: none; }}
+    .collapsed-section .label-counts {{ display: none; }}
+
     table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
     th {{
       background: #f8fafc; font-weight: 600; color: var(--slate-dark); font-size: 11px;
@@ -379,13 +384,13 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
 
     @media (max-width: 1100px) {{
       .bottom-row {{ grid-template-columns: 1fr; }}
+      .full-width-row {{ flex-direction: column; }}
       .top-row {{ grid-template-columns: 1fr; }}
-      .safety-card ul {{ grid-template-columns: repeat(2, 1fr); }}
     }}
     @media (max-width: 700px) {{
       body {{ padding: 12px; }}
       .stats-grid {{ grid-template-columns: repeat(2, 1fr); }}
-      .safety-card ul {{ grid-template-columns: 1fr; }}
+      .full-width-row {{ flex-direction: column; }}
     }}
 
     /* ---- 剛剛下注紀錄 side panel ---- */
@@ -519,6 +524,19 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     </div>
   </div>
 
+  <div class="full-width-row">
+    <section class="card" style="border-left: 4px solid var(--blue);flex:1">
+      <h2><span class="badge valid" style="background:#dbeafe;color:#1e40af">📝 待輔助填入</span></h2>
+      <div style="overflow-x:auto"><table id="pending-table"><thead><tr><th>#</th><th>原始片段</th><th>摘要</th><th>類型</th><th></th></tr></thead><tbody id="pending-tbody">{valid_rows}</tbody></table></div>
+      <div class="empty-block" id="pending-empty" style="display:none">全部已輔助填入 ✅</div>
+    </section>
+    <section class="card" style="border-left: 4px solid var(--green);flex:1">
+      <h2><span class="badge valid">✅ 已輔助填入</span></h2>
+      <div style="overflow-x:auto"><table id="done-table"><thead><tr><th>#</th><th>原始片段</th><th>摘要</th><th>類型</th></tr></thead><tbody id="done-tbody"></tbody></table></div>
+      <div class="empty-block" id="done-empty">尚無已輔助填入項目</div>
+    </section>
+  </div>
+
   <details class="paste-block">
     <summary>📋 貼上牌單建立審核</summary>
     <div class="paste-body">
@@ -545,30 +563,12 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
         <div class="stat-card safety">安全提醒<strong>{_e(str(comfort["safety_reminder"]))}</strong></div>
       </div>
     </section>
-    <section class="safety-card">
-      <h2>🔒 安全狀態</h2>
-      <ul>
-        <li>✅ 未連真網站</li>
-        <li>✅ 未點擊</li>
-        <li>✅ 未填寫</li>
-        <li>✅ 未送出</li>
-        <li>✅ 不合格項目不進 approved_fill_queue</li>
-        <li>✅ 每筆仍需人工確認</li>
-      </ul>
+    <section class="safety-banner">
+      🔒 系統不會自動送出、不會自動確認、不會自動完成。不合格項目不進輔助填入。每筆仍需人工核對後手動送出。
     </section>
   </div>
 
   <div class="bottom-row">
-    <section class="card" style="border-left: 4px solid var(--blue);">
-      <h2><span class="badge valid" style="background:#dbeafe;color:#1e40af">📝 待輔助填入</span></h2>
-      <div style="overflow-x:auto"><table id="pending-table"><thead><tr><th>#</th><th>原始片段</th><th>摘要</th><th>類型</th><th></th></tr></thead><tbody id="pending-tbody">{valid_rows}</tbody></table></div>
-      <div class="empty-block" id="pending-empty" style="display:none">全部已輔助填入 ✅</div>
-    </section>
-    <section class="card" style="border-left: 4px solid var(--green);">
-      <h2><span class="badge valid">✅ 已輔助填入</span></h2>
-      <div style="overflow-x:auto"><table id="done-table"><thead><tr><th>#</th><th>原始片段</th><th>摘要</th><th>類型</th></tr></thead><tbody id="done-tbody"></tbody></table></div>
-      <div class="empty-block" id="done-empty">尚無已輔助填入項目</div>
-    </section>
     <section class="card" style="border-left: 4px solid var(--red);">
       <h2><span class="badge invalid">❌ 需確認</span> 需要人工確認</h2>
       <div class="filter-bar">
@@ -838,6 +838,27 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     badge.style.display = count > 0 ? 'flex' : 'none';
     toggle.classList.toggle('has-items', count > 0);
   }}
+  // ---- auto-collapse empty sections ----
+  (function() {{
+    // Collapse Needs Review section if empty
+    var invalidCards = document.getElementById('review-cards');
+    if (invalidCards && invalidCards.querySelectorAll('.review-card:not(.dismissed)').length === 0) {{
+      var nrSection = invalidCards.closest('.card');
+      if (nrSection) {{
+        nrSection.classList.add('collapsed-section');
+        var h2 = nrSection.querySelector('h2');
+        if (h2) h2.textContent = h2.textContent + '（目前沒有需要人工確認的項目）';
+      }}
+    }}
+    // Hide filter chips with count 0
+    document.querySelectorAll('.filter-chips .chip').forEach(function(chip) {{
+      var match = chip.textContent.match(/\(\d+\)/) || chip.textContent.match(/\d+$/);
+      if (match && parseInt(match[0]) === 0 && !chip.classList.contains('active')) {{
+        chip.style.display = 'none';
+      }}
+    }});
+  }})();
+
   (function() {{
     renderHistoryPanel(); renderHistoryInline(); updateToggleBadge();
     var history = loadHistory();
