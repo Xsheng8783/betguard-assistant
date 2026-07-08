@@ -1170,9 +1170,9 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
             btn.style.background = '';
           }}
           if (data.reused) {{
-            if (statusEl) statusEl.textContent = '✅ 下牌網站仍在線上，請確認目前在二三四星頁面';
+            if (statusEl) statusEl.textContent = '✅ 下牌網站仍在線上，請確認目前在二三四星連碰頁面';
           }} else {{
-            if (statusEl) statusEl.textContent = '✅ 下牌網站已開啟，請手動登入並切到 539 或天天樂二三四星頁面';
+            if (statusEl) statusEl.textContent = '✅ 下牌網站已開啟，請手動登入並切到 539 或天天樂二三四星連碰頁面';
           }}
         }} else {{
           if (btn) {{ btn.disabled = false; btn.textContent = '🌐 開啟下牌網站（重試）'; }}
@@ -1229,7 +1229,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       if (!hasAmounts) {{
         preview += '<p><strong style=\"color:var(--red)\">⚠️ 無金額資料</strong></p>';
       }}
-      preview += '<p style=\"color:var(--slate);font-size:11px\">⚠️ 請先按「開啟下牌網站」登入並切到 539 或天天樂二三四星頁面。系統只會填入號碼與金額，不送出、不確認。</p>';
+      preview += '<p style=\"color:var(--slate);font-size:11px\">⚠️ 請先按「開啟下牌網站」登入並切到 539 或天天樂二三四星連碰頁面。系統只會填入號碼與金額，不送出、不確認。</p>';
       document.getElementById('assist-preview').innerHTML = preview;
       setAssistStage('start');
       document.getElementById('assist-modal-overlay').classList.add('show');
@@ -1326,8 +1326,9 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
               else if (diag.page_has_539) parts.push('✅ 539');
               else parts.push('⚠️ 未偵測到遊戲');
               if (diag.page_has_lianpeng) parts.push('連碰模式');
-              else if (diag.page_has_zhupeng) parts.push('柱碰模式');
-              else parts.push('⚠️ 未偵測到頁面模式');
+              else if (diag.page_has_danpeng) parts.push('⚠️ 單碰模式（請切到連碰）');
+              else if (diag.page_has_zhupeng) parts.push('⚠️ 柱碰模式（請切到連碰）');
+              else parts.push('⚠️ 未偵測到頁面模式（請確認在連碰頁）');
               if (diag.numbers_found_in_inputs && diag.numbers_found_in_inputs.length)
                 parts.push('號碼已顯示: ' + diag.numbers_found_in_inputs.join(','));
               diagText = ' | ' + parts.join('; ');
@@ -1354,7 +1355,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
         if (statusEl) {{
           var errName = err.name || '';
           if (errName === 'AbortError') {{
-            statusEl.textContent = '❌ 操作逾時（超過 20 秒）。請確認已登入、已切到正確遊戲、在二三四星頁面。';
+            statusEl.textContent = '❌ 操作逾時（超過 20 秒）。請確認已登入、已切到正確遊戲、在二三四星連碰頁面（非柱碰/單碰）。';
           }} else {{
             statusEl.textContent = '❌ 連線錯誤: ' + (err.message || 'unknown');
           }}

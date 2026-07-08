@@ -1004,6 +1004,7 @@ def build_workbench_handler(
                 "stars": validation["stars"],
                 "amounts": validation["amounts"],
                 "url": "https://www.gts362.com",
+                "game": validation.get("game", "539"),
             })
             print(f"[assist] start: ok={start_result.get('ok')} state={start_result.get('state')}", flush=True)
             if not start_result.get("ok"):

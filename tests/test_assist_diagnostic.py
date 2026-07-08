@@ -204,8 +204,8 @@ class TestErrorResponseIncludesDiagnostic:
         """Diagnostic must only contain short, safe, predefined keys."""
         allowed = {
             "page_available", "url", "page_has_539", "page_has_tiantianle",
-            "page_has_234_star", "page_has_lianpeng", "page_has_zhupeng",
-            "numbers_found_in_inputs", "fill_error",
+            "page_has_234_star", "page_has_lianpeng", "page_has_danpeng", "page_has_zhupeng",
+            "numbers_found_in_inputs", "fill_error", "game",
         }
         from betguard.webfill.web_assist_session import _CommandResult
 

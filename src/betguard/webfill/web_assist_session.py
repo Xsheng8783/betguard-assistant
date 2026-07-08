@@ -194,6 +194,7 @@ class _AssistWorker(threading.Thread):
                 self.numbers = list(payload.get("numbers", []))
                 self.stars = list(payload.get("stars", []))
                 self.amounts = dict(payload.get("amounts", {}))
+                self.game = payload.get("game", "539")
                 self.state = BROWSER_OPEN
                 self.danger_detected = []
                 self.filled_amounts = []
@@ -236,6 +237,7 @@ class _AssistWorker(threading.Thread):
             self.numbers = list(payload.get("numbers", []))
             self.stars = list(payload.get("stars", []))
             self.amounts = dict(payload.get("amounts", {}))
+            self.game = payload.get("game", "539")
             self.state = BROWSER_OPEN
             self.danger_detected = []
             self.filled_amounts = []
@@ -248,6 +250,7 @@ class _AssistWorker(threading.Thread):
             info["page_available"] = False
             return info
         info["page_available"] = True
+        info["game"] = getattr(self, "game", "539")
         try:
             url = self._page.evaluate("() => window.location.href")
             info["url"] = str(url)[:200]
@@ -260,6 +263,7 @@ class _AssistWorker(threading.Thread):
             info["page_has_tiantianle"] = "天天樂" in body_text
             info["page_has_234_star"] = "二三四星" in body_text or "2 3 4 星" in body_text
             info["page_has_lianpeng"] = "連碰" in body_text
+            info["page_has_danpeng"] = "單碰" in body_text
             info["page_has_zhupeng"] = "柱碰" in body_text or "住碰" in body_text
         except Exception:
             pass
