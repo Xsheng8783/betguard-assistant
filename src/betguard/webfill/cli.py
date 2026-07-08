@@ -800,10 +800,14 @@ def main() -> None:
             print("BLOCKED: fill readback mismatch; item NOT marked WAITING.")
             return
 
-        # Fill succeeded → immediately mark WAITING_FOR_HUMAN_CONFIRM
+        # Fill succeeded → ensure item is WAITING_FOR_HUMAN_CONFIRM
         current["fill_completed_at"] = datetime.now(timezone.utc).isoformat()
         current["fill_report"] = fill_report
-        queue = mark_item_waiting_for_human(queue, item_index)
+        if current.get("status") != "WAITING_FOR_HUMAN_CONFIRM":
+            queue = mark_item_waiting_for_human(queue, item_index)
+        else:
+            # Already in correct state (from accept-valid); just save
+            queue["status"] = "WAITING_FOR_HUMAN_CONFIRM"
         save_queue_state(queue, args.queue_path)
         sync_batch_audit(queue)
 

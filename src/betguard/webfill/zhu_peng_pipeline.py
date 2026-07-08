@@ -117,9 +117,47 @@ def zhu_peng_preflight(item: dict[str, Any]) -> dict[str, Any]:
         errors.append("Column numbers out of valid range (1-99)")
         missing.append("numbers_in_range")
 
-    # Amount check
+    # Determine requested stars from amounts/star_amounts (used by guard + amount check)
     amounts_raw = item.get("amounts") or item.get("amount_per_star") or {}
-    star_map = zhu_peng_star_map(item)
+    star_amts = item.get("star_amounts") or {}
+    requested_stars: set[int] = set()
+    for k in amounts_raw:
+        try:
+            requested_stars.add(int(k))
+        except (ValueError, TypeError):
+            pass
+    for k in star_amts:
+        try:
+            requested_stars.add(int(k))
+        except (ValueError, TypeError):
+            pass
+    if not requested_stars:
+        star_map_default = zhu_peng_star_map(item)
+        requested_stars = set(star_map_default.keys())
+
+    # Column-count → stars guard (business rule)
+    if columns and not errors:
+        col_count = len(columns)
+        max_star = max(requested_stars) if requested_stars else 0
+        if col_count == 2 and max_star > 2:
+            errors.append(
+                f"2柱只支援二星，不可含{max_star}星 (cols={col_count})"
+            )
+        elif col_count == 3 and max_star > 3:
+            errors.append(
+                f"3柱只支援二三星，不可含{max_star}星 (cols={col_count})"
+            )
+
+    # Amount check — use requested_stars (from column-star guard above)
+    # to avoid requiring amounts for stars the user didn't request
+    amounts_raw = item.get("amounts") or item.get("amount_per_star") or {}
+    if not requested_stars:
+        star_map = zhu_peng_star_map(item)
+        requested_stars = set(star_map.keys())
+    star_map = {}
+    _LABEL_MAP = {2: "二星", 3: "三星", 4: "四星"}
+    for s in requested_stars:
+        star_map[s] = _LABEL_MAP.get(s, f"star_{s}")
     amounts = _normalize_star_amounts(amounts_raw, star_map)
     for star_label in star_map.values():
         if star_label not in amounts:

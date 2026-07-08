@@ -1290,11 +1290,12 @@ def test_column_groups_with_zhuyin_x_are_normalized() -> None:
 
 
 def test_column_groups_with_attached_chinese_stars_x_unit() -> None:
-    result = _result(f"17.20/14.18/25.29{TWO}{THREE}{FOUR}x0.5")
+    # 3 columns → max 3-star (二三星). Use 4-column variant instead.
+    result = _result(f"17.20/14.18/25.29/11.12{TWO}{THREE}{FOUR}x0.5")
 
     assert result["status"] == "ok"
     assert result["type"] == "column"
-    assert result["columns"] == [[17, 20], [14, 18], [25, 29]]
+    assert result["columns"] == [[17, 20], [14, 18], [25, 29], [11, 12]]
     assert result["stars"] == [2, 3, 4]
     assert result["unit"] == 0.5
     assert result["money"] == 50

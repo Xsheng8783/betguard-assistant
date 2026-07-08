@@ -125,6 +125,19 @@ def _validate_columns(
     if not bet.stars:
         warnings.append("missing stars")
 
+    # Column-count → stars guard: 2-col max 2-star, 3-col max 3-star
+    if bet.stars and not errors:
+        col_count = len(bet.columns)
+        max_star = max(bet.stars)
+        if col_count == 2 and max_star > 2:
+            errors.append(
+                f"2柱只支援二星，不可含{max_star}星 (cols={col_count})"
+            )
+        elif col_count == 3 and max_star > 3:
+            errors.append(
+                f"3柱只支援二三星，不可含{max_star}星 (cols={col_count})"
+            )
+
 
 def _star_count_errors(number_count: int, stars: list[int]) -> list[str]:
     errors: list[str] = []

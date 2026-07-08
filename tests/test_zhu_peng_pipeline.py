@@ -167,9 +167,10 @@ class TestPreflightAmountKeyNormalization:
         assert report["status"] == "READY_FOR_HUMAN_REVIEW"
 
     def test_mixed_key_amounts_passes(self):
+        # 2 columns → max 2-star.
         item = {
             "columns": [[11], [22]],
-            "amounts": {2: 100, "3": 100, "4": 100},
+            "amounts": {2: 100},
             "status": "CURRENT",
             "accepted_by_human": True,
         }
