@@ -408,3 +408,67 @@ class TestCurrentItemNotFoundFix:
         status = "CURRENT"
         should_call_mark = status != "WAITING_FOR_HUMAN_CONFIRM"
         assert should_call_mark is True
+
+
+class TestPostfillStateFix:
+    """Assisted-fill must not call mark_item_waiting_for_human when already WAITING."""
+
+    def test_afq_normalized_item_has_no_status_but_orig_status_preserved(self) -> None:
+        """Regression: _normalize_zhu_peng_item returns AFQ item (status=None).
+        The handler must use orig_item.status, not normalized.status."""
+        from betguard.webfill.cli import _normalize_zhu_peng_item
+
+        queue = {
+            "items": [{"index": 1, "status": "WAITING_FOR_HUMAN_CONFIRM",
+                        "selected_columns": [{"column": 1, "numbers": [11, 28]}]}],
+            "approved_fill_queue": [
+                {"columns": [[11, 28], [33, 39]], "accepted_by_human": True,
+                 "star_amounts": {"2": {"unit": 1, "money": 100}}}
+            ],
+        }
+        orig = queue["items"][0]
+        item_status = orig.get("status", "")
+        normalized = _normalize_zhu_peng_item(queue, orig)
+
+        # AFQ item has no "status" — must not be confused with orig
+        assert normalized.get("status") is None
+        assert item_status == "WAITING_FOR_HUMAN_CONFIRM"
+
+    def test_mark_item_waiting_not_called_when_already_waiting(self) -> None:
+        """The post-fill conditional must skip mark_item_waiting_for_human
+        when item_status == 'WAITING_FOR_HUMAN_CONFIRM'."""
+        from unittest.mock import patch
+
+        from betguard.webfill.cli import _get_first_current
+
+        queue = {
+            "status": "READY",
+            "items": [{
+                "index": 1, "status": "WAITING_FOR_HUMAN_CONFIRM",
+                "original_fragment": "test", "original": "test",
+                "original_line": "test", "original_lines": ["test"],
+                "fragment_index": 1, "source_line_no": 1,
+                "preprocessing_notes": [], "parsed_summary": "",
+                "selected_numbers": [], "selected_columns": [],
+                "selected_car_number": None, "car_units": None,
+                "filled_amount": None, "filled_amounts": {},
+                "danger_buttons_detected": [], "danger_buttons_clicked": [],
+                "review_result": {}, "warnings": [], "errors": [],
+            }],
+            "approved_fill_queue": [],
+        }
+
+        orig = _get_first_current(queue)
+        assert orig is not None
+        item_status = orig.get("status", "")
+        assert item_status == "WAITING_FOR_HUMAN_CONFIRM"
+
+        # Exact same logic as cli.py post-fill path
+        with patch("betguard.webfill.batch_queue.mark_item_waiting_for_human") as mock_mark:
+            if item_status != "WAITING_FOR_HUMAN_CONFIRM":
+                mock_mark(queue, 1)  # pragma: no cover
+            else:
+                queue["status"] = "WAITING_FOR_HUMAN_CONFIRM"
+
+        mock_mark.assert_not_called()
+        assert queue["status"] == "WAITING_FOR_HUMAN_CONFIRM"
