@@ -111,3 +111,37 @@ class TestStartAssistErrorHandling:
 
         assert "\"column\"" in html_text
         assert "柱碰" in html_text or "CLI" in html_text
+
+
+class TestFetchTimeoutHandling:
+    """startAssist fetch must have a timeout to prevent infinite loading."""
+
+    def test_html_contains_abort_controller(self) -> None:
+        """The JS must use AbortController with a 20-second timeout."""
+        from betguard.webfill.batch_mock_queue import build_batch_mock_queue
+        from betguard.webfill.review_console import render_review_console_html
+
+        queue = build_batch_mock_queue("06.13.23.22 234.100")
+        html_text = render_review_console_html(queue)
+        assert "AbortController" in html_text
+        assert "controller.abort()" in html_text
+        assert "20000" in html_text  # 20-second timeout
+
+    def test_html_contains_timeout_error_message(self) -> None:
+        """The catch block must handle AbortError with a user-friendly message."""
+        from betguard.webfill.batch_mock_queue import build_batch_mock_queue
+        from betguard.webfill.review_console import render_review_console_html
+
+        queue = build_batch_mock_queue("06.13.23.22 234.100")
+        html_text = render_review_console_html(queue)
+        assert "AbortError" in html_text
+        assert "逾時" in html_text or "timeout" in html_text.lower()
+
+    def test_standard_assist_still_works_via_html(self) -> None:
+        """Standard bet still has working assist button."""
+        from betguard.webfill.batch_mock_queue import build_batch_mock_queue
+        from betguard.webfill.review_console import render_review_console_html
+
+        queue = build_batch_mock_queue("06.13.23.22 234.100")
+        html_text = render_review_console_html(queue)
+        assert "輔助填入" in html_text

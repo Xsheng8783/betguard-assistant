@@ -1279,11 +1279,15 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       }} else {{
         reqBody = {{queue_path: queuePath, item_index: parseInt(assistItem.idx)}};
       }}
+      // Abort after 20 seconds to avoid infinite loading
+      var controller = new AbortController();
+      var timeoutId = setTimeout(function() {{ controller.abort(); }}, 20000);
       fetch('/assist-fill/start', {{
         method: 'POST',
         headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify(reqBody)
-      }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
+        body: JSON.stringify(reqBody),
+        signal: controller.signal
+      }}).then(function(r) {{ clearTimeout(timeoutId); return r.json(); }}).then(function(data) {{
         if (data.ok) {{
           // Success: update history and UI
           try {{
@@ -1325,8 +1329,14 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
           if (btnCancel && errMsg.indexOf('already active') < 0) btnCancel.style.display = 'none';
         }}
       }}).catch(function(err) {{
+        clearTimeout(timeoutId);
         if (statusEl) {{
-          statusEl.textContent = '❌ 連線錯誤: ' + (err.message || 'unknown');
+          var errName = err.name || '';
+          if (errName === 'AbortError') {{
+            statusEl.textContent = '❌ 操作逾時（超過 20 秒）。請確認已登入、已切到正確遊戲、在二三四星頁面。';
+          }} else {{
+            statusEl.textContent = '❌ 連線錯誤: ' + (err.message || 'unknown');
+          }}
           statusEl.className = 'am-status assist-error';
         }}
         setAssistStage('error');
