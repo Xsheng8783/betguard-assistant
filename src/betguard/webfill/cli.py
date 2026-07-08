@@ -774,11 +774,12 @@ def main() -> None:
         from betguard.webfill.zhu_peng_pipeline import zhu_peng_fill_execute, zhu_peng_preflight
         from betguard.webfill.batch_audit import sync_batch_audit
         queue = load_queue_state(args.queue_path)
-        current = _get_first_current(queue)
-        if not current:
-            parser.error("No CURRENT item in queue")
-        item_index = current.get("index", 0)
-        current = _normalize_zhu_peng_item(queue, current)
+        orig = _get_first_current(queue)
+        if not orig:
+            parser.error("No CURRENT or WAITING_FOR_HUMAN_CONFIRM item in queue")
+        item_index = orig.get("index", 0)
+        orig_status = orig.get("status", "")
+        current = _normalize_zhu_peng_item(queue, orig)
         pre = zhu_peng_preflight(current)
         if pre["status"] != "READY_FOR_HUMAN_REVIEW":
             print(json.dumps(pre, ensure_ascii=False, indent=2))
@@ -803,7 +804,7 @@ def main() -> None:
         # Fill succeeded → ensure item is WAITING_FOR_HUMAN_CONFIRM
         current["fill_completed_at"] = datetime.now(timezone.utc).isoformat()
         current["fill_report"] = fill_report
-        if current.get("status") != "WAITING_FOR_HUMAN_CONFIRM":
+        if orig_status != "WAITING_FOR_HUMAN_CONFIRM":
             queue = mark_item_waiting_for_human(queue, item_index)
         else:
             # Already in correct state (from accept-valid); just save
