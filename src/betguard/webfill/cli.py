@@ -211,6 +211,63 @@ def _get_first_current(queue: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _normalize_zhu_peng_item(queue: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a queue item for zhu-peng preflight/fill.
+
+    Falls back to approved_fill_queue when columns are missing, and converts
+    star_amounts / filled_amounts / selected_columns to the flat format
+    expected by zhu_peng_pipeline.
+    """
+    # 1) If the item lacks "columns", fall back to approved_fill_queue
+    if not item.get("columns"):
+        afq = queue.get("approved_fill_queue", [])
+        for afq_item in afq:
+            if afq_item.get("accepted_by_human") and afq_item.get("columns"):
+                item = afq_item
+                break
+
+    # 2) If still no columns, try selected_columns → columns
+    if not item.get("columns"):
+        sel = item.get("selected_columns") or []
+        if sel and isinstance(sel[0], dict):
+            # Convert [{column:1, numbers:[11,28]}, ...] → [[11,28], [33,39]]
+            columns = [list(sc.get("numbers", [])) for sc in sel]
+            if columns and all(columns):
+                item = dict(item)
+                item["columns"] = columns
+
+    # 3) Normalize star_amounts → amounts (flat {2:100, 3:100, ...})
+    if not item.get("amounts") and item.get("star_amounts"):
+        amounts = {}
+        for s, sa in item["star_amounts"].items():
+            if isinstance(sa, dict) and "money" in sa:
+                amounts[int(s)] = sa["money"]
+        if amounts:
+            item = dict(item)
+            item["amounts"] = amounts
+
+    # 4) Normalize filled_amounts → amounts ({"二星":100, "三星":100, ...})
+    if not item.get("amounts") and item.get("filled_amounts"):
+        star_label_to_num = {"二星": 2, "三星": 3, "四星": 4}
+        amounts = {}
+        for label, amt in item["filled_amounts"].items():
+            s = star_label_to_num.get(label)
+            if s and isinstance(amt, (int, float)):
+                amounts[s] = int(amt)
+        if amounts:
+            item = dict(item)
+            item["amounts"] = amounts
+
+    # 5) Check approved_source for accepted_by_human
+    if not item.get("accepted_by_human"):
+        ap_src = item.get("approved_source") or {}
+        if ap_src.get("accepted_by_human"):
+            item = dict(item)
+            item["accepted_by_human"] = True
+
+    return item
+
+
 def _human_confirm_current_done(queue: dict[str, Any]) -> dict[str, Any]:
     """Mark the single WAITING_FOR_HUMAN_CONFIRM item as DONE and unlock
     the next PENDING item.  No browser, no fill, no submit.
@@ -692,23 +749,7 @@ def main() -> None:
         from betguard.webfill.zhu_peng_pipeline import zhu_peng_preflight, zhu_peng_columns_from_item
         queue = load_queue_state(args.queue_path)
         item = _get_first_current(queue) or {}
-        # If current item lacks the "columns" key (zhu_peng format),
-        # fall back to approved_fill_queue which has proper column data.
-        if not item.get("columns"):
-            afq = queue.get("approved_fill_queue", [])
-            for afq_item in afq:
-                if afq_item.get("accepted_by_human") and afq_item.get("columns"):
-                    item = afq_item
-                    break
-        # Normalize star_amounts → amounts if needed
-        if not item.get("amounts") and item.get("star_amounts"):
-            amounts = {}
-            for s, sa in item["star_amounts"].items():
-                if isinstance(sa, dict) and "money" in sa:
-                    amounts[int(s)] = sa["money"]
-            if amounts:
-                item = dict(item)
-                item["amounts"] = amounts
+        item = _normalize_zhu_peng_item(queue, item)
         report = zhu_peng_preflight(item)
         report["columns"] = zhu_peng_columns_from_item(item)
         if args.pretty:
@@ -737,6 +778,7 @@ def main() -> None:
         if not current:
             parser.error("No CURRENT item in queue")
         item_index = current.get("index", 0)
+        current = _normalize_zhu_peng_item(queue, current)
         pre = zhu_peng_preflight(current)
         if pre["status"] != "READY_FOR_HUMAN_REVIEW":
             print(json.dumps(pre, ensure_ascii=False, indent=2))

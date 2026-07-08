@@ -191,3 +191,104 @@ class TestSlashColumnFormat:
         item = _normalize_afq_for_preflight(afq[0])
         report = zhu_peng_preflight(item)
         assert report["status"] == "READY_FOR_HUMAN_REVIEW"
+
+# ── v0.5.19b: _normalize_zhu_peng_item tests ──
+
+class TestNormalizeZhuPengItem:
+    """Verify the shared normalization handles all data source formats."""
+
+    def _make_queue_with_afq(self, columns=None, star_amounts=None) -> dict:
+        afq_item = {
+            "index": 1,
+            "bet_type": "column",
+            "accepted_by_human": True,
+            "columns": columns or [[11, 28], [33, 39]],
+            "stars": [2, 3, 4],
+            "money": 100,
+            "star_amounts": star_amounts or {
+                "2": {"unit": 1, "money": 100},
+                "3": {"unit": 1, "money": 100},
+                "4": {"unit": 1, "money": 100},
+            },
+        }
+        queue_item = {
+            "index": 1,
+            "status": "WAITING_FOR_HUMAN_CONFIRM",
+            "selected_columns": [
+                {"column": 1, "numbers": [11, 28]},
+                {"column": 2, "numbers": [33, 39]},
+            ],
+            "filled_amounts": {"二星": 100, "三星": 100, "四星": 100},
+        }
+        return {"items": [queue_item], "approved_fill_queue": [afq_item]}
+
+    def test_afq_star_amounts_normalized(self) -> None:
+        from betguard.webfill.cli import _normalize_zhu_peng_item
+        queue = self._make_queue_with_afq()
+        item = _normalize_zhu_peng_item(queue, queue["items"][0])
+        assert item["amounts"] == {2: 100, 3: 100, 4: 100}
+
+    def test_selected_columns_converted(self) -> None:
+        from betguard.webfill.cli import _normalize_zhu_peng_item
+        q = {"items": [{
+            "index": 1, "status": "WAITING_FOR_HUMAN_CONFIRM",
+            "selected_columns": [
+                {"column": 1, "numbers": [11, 28]},
+                {"column": 2, "numbers": [33, 39]},
+            ],
+            "filled_amounts": {"二星": 100, "三星": 100, "四星": 100},
+        }], "approved_fill_queue": []}
+        item = _normalize_zhu_peng_item(q, q["items"][0])
+        assert item["columns"] == [[11, 28], [33, 39]]
+
+    def test_filled_amounts_normalized(self) -> None:
+        from betguard.webfill.cli import _normalize_zhu_peng_item
+        q = {"items": [{
+            "index": 1, "status": "WAITING_FOR_HUMAN_CONFIRM",
+            "selected_columns": [{"column": 1, "numbers": [11, 28]}],
+            "filled_amounts": {"二星": 100, "三星": 200, "四星": 300},
+        }], "approved_fill_queue": []}
+        item = _normalize_zhu_peng_item(q, q["items"][0])
+        assert item["amounts"] == {2: 100, 3: 200, 4: 300}
+
+    def test_not_accepted_blocked(self) -> None:
+        from betguard.webfill.zhu_peng_pipeline import zhu_peng_preflight
+        from betguard.webfill.cli import _normalize_zhu_peng_item
+        q = {"items": [{"index": 1, "status": "WAITING_FOR_HUMAN_CONFIRM"}],
+             "approved_fill_queue": []}
+        item = _normalize_zhu_peng_item(q, q["items"][0])
+        report = zhu_peng_preflight(item)
+        assert report["status"] == "BLOCKED"
+        assert any("not accepted" in e.lower() for e in report["errors"])
+
+    def test_missing_columns_blocked(self) -> None:
+        from betguard.webfill.zhu_peng_pipeline import zhu_peng_preflight
+        from betguard.webfill.cli import _normalize_zhu_peng_item
+        q = {"items": [{"index": 1, "status": "WAITING_FOR_HUMAN_CONFIRM",
+                        "accepted_by_human": True}],
+             "approved_fill_queue": []}
+        item = _normalize_zhu_peng_item(q, q["items"][0])
+        report = zhu_peng_preflight(item)
+        assert report["status"] == "BLOCKED"
+        assert any("columns" in e.lower() for e in report["errors"])
+
+    def test_missing_amounts_blocked(self) -> None:
+        from betguard.webfill.zhu_peng_pipeline import zhu_peng_preflight
+        from betguard.webfill.cli import _normalize_zhu_peng_item
+        q = {"items": [{"index": 1, "status": "WAITING_FOR_HUMAN_CONFIRM",
+                        "accepted_by_human": True,
+                        "columns": [[11], [22], [33], [13, 23]]}],
+             "approved_fill_queue": []}
+        item = _normalize_zhu_peng_item(q, q["items"][0])
+        report = zhu_peng_preflight(item)
+        assert report["status"] == "BLOCKED"
+        assert any("amount" in e.lower() for e in report["errors"])
+
+    def test_full_normalization_passes_preflight(self) -> None:
+        from betguard.webfill.zhu_peng_pipeline import zhu_peng_preflight
+        from betguard.webfill.cli import _normalize_zhu_peng_item
+        queue = self._make_queue_with_afq()
+        item = _normalize_zhu_peng_item(queue, queue["items"][0])
+        report = zhu_peng_preflight(item)
+        assert report["status"] == "READY_FOR_HUMAN_REVIEW"
+        assert report["errors"] == []
