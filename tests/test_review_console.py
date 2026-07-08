@@ -66,7 +66,8 @@ def test_review_console_html_contains_sections_and_no_live_selector() -> None:
     queue = build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}100\n17.29.1000")
     html_text = render_review_console_html(queue)
     assert "\u672c\u5730\u5be9\u6838\u53f0" in html_text
-    assert "\u6b63\u78ba\u5019\u9078" in html_text
+    assert "待輔助填入" in html_text
+    assert "已輔助填入" in html_text
     assert "\u4eba\u5de5\u78ba\u8a8d" in html_text
     assert "selector" not in html_text.lower() or True  # 'selector' now in JS querySelector
 

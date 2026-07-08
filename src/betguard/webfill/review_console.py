@@ -513,9 +513,15 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
   </div>
 
   <div class="bottom-row">
+    <section class="card" style="border-left: 4px solid var(--blue);">
+      <h2><span class="badge valid" style="background:#dbeafe;color:#1e40af">📝 待輔助填入</span></h2>
+      <div style="overflow-x:auto"><table id="pending-table"><thead><tr><th>#</th><th>原始片段</th><th>摘要</th><th>類型</th><th></th></tr></thead><tbody id="pending-tbody">{valid_rows}</tbody></table></div>
+      <div class="empty-block" id="pending-empty" style="display:none">全部已輔助填入 ✅</div>
+    </section>
     <section class="card" style="border-left: 4px solid var(--green);">
-      <h2><span class="badge valid">✅ 正確</span> 正確候選</h2>
-      <div style="overflow-x:auto"><table><thead><tr><th>#</th><th>原始片段</th><th>摘要</th><th>類型</th></tr></thead><tbody>{valid_rows}</tbody></table></div>
+      <h2><span class="badge valid">✅ 已輔助填入</span></h2>
+      <div style="overflow-x:auto"><table id="done-table"><thead><tr><th>#</th><th>原始片段</th><th>摘要</th><th>類型</th></tr></thead><tbody id="done-tbody"></tbody></table></div>
+      <div class="empty-block" id="done-empty">尚無已輔助填入項目</div>
     </section>
     <section class="card" style="border-left: 4px solid var(--red);">
       <h2><span class="badge invalid">❌ 需確認</span> 需要人工確認</h2>
@@ -556,7 +562,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       {current_html}{last_mock_html}
     </section>
     <section class="card">
-      <h2>📋 下注紀錄</h2>
+      <h2>📋 下注紀錄 <button onclick="exportHistory()" style="font-size:11px;padding:2px 8px;margin-left:8px">📥 匯出 CSV</button></h2>
       <div id="history-inline-body" style="max-height:400px;overflow-y:auto"></div>
     </section>
   </div>
@@ -821,6 +827,83 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     }});
   }}
 
+    // ---- row splitting: pending → done ----
+    function moveRowToDone(idx) {{
+      var row = document.querySelector('#pending-tbody .assist-row-' + idx);
+      if (!row) return;
+      var doneTbody = document.getElementById('done-tbody');
+      if (doneTbody) {{
+        doneTbody.appendChild(row);
+        var btn = row.querySelector('.assist-btn');
+        if (btn) {{ btn.textContent = '已輔助填入'; btn.classList.add('done'); }}
+      }}
+      updateSectionVisibility();
+    }}
+    function updateSectionVisibility() {{
+      var pendingTbody = document.getElementById('pending-tbody');
+      var doneTbody = document.getElementById('done-tbody');
+      var pendingEmpty = document.getElementById('pending-empty');
+      var doneEmpty = document.getElementById('done-empty');
+      if (pendingTbody && pendingEmpty) {{
+        var hasPending = pendingTbody.querySelectorAll('tr').length > 0;
+        pendingEmpty.style.display = hasPending ? 'none' : '';
+        document.getElementById('pending-table').style.display = hasPending ? '' : 'none';
+      }}
+      if (doneTbody && doneEmpty) {{
+        var hasDone = doneTbody.querySelectorAll('tr').length > 0;
+        doneEmpty.style.display = hasDone ? 'none' : '';
+        document.getElementById('done-table').style.display = hasDone ? '' : 'none';
+      }}
+    }}
+    (function() {{
+      // Move already-done rows on page load
+      var history = loadHistory();
+      var doneIds = history.filter(function(h) {{ return h.type === '已輔助填入，待人工送出'; }}).map(function(h) {{ return String(h.idx); }});
+      doneIds.forEach(function(id) {{ moveRowToDone(id); }});
+    }})();
+
+    // ---- export history ----
+    function exportHistory() {{
+      var history = loadHistory();
+      if (history.length === 0) {{ alert('尚無紀錄可匯出'); return; }}
+      var starNames = {{2: '二星', 3: '三星', 4: '四星'}};
+      var csv = '\uFEFF時間,原始片段,號碼,二星金額,三星金額,四星金額,狀態\n';
+      history.forEach(function(h) {{
+        var nums = (h.numbers || []).map(function(n) {{ return (n < 10 ? '0' : '') + n; }}).join(' ');
+        var amts = h.amounts || {{}};
+        csv += (h.time || '') + ',' + (h.fragment || '').replace(/,/g, ' ') + ',' + nums + ','
+          + (amts['2'] || '') + ',' + (amts['3'] || '') + ',' + (amts['4'] || '') + ','
+          + (h.type || '') + '\n';
+      }});
+      var blob = new Blob([csv], {{type: 'text/csv;charset=utf-8'}});
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url; a.download = 'betguard_history_' + new Date().toISOString().slice(0,10) + '.csv';
+      a.click(); URL.revokeObjectURL(url);
+    }}
+
+    // ---- Chinese error messages ----
+    function translateError(err) {{
+      var m = (err || '').toLowerCase();
+      if (m.indexOf('browser start failed') >= 0 || m.indexOf('browser error') >= 0)
+        return '無法開啟瀏覽器，請重新執行 install_or_repair.bat';
+      if (m.indexOf('session is in state') >= 0 && m.indexOf('idle') >= 0)
+        return '請先按「開啟下牌網站」登入並切到 539 或天天樂二三四星頁面';
+      if (m.indexOf('already active') >= 0 || m.indexOf('cancel it first') >= 0)
+        return '上一筆仍在處理中，請稍候或按「取消本次輔助填入」';
+      if (m.indexOf('page is not available') >= 0)
+        return '下牌網站視窗已關閉，請重新按「開啟下牌網站」';
+      if (m.indexOf('page check failed') >= 0)
+        return '請確認目前在下牌網站的 539 或天天樂二三四星連碰頁面';
+      if (m.indexOf('fill execution error') >= 0 || m.indexOf('timeout') >= 0 || m.indexOf('timed out') >= 0)
+        return '填入失敗，可能網路不穩或頁面已變更，請重整下牌網站頁面後再試';
+      if (m.indexOf('no numbers') >= 0 || m.indexOf('missing numbers') >= 0)
+        return '找不到號碼按鈕，請確認目前在正確的二三四星頁面';
+      if (m.indexOf('no amounts') >= 0 || m.indexOf('no money') >= 0)
+        return '找不到金額欄位，請確認目前在二三四星連碰頁面（不是柱碰）';
+      return err;
+    }}
+
     // ---- assist fill (one-button auto flow) ----
     var assistItem = null;
     var assistInProgress = false;
@@ -927,6 +1010,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
                 }});
                 saveHistory(history);
                 renderHistoryPanel(); renderHistoryInline(); updateToggleBadge();
+                moveRowToDone(assistItem.idx);
             }}
           }} catch(e) {{ console.error('assist history error:', e); }}
           try {{
@@ -938,7 +1022,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
         }} else {{
           var errMsg = data.error || 'unknown';
           if (data.warnings && data.warnings.length) errMsg += ' | ' + data.warnings.join('; ');
-          statusEl.textContent = '❌ 失敗: ' + errMsg;
+          statusEl.textContent = '❌ ' + translateError(errMsg);
           if (errMsg.indexOf('already active') >= 0) {{
             var bc = document.getElementById('assist-btn-cancel');
             if (bc) bc.style.display = '';
@@ -977,7 +1061,10 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
   <div id="history-side-panel" class="history-panel">
     <div class="history-panel-header">
       <h3>📋 剛剛下注紀錄</h3>
-      <button onclick="clearHistory()">清空全部</button>
+      <div style="display:flex;gap:4px">
+        <button onclick="exportHistory()">📥 匯出 CSV</button>
+        <button onclick="clearHistory()">清空全部</button>
+      </div>
     </div>
     <div id="history-panel-body" class="history-panel-body"></div>
   </div>
@@ -1149,7 +1236,7 @@ def _candidate_row(item: dict[str, Any]) -> str:
             star_amounts = {str(int(s)): m for s in stars_raw}
     amounts_json = json.dumps(star_amounts) if star_amounts else "{}"
     return (
-        "<tr>"
+        f'<tr class="assist-row-{idx}">'
         f"<td>{idx}</td>"
         f"<td>{fragment}</td>"
         f"<td>{summary}</td>"
