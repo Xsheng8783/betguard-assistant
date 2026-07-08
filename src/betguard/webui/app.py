@@ -692,29 +692,39 @@ def build_workbench_handler(
         # ---------------- routing helpers ----------------
         def _send_html(self, body: str, status: int = 200) -> None:
             data = body.encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(data)
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(data)
+            except (ConnectionAbortedError, BrokenPipeError, OSError):
+                pass
 
         def _send_text(self, body: str, status: int = 200) -> None:
             data = body.encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            except (ConnectionAbortedError, BrokenPipeError, OSError):
+                pass
 
         def _send_json(self, obj: dict[str, Any], status: int = 200) -> None:
             import json as _json_module
             data = _json_module.dumps(obj, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            except (ConnectionAbortedError, BrokenPipeError, OSError):
+                # Client disconnected before response could be sent
+                pass
 
         def _send_file(self, path: Path) -> None:
             # Defence-in-depth: path must be under RUNS_DIR

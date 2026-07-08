@@ -1181,10 +1181,15 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
           console.error(errMsg);
         }}
       }}).catch(function(err) {{
-        if (btn) {{ btn.disabled = false; btn.textContent = '🌐 開啟下牌網站（重試）'; }}
-        var errMsg = '❌ 錯誤: ' + err.message;
-        if (statusEl) statusEl.textContent = errMsg;
-        console.error(errMsg);
+        assistInProgress = false;
+        setAssistStage('error');
+        if (statusEl) {{
+          statusEl.textContent = '❌ 連線錯誤: ' + (err.message || 'unknown');
+          statusEl.className = 'am-status assist-error';
+        }}
+        var btnStart = document.getElementById('assist-btn-start');
+        if (btnStart) {{ btnStart.style.display = ''; btnStart.disabled = false; btnStart.textContent = '重試輔助填入'; }}
+        console.error('[assist]', err);
       }});
     }}
 
@@ -1304,18 +1309,32 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
         }} else {{
           var errMsg = data.error || 'unknown';
           if (data.warnings && data.warnings.length) errMsg += ' | ' + data.warnings.join('; ');
-          statusEl.textContent = '❌ ' + translateError(errMsg);
+          if (statusEl) {{
+            statusEl.textContent = '❌ ' + translateError(errMsg);
+            statusEl.className = 'am-status assist-error';
+          }}
           if (errMsg.indexOf('already active') >= 0) {{
             var bc = document.getElementById('assist-btn-cancel');
             if (bc) bc.style.display = '';
           }}
           setAssistStage('error');
           assistInProgress = false;
+          var btnStart = document.getElementById('assist-btn-start');
+          if (btnStart) {{ btnStart.style.display = ''; btnStart.disabled = false; btnStart.textContent = '重試輔助填入'; }}
+          var btnCancel = document.getElementById('assist-btn-cancel');
+          if (btnCancel && errMsg.indexOf('already active') < 0) btnCancel.style.display = 'none';
         }}
       }}).catch(function(err) {{
-        statusEl.textContent = '❌ 錯誤: ' + err.message;
+        if (statusEl) {{
+          statusEl.textContent = '❌ 連線錯誤: ' + (err.message || 'unknown');
+          statusEl.className = 'am-status assist-error';
+        }}
         setAssistStage('error');
         assistInProgress = false;
+        var btnStart = document.getElementById('assist-btn-start');
+        if (btnStart) {{ btnStart.style.display = ''; btnStart.disabled = false; btnStart.textContent = '重試輔助填入'; }}
+        var btnCancel = document.getElementById('assist-btn-cancel');
+        if (btnCancel) btnCancel.style.display = 'none';
       }});
     }}
 
