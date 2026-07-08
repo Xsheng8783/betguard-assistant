@@ -660,6 +660,21 @@ def _find_latest_unrecognized() -> Path | None:
 # ---------------------------------------------------------------------------
 
 
+# In-memory manual correction candidate registry (keyed by candidate_id)
+_manual_candidates: dict[str, dict[str, Any]] = {}
+
+def _register_manual_candidate(candidate: dict[str, Any]) -> str:
+    """Register a manually corrected candidate and return its unique ID."""
+    import uuid
+    cid = f"manual-{uuid.uuid4().hex[:8]}"
+    _manual_candidates[cid] = dict(candidate)
+    return cid
+
+def _lookup_manual_candidate(cid: str) -> dict[str, Any] | None:
+    """Look up a registered manual candidate by ID."""
+    return _manual_candidates.get(cid)
+
+
 def build_workbench_handler(
     *,
     project_version: str,
@@ -935,10 +950,40 @@ def build_workbench_handler(
             })
 
         def _handle_assist_fill_start(self) -> None:
-            """Validate candidate, start fill, auto-execute if browser is open."""
-            _err, validation = self._validate_candidate()
-            if validation is None:
+            """Validate candidate, start fill, auto-execute if browser is open.
+
+            Supports both queue-based candidates (queue_path + item_index) and
+            manually corrected candidates (manual_candidate_id).
+            """
+            data = self._read_json_body()
+            if data is None:
                 return
+
+            manual_id = (data.get("manual_candidate_id") or "").strip()
+
+            if manual_id:
+                # Manual correction path: look up registered candidate
+                candidate = _lookup_manual_candidate(manual_id)
+                if candidate is None:
+                    self._send_json({"ok": False, "error": f"manual candidate not found: {manual_id}"})
+                    return
+                validation = {
+                    "ok": True,
+                    "numbers": candidate["numbers"],
+                    "stars": candidate["stars"],
+                    "amounts": candidate["amounts"],
+                    "game": candidate.get("game", "539"),
+                }
+            else:
+                # Queue path: existing flow
+                _err, validation = self._validate_candidate()
+                if validation is None:
+                    return
+
+            if not validation.get("ok"):
+                self._send_json(validation)
+                return
+
             from betguard.webfill.web_assist_session import (
                 CMD_CHECK_READY, CMD_EXECUTE_FILL, CMD_START, get_assist_session,
             )
@@ -1026,6 +1071,20 @@ def build_workbench_handler(
             result = reparse_text(text, game=game)
             result.setdefault("auto_submit", False)
             result.setdefault("auto_confirm", False)
+
+            # Register valid manual corrections so they can be assisted later
+            if result.get("ok"):
+                cid = _register_manual_candidate({
+                    "original_text": text,
+                    "numbers": result["numbers"],
+                    "stars": result["stars"],
+                    "amounts": result["amounts"],
+                    "summary": result.get("summary", ""),
+                    "game": game,
+                    "source": "manual_correction",
+                })
+                result["manual_candidate_id"] = cid
+
             self._send_json(result)
 
     return WorkbenchHandler

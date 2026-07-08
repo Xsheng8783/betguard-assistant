@@ -730,11 +730,14 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
         var amtHtml = '';
         var amts = data.amounts || {{}};
         for (var s in amts) {{ amtHtml += (starNames[parseInt(s)] || s) + ' ' + amts[s] + '元 '; }}
+        // Store for addManualCandidateRow
+        _lastReparseResult = data;
+        _lastReparseText = textarea.value || '';
         if (resultEl) resultEl.innerHTML = '<div style="color:#059669;font-weight:600">✅ 解析通過（人工修正）</div>'
           + '<div>號碼: ' + nums + '</div>'
           + '<div>金額: ' + (amtHtml || data.money + '元') + '</div>'
           + '<div style="font-size:11px;color:#64748b">' + (data.summary || '') + '</div>'
-          + '<div style="font-size:10px;color:#94a3b8;margin-top:4px">本版尚未加入待輔助填入，請複製文字後貼上新牌單。</div>';
+          + (data.manual_candidate_id ? '<button onclick="addManualCandidateRow()" style="margin-top:6px;font-size:12px;background:#059669;color:#fff;border:none;padding:4px 12px;border-radius:6px;cursor:pointer">➕ 加入待輔助填入</button>' : '');
       }} else {{
         if (resultEl) resultEl.innerHTML = '<span style="color:#dc2626">❌ ' + (data.error || '解析失敗') + '</span>'
           + (data.reason ? ' <span style="color:#64748b;font-size:10px">(' + data.reason + ')</span>' : '');
@@ -1097,6 +1100,54 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       return err;
     }}
 
+    // ---- manual correction reparse ----
+    var _lastReparseResult = null;
+    var _lastReparseText = '';
+    function addManualCandidateRow() {{
+      if (!_lastReparseResult || !_lastReparseResult.manual_candidate_id) return;
+      var cid = _lastReparseResult.manual_candidate_id;
+      var nums = (_lastReparseResult.numbers || []).map(function(n) {{ return (n < 10 ? '0' : '') + n; }}).join(', ');
+      var starNames = {{2: '二星', 3: '三星', 4: '四星'}};
+      var amtHtml = '';
+      var amts = _lastReparseResult.amounts || {{}};
+      for (var s in amts) {{ amtHtml += (starNames[parseInt(s)] || s) + ' ' + amts[s] + '元 '; }}
+      var summary = _lastReparseResult.summary || '';
+      var fragment = (_lastReparseText || summary).substring(0, 40);
+
+      // Build assist button data (numbers as JSON arrays for previewAssist)
+      var numbersJson = JSON.stringify(_lastReparseResult.numbers || []);
+      var starsJson = JSON.stringify(_lastReparseResult.stars || []);
+      var amountsJson = JSON.stringify(_lastReparseResult.amounts || {{}});
+
+      var tbody = document.getElementById('pending-tbody');
+      if (!tbody) return;
+
+      var row = document.createElement('tr');
+      row.className = 'assist-row-' + cid;
+      row.setAttribute('data-manual-id', cid);
+
+      var cells = ['<td>' + cid + '</td>',
+        '<td style="font-size:10px;color:#64748b">🔧 人工修正</td>',
+        '<td style="font-weight:600">' + fragment + '</td>',
+        '<td style="font-size:11px">' + (nums || '') + '</td>',
+        '<td style="font-size:10px">' + (amtHtml || '') + '</td>',
+        '<td></td>'];
+      row.innerHTML = cells.join('');
+
+      var btn = document.createElement('button');
+      btn.className = 'assist-btn';
+      btn.setAttribute('data-assist-index', cid);
+      btn.textContent = '輔助填入';
+      btn.onclick = function() {{
+        previewAssist(cid, fragment, summary, _lastReparseResult.numbers || [], _lastReparseResult.stars || [], _lastReparseResult.amounts || {{}});
+      }};
+      row.lastElementChild.appendChild(btn);
+
+      tbody.appendChild(row);
+      document.getElementById('pending-empty').style.display = 'none';
+      document.getElementById('pending-table').style.display = '';
+    }}
+
     // ---- assist fill (one-button auto flow) ----
     var assistItem = null;
     var assistInProgress = false;
@@ -1188,10 +1239,17 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       var statusEl = document.getElementById('assist-status');
       setAssistStage('executing');
       var btn = document.getElementById('assist-btn-start');
+      // Build request body: queue-based or manual candidate
+      var reqBody;
+      if (assistItem.idx && String(assistItem.idx).indexOf('manual-') === 0) {{
+        reqBody = {{manual_candidate_id: assistItem.idx}};
+      }} else {{
+        reqBody = {{queue_path: queuePath, item_index: parseInt(assistItem.idx)}};
+      }}
       fetch('/assist-fill/start', {{
         method: 'POST',
         headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{queue_path: queuePath, item_index: parseInt(assistItem.idx)}})
+        body: JSON.stringify(reqBody)
       }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
         if (data.ok) {{
           // Success: update history and UI

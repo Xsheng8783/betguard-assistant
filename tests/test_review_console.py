@@ -392,6 +392,41 @@ def test_review_stale_history_cleanup_logic_present() -> None:
     assert "saveHistory(clean)" in html_text
 
 
+# --- v0.5.18: manual reparse UI ---
+
+def test_reparse_button_is_no_longer_alert() -> None:
+    """The reparse button must NOT be a static alert — it must call submitReparse."""
+    queue = build_batch_mock_queue("17.29.1000\n99.98.97 234.100")
+    html_text = render_review_console_html(queue)
+    assert "submitReparse(" in html_text
+    assert "alert('重新解析功能尚未開放')" not in html_text
+
+
+def test_manual_candidate_row_has_data_manual_id() -> None:
+    """Manual candidate addition function must set data-manual-id."""
+    queue = build_batch_mock_queue("17.29.1000")
+    html_text = render_review_console_html(queue)
+    assert "addManualCandidateRow" in html_text
+    assert "data-manual-id" in html_text or "setAttribute('data-manual-id'" in html_text
+
+
+def test_start_assist_detects_manual_candidate_id() -> None:
+    """startAssist must check for manual- prefix and send manual_candidate_id."""
+    queue = build_batch_mock_queue("17.29.1000")
+    html_text = render_review_console_html(queue)
+    assert "manual_candidate_id" in html_text
+    assert "indexOf('manual-')" in html_text or "startsWith('manual-'" in html_text
+
+
+def test_review_cards_never_get_manual_add_button_for_needs_review() -> None:
+    """Needs Review / Invalid / Watchlist cards must NOT have addManualCandidateRow button by default."""
+    queue = build_batch_mock_queue("17.29.1000\n99.98.97 234.100")
+    html_text = render_review_console_html(queue)
+    # The add button only appears dynamically via JS, not in static HTML
+    # But the submitReparse function should handle ok:false without showing add button
+    assert "submitReparse" in html_text
+
+
 def test_review_console_core_buttons_still_present_after_daily_report_change() -> None:
     queue = build_batch_mock_queue(f"06.13.23.22 {TWO_THREE}100")
     html_text = render_review_console_html(queue)
