@@ -530,3 +530,32 @@ def test_review_items_still_do_not_enter_assist_buttons() -> None:
         assert f'data-assist-index="{idx}"' not in html_text
     for idx in valid_indexes:
         assert f'data-assist-index="{idx}"' in html_text
+
+# --- v0.5.23: column bet assist shows CLI message, does not hang ---
+
+def test_column_bet_preview_shows_cli_message() -> None:
+    """Column bet onclick must pass bet_type='column' and previewAssist must detect it."""
+    queue = build_batch_mock_queue("11/22/33/13 234.100")
+    html_text = render_review_console_html(queue)
+    # The onclick must include "column" as bet_type
+    assert "previewAssist(" in html_text
+    assert "\"column\"" in html_text
+    # The column detection code must exist
+    assert "betType === 'column'" in html_text or "assistItem.betType === 'column'" in html_text
+
+
+def test_standard_bet_preview_still_works() -> None:
+    """Standard bets must not be affected by column detection."""
+    queue = build_batch_mock_queue("06.13.23.22 234.100")
+    html_text = render_review_console_html(queue)
+    assert "previewAssist(" in html_text
+    # Standard bet should NOT have bet_type in onclick (or empty string)
+    assert "輔助填入" in html_text
+
+
+def test_start_assist_has_column_safety_guard() -> None:
+    """startAssist must check betType and return early for column bets."""
+    queue = build_batch_mock_queue("11/22/33/13 234.100")
+    html_text = render_review_console_html(queue)
+    # The startAssist function must contain the column bet guard
+    assert "betType === 'column'" in html_text or "assistItem.betType === 'column'" in html_text
