@@ -707,6 +707,43 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       }}
     }}
   }}
+  function submitReparse(idx) {{
+    var panel = document.getElementById('edit-panel-' + idx);
+    var textarea = panel ? panel.querySelector('textarea') : null;
+    var resultEl = document.getElementById('reparse-result-' + idx);
+    var btn = document.getElementById('reparse-btn-' + idx);
+    if (!textarea || !textarea.value.trim()) {{
+      if (resultEl) resultEl.innerHTML = '<span style="color:#dc2626">請輸入修正文字</span>';
+      return;
+    }}
+    if (btn) {{ btn.disabled = true; btn.textContent = '解析中...'; }}
+    if (resultEl) resultEl.innerHTML = '<span style="color:#64748b">⏳ 重新解析中...</span>';
+    fetch('/manual-reparse', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{text: textarea.value.trim(), game: 'auto'}})
+    }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
+      if (btn) {{ btn.disabled = false; btn.textContent = '重新解析'; }}
+      if (data.ok) {{
+        var nums = (data.numbers || []).map(function(n) {{ return (n < 10 ? '0' : '') + n; }}).join(', ');
+        var starNames = {{2: '二星', 3: '三星', 4: '四星'}};
+        var amtHtml = '';
+        var amts = data.amounts || {{}};
+        for (var s in amts) {{ amtHtml += (starNames[parseInt(s)] || s) + ' ' + amts[s] + '元 '; }}
+        if (resultEl) resultEl.innerHTML = '<div style="color:#059669;font-weight:600">✅ 解析通過（人工修正）</div>'
+          + '<div>號碼: ' + nums + '</div>'
+          + '<div>金額: ' + (amtHtml || data.money + '元') + '</div>'
+          + '<div style="font-size:11px;color:#64748b">' + (data.summary || '') + '</div>'
+          + '<div style="font-size:10px;color:#94a3b8;margin-top:4px">本版尚未加入待輔助填入，請複製文字後貼上新牌單。</div>';
+      }} else {{
+        if (resultEl) resultEl.innerHTML = '<span style="color:#dc2626">❌ ' + (data.error || '解析失敗') + '</span>'
+          + (data.reason ? ' <span style="color:#64748b;font-size:10px">(' + data.reason + ')</span>' : '');
+      }}
+    }}).catch(function(err) {{
+      if (btn) {{ btn.disabled = false; btn.textContent = '重新解析'; }}
+      if (resultEl) resultEl.innerHTML = '<span style="color:#dc2626">❌ 錯誤: ' + err.message + '</span>';
+    }});
+  }}
   function setFilter(f) {{
     currentFilter = f;
     document.querySelectorAll('.filter-chips .chip').forEach(function(c) {{ c.classList.toggle('active', c.dataset.filter === f); }});
@@ -1299,9 +1336,10 @@ def _review_card(item: dict[str, Any], kind: str) -> str:
         f"<div class='edit-panel' id='edit-panel-{idx}' style='display:none'>"
         f"<textarea placeholder='修正後文字...' style='width:100%;min-height:60px;font-size:13px'></textarea>"
         f"<div style='display:flex;gap:4px;margin-top:4px'>"
-        f"<button onclick=\"alert('重新解析功能尚未開放')\" style='font-size:11px'>重新解析</button>"
+        f"<button id='reparse-btn-{idx}' onclick=\"submitReparse('{idx}')\" style='font-size:11px'>重新解析</button>"
         f"<button onclick=\"toggleEditPanel('{idx}')\" style='font-size:11px'>取消</button>"
         f"</div>"
+        f"<div id='reparse-result-{idx}' style='margin-top:8px;font-size:12px'></div>"
         f"</div>"
         f"</div>"
         f"</div>"

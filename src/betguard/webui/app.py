@@ -874,6 +874,11 @@ def build_workbench_handler(
                 self._handle_assist_fill_open_site()
                 return
 
+            # POST /manual-reparse — re-parse corrected text (no file writes)
+            if path == "/manual-reparse":
+                self._handle_manual_reparse()
+                return
+
             self._send_text("not found", status=404)
 
         # ----------------------------------------------------------------
@@ -1004,6 +1009,23 @@ def build_workbench_handler(
                 "url": "https://www.gts362.com",
                 "open_site_only": True,
             })
+            self._send_json(result)
+
+        def _handle_manual_reparse(self) -> None:
+            """Re-parse manually corrected text.  No file writes, no queue changes."""
+            data = self._read_json_body()
+            if data is None:
+                return
+            text = (data.get("text") or "").strip()
+            game = (data.get("game") or "auto").strip()
+            if not text:
+                self._send_json({"ok": False, "error": "empty text"})
+                return
+            from betguard.webfill.manual_reparse import reparse_text
+
+            result = reparse_text(text, game=game)
+            result.setdefault("auto_submit", False)
+            result.setdefault("auto_confirm", False)
             self._send_json(result)
 
     return WorkbenchHandler
