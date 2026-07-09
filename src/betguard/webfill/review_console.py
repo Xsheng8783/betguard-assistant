@@ -1251,7 +1251,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
         btn.setAttribute('data-amounts', JSON.stringify(amounts || {{}}));
         btn.setAttribute('data-bet-type', betType || 'normal');
         btn.textContent = '輔助填入';
-        btn.onclick = function() {{ openAssistPreviewFromBtn(this); }};
+        btn.onclick = function() {{ quickAssistBtn(this); }};
         tr.lastElementChild.appendChild(btn);
         // Also add manual-done button
         var mdBtn = document.createElement('button');
@@ -1513,6 +1513,34 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
 
     // ── v0.5.32: auto-expand first pending row ──
     // Auto-expand first pending item preview (preview only, no fill)
+    // v0.5.33: one-click assist — open modal + start fill immediately
+    function quickAssist(idx, fragment, summary, numbers, stars, amounts, betType) {{
+      assistItem = {{idx: idx, fragment: fragment, summary: summary, numbers: numbers, stars: stars, amounts: amounts, betType: betType || 'normal'}};
+      assistInProgress = false;
+      // Open modal directly in executing state
+      document.getElementById('assist-modal-overlay').classList.add('show');
+      var statusEl = document.getElementById('assist-status');
+      if (statusEl) statusEl.textContent = '⏳ 檢查頁面並填入中...';
+      setAssistStage('executing');
+      startAssist();
+    }}
+
+    function quickAssistBtn(btn) {{
+      var idx = btn.getAttribute('data-assist-index');
+      var fragment = btn.getAttribute('data-fragment') || '';
+      var summary = btn.getAttribute('data-summary') || '';
+      try {{ var numbers = JSON.parse(btn.getAttribute('data-numbers') || '[]'); }} catch(e) {{ var numbers = []; }}
+      try {{ var stars = JSON.parse(btn.getAttribute('data-stars') || '[]'); }} catch(e) {{ var stars = []; }}
+      try {{ var amounts = JSON.parse(btn.getAttribute('data-amounts') || '{{}}'); }} catch(e) {{ var amounts = {{}}; }}
+      var betType = btn.getAttribute('data-bet-type') || 'normal';
+      // Column/zhu-peng: use existing preview flow (still needs manual tab switch guidance)
+      if (betType === 'column') {{
+        openAssistPreviewFromBtn(btn);
+        return;
+      }}
+      quickAssist(idx, fragment, summary, numbers, stars, amounts, betType);
+    }}
+
     // Open assist preview from button data attributes (no eval, no click)
     function openAssistPreviewFromBtn(btn) {{
       var idx = btn.getAttribute('data-assist-index');
@@ -1528,8 +1556,12 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     function autoExpandFirstPending() {{
       var rows = document.querySelectorAll('#pending-tbody tr[data-assist-index]');
       if (rows.length > 0) {{
-        var btn = rows[0].querySelector('.assist-btn');
-        if (btn) openAssistPreviewFromBtn(btn);
+        var row = rows[0];
+        // Highlight + scroll into view only — never start assist
+        row.scrollIntoView({{behavior: 'smooth', block: 'center'}});
+        row.style.transition = 'background 0.5s';
+        row.style.background = '#fef3c7';
+        setTimeout(function() {{ row.style.background = ''; }}, 2000);
       }}
     }}
     document.addEventListener('DOMContentLoaded', function() {{
@@ -1560,13 +1592,16 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
         document.getElementById('next-item-banner').style.display = 'none';
         return;
       }}
-      // Find the first pending row and click its assist button
+      // Highlight first pending row — user clicks manually
       var rows = document.querySelectorAll('#pending-tbody tr[data-assist-index]');
       if (rows.length > 0) {{
         var banner = document.getElementById('next-item-banner');
         if (banner) banner.style.display = 'none';
-        var btn = rows[0].querySelector('.assist-btn');
-        if (btn) openAssistPreviewFromBtn(btn);
+        var row = rows[0];
+        row.scrollIntoView({{behavior: 'smooth', block: 'center'}});
+        row.style.transition = 'background 0.5s';
+        row.style.background = '#fef3c7';
+        setTimeout(function() {{ row.style.background = ''; }}, 2000);
       }}
     }}
 
@@ -1842,7 +1877,7 @@ def _candidate_row(item: dict[str, Any]) -> str:
         f"<td>{summary}</td>"
         f"<td>{bet_type}</td>"
         f"<td>"
-        f"<button class='assist-btn' data-assist-index=\"{idx}\" data-fragment=\"{fragment}\" data-summary=\"{summary}\" data-numbers='{numbers}' data-stars='{stars}' data-amounts='{amounts_json}' data-bet-type=\"{bet_type}\" onclick='openAssistPreviewFromBtn(this)'>輔助填入</button> "
+        f"<button class='assist-btn' data-assist-index=\"{idx}\" data-fragment=\"{fragment}\" data-summary=\"{summary}\" data-numbers='{numbers}' data-stars='{stars}' data-amounts='{amounts_json}' data-bet-type=\"{bet_type}\" onclick='quickAssistBtn(this)'>輔助填入</button> "
         f"<button class='manual-done-btn' data-assist-index=\"{idx}\" onclick='markManualDone(this)' style='font-size:11px;background:#64748b;color:#fff;border:none;padding:3px 8px;border-radius:4px;cursor:pointer;margin-left:4px'>✓ 已手動下牌</button>"
         f"</td>"
         "</tr>"
