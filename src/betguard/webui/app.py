@@ -1351,6 +1351,11 @@ button{font-size:12px;padding:6px 14px;border-radius:6px;border:none;cursor:poin
 .badge-review{background:#fef3c7;color:#92400e}
 .item{padding:6px 0;border-bottom:1px solid #f1f5f9;font-size:11px}
 .item:last-child{border-bottom:none}
+.item.muted{color:#94a3b8}
+.assist-fill-btn{background:#2563eb;color:#fff;margin-left:8px;font-size:10px;padding:2px 8px}
+.assist-fill-btn:disabled{background:#94a3b8;cursor:not-allowed}
+.fill-status{font-size:10px;color:#64748b;margin-left:4px}
+.muted-note{font-size:10px;color:#94a3b8;margin-left:8px}
 .status{font-size:11px;color:#64748b;margin-top:4px}
 .footer{font-size:10px;color:#94a3b8;text-align:center;margin-top:12px}
 </style>
@@ -1358,7 +1363,7 @@ button{font-size:12px;padding:6px 14px;border-radius:6px;border:none;cursor:poin
 <body>
 <h2>Betguard 輔助面板</h2>
 <textarea id="batch-text" placeholder="貼上牌單..."></textarea>
-<button class="btn-primary" onclick="createBatch()">建立審核</button>
+<button id="createBatchBtn" type="button" class="btn-primary">建立審核</button>
 <div class="status" id="status-msg"></div>
 <div class="section">
  <h2>可輔助填入 <span class="badge badge-valid" id="valid-count">0</span></h2>
@@ -1370,33 +1375,172 @@ button{font-size:12px;padding:6px 14px;border-radius:6px;border:none;cursor:poin
 </div>
 <div class="footer">⚠️ 真站填入後仍需人工確認與送出</div>
 <script>
-function createBatch(){
- var t=document.getElementById("batch-text").value.trim();
- if(!t){document.getElementById("status-msg").textContent="請先貼上牌單";return;}
- document.getElementById("status-msg").textContent="⏳ 建立審核中...";
- fetch("/assist-panel/create-batch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text:t})})
-  .then(function(r){return r.json();}).then(function(d){
-   document.getElementById("status-msg").textContent=d.ok?"✅ 已建立審核":("❌ "+(d.error||"失敗"));
-   if(d.ok)displayResults(d);
- }).catch(function(e){document.getElementById("status-msg").textContent="❌ 連線錯誤: "+e;});
+"use strict";
+var panelState = { queuePath: "" };
+
+function setStatus(msg) {
+  document.getElementById("status-msg").textContent = msg;
 }
-function displayResults(d){
- var v=d.valid_candidates||[],iv=d.invalid_fragments||[];
- document.getElementById("valid-count").textContent=v.length;
- document.getElementById("review-count").textContent=iv.length;
- var vh="";
- v.forEach(function(c){
-  vh+="<div class=item><span class='badge badge-valid'>"+(c.bet_type||"normal")+"</span>";
-  vh+="<strong>"+(c.summary||c.raw||"")+"</strong>";
-  vh+="<button disabled class='btn-primary' style='margin-left:8px;font-size:10px;padding:2px 8px'>下一階段開放</button></div>";
- });
- document.getElementById("valid-items").innerHTML=vh||"<div class=item style=color:#94a3b8>無</div>";
- var ih="";
- iv.forEach(function(c){
-  ih+="<div class=item><span class='badge badge-review'>"+(c.label||"Needs Review")+"</span> <span>"+(c.raw||c.fragment||"")+"</span></div>";
- });
- document.getElementById("review-items").innerHTML=ih||"<div class=item style=color:#94a3b8>無</div>";
+
+function createBatch() {
+  var text = document.getElementById("batch-text").value.trim();
+  if (!text) { setStatus("請先貼上牌單"); return; }
+  var btn = document.getElementById("createBatchBtn");
+  btn.disabled = true;
+  setStatus("⏳ 建立審核中...");
+  fetch("/assist-panel/create-batch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text: text })
+  }).then(function (r) { return r.text(); }).then(function (raw) {
+    btn.disabled = false;
+    var data;
+    try { data = JSON.parse(raw); }
+    catch (e) { setStatus("❌ 回應不是有效 JSON: " + e.message); return; }
+    if (!data.ok) { setStatus("❌ " + (data.error || "建立審核失敗")); return; }
+    panelState.queuePath = data.queue_path || "";
+    var valid = data.valid_items || data.valid_candidates || data.valid || [];
+    var review = data.review_items || data.needs_review || data.invalid_items
+      || data.review_candidates || data.invalid_fragments || [];
+    renderResults(valid, review);
+    if (valid.length === 0 && review.length === 0) {
+      setStatus("已建立審核，但沒有可顯示項目");
+    } else {
+      setStatus("✅ 已建立審核");
+    }
+  }).catch(function (e) {
+    btn.disabled = false;
+    setStatus("❌ 連線錯誤: " + ((e && e.message) ? e.message : e));
+  });
 }
+
+function renderResults(valid, review) {
+  var validBox = document.getElementById("valid-items");
+  var reviewBox = document.getElementById("review-items");
+  validBox.textContent = "";
+  reviewBox.textContent = "";
+  document.getElementById("valid-count").textContent = String(valid.length);
+  document.getElementById("review-count").textContent = String(review.length);
+
+  if (valid.length === 0) {
+    validBox.appendChild(emptyRow());
+  }
+  valid.forEach(function (c) {
+    var row = document.createElement("div");
+    row.className = "item";
+    var badge = document.createElement("span");
+    badge.className = "badge badge-valid";
+    badge.textContent = c.bet_type || "normal";
+    row.appendChild(badge);
+    var label = document.createElement("strong");
+    label.textContent = " " + (c.summary || c.raw || "");
+    row.appendChild(label);
+    var betType = c.bet_type || "normal";
+    if (betType === "normal") {
+      var fillBtn = document.createElement("button");
+      fillBtn.type = "button";
+      fillBtn.className = "assist-fill-btn";
+      fillBtn.textContent = "輔助填入";
+      fillBtn.setAttribute("data-queue-path", panelState.queuePath);
+      fillBtn.setAttribute("data-item-index", String(c.index));
+      fillBtn.setAttribute("data-bet-type", betType);
+      row.appendChild(fillBtn);
+      var st = document.createElement("span");
+      st.className = "fill-status";
+      row.appendChild(st);
+    } else {
+      var note = document.createElement("span");
+      note.className = "muted-note";
+      note.textContent = "請回主 Review 頁操作";
+      row.appendChild(note);
+    }
+    validBox.appendChild(row);
+  });
+
+  if (review.length === 0) {
+    reviewBox.appendChild(emptyRow());
+  }
+  review.forEach(function (c) {
+    var row = document.createElement("div");
+    row.className = "item";
+    var badge = document.createElement("span");
+    badge.className = "badge badge-review";
+    badge.textContent = c.label || "Needs Review";
+    row.appendChild(badge);
+    var frag = document.createElement("span");
+    frag.textContent = " " + (c.raw || c.fragment || c.original_fragment || "");
+    row.appendChild(frag);
+    reviewBox.appendChild(row);
+  });
+}
+
+function emptyRow() {
+  var d = document.createElement("div");
+  d.className = "item muted";
+  d.textContent = "無";
+  return d;
+}
+
+function assistPanelFillBtn(btn) {
+  var queuePath = btn.getAttribute("data-queue-path") || panelState.queuePath;
+  var itemIndex = parseInt(btn.getAttribute("data-item-index"), 10);
+  var betType = btn.getAttribute("data-bet-type") || "normal";
+  var statusEl = btn.parentElement ? btn.parentElement.querySelector(".fill-status") : null;
+  assistPanelFill(queuePath, itemIndex, betType, btn, statusEl);
+}
+
+function assistPanelFill(queuePath, itemIndex, betType, btn, statusEl) {
+  function show(msg) {
+    if (statusEl) { statusEl.textContent = msg; } else { setStatus(msg); }
+  }
+  if (!queuePath) { show("❌ 缺少 queue_path，請重新建立審核"); return; }
+  if (isNaN(itemIndex)) { show("❌ item_index 無效"); return; }
+  if (btn) { btn.disabled = true; }
+  show("⏳ 檢查頁面並填入中...");
+  fetch("/assist-fill/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ queue_path: queuePath, item_index: itemIndex, bet_type: betType })
+  }).then(function (r) { return r.text(); }).then(function (raw) {
+    var data;
+    try { data = JSON.parse(raw); }
+    catch (e) {
+      if (btn) { btn.disabled = false; }
+      show("❌ 回應不是有效 JSON");
+      return;
+    }
+    if (data.ok) {
+      show("✅ 已輔助填入，請在真站人工確認後再送出");
+      if (btn) { btn.textContent = "已填入"; }
+    } else {
+      if (btn) { btn.disabled = false; }
+      var err = data.error || "未知錯誤";
+      if (data.missing_targets && data.missing_targets.length) {
+        err += " 缺號:" + data.missing_targets.join(",");
+      }
+      show("❌ " + err);
+    }
+  }).catch(function (e) {
+    if (btn) { btn.disabled = false; }
+    show("❌ 連線錯誤: " + ((e && e.message) ? e.message : e));
+  });
+}
+
+document.getElementById("createBatchBtn").addEventListener("click", createBatch);
+document.getElementById("valid-items").addEventListener("click", function (e) {
+  var t = e.target;
+  while (t && t !== this) {
+    if (t.classList && t.classList.contains("assist-fill-btn")) {
+      assistPanelFillBtn(t);
+      return;
+    }
+    t = t.parentElement;
+  }
+});
+
+window.createBatch = createBatch;
+window.assistPanelFillBtn = assistPanelFillBtn;
+window.assistPanelFill = assistPanelFill;
 </script>
 </body>
 </html>"""
@@ -1445,13 +1589,23 @@ function displayResults(d){
                     "reason": iv.get("reason", ""),
                 })
 
-            # Save queue to a temp file (Phase 1: no full review page integration yet)
-            # The queue ID is the batch_id for later reference
+            # Save queue to runs/ for later review + assist-fill access
+            import datetime as _dt
+            ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d_%H%M%S")
+            slug = f"batch_{ts}.json"
+            qdir = RUNS_DIR / "assist-panel-batches"
+            qdir.mkdir(parents=True, exist_ok=True)
+            qpath = qdir / slug
+            qpath.write_text(_json_module.dumps(queue, ensure_ascii=False, indent=2), encoding="utf-8")
+            rel = _runs_url(qpath.relative_to(RUNS_DIR))
+            queue_path = f"{RUNS_DIR.as_posix()}/{rel}"
+
             batch_id = queue.get("audit", {}).get("batch_id", "unknown")
 
             self._send_json({
                 "ok": True,
                 "batch_id": batch_id,
+                "queue_path": queue_path,
                 "valid_candidates": vc_out,
                 "invalid_fragments": iv_out,
             })

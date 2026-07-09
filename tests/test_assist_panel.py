@@ -72,15 +72,60 @@ class TestAssistPanelHTML:
         assert "startAssist(" not in self.html.replace("startAssistBtn", "")
         assert "startAssist" not in self.html or self.html.count("startAssist") <= 0
 
-    def test_no_assist_fill_start_endpoint(self) -> None:
-        assert "/assist-fill/start" not in self.html
+    def test_panel_calls_assist_fill_start_endpoint(self) -> None:
+        # Phase 2: panel calls existing /assist-fill/start
+        assert "/assist-fill/start" in self.html
 
     def test_no_assist_fill_execute_endpoint(self) -> None:
         assert "/assist-fill/execute" not in self.html
 
-    def test_assist_button_is_disabled(self) -> None:
-        assert "下一階段開放" in self.html
-        assert "disabled" in self.html
+    def test_assist_button_exists(self) -> None:
+        assert "輔助填入" in self.html
+
+    def test_no_auto_fill_on_load(self) -> None:
+        # assistPanelFill is called onclick, not on load
+        assert "assistPanelFill" in self.html
+        # No automatic page-load call
+        assert "<body onload" not in self.html.lower()
+
+    def test_column_shows_review_redirect(self) -> None:
+        # Column items should show "請回主 Review 頁操作" not an active fill button
+        assert "請回主 Review 頁操作" in self.html
+
+    # Stable JS wiring: no inline onclick, addEventListener + delegation only
+    def test_no_inline_onclick(self) -> None:
+        assert "onclick=" not in self.html
+
+    def test_create_batch_button_has_id(self) -> None:
+        assert 'id="createBatchBtn"' in self.html
+        assert 'type="button"' in self.html
+
+    def test_uses_add_event_listener(self) -> None:
+        assert "addEventListener" in self.html
+
+    def test_functions_exposed_on_window(self) -> None:
+        assert "window.createBatch = createBatch" in self.html
+        assert "window.assistPanelFillBtn = assistPanelFillBtn" in self.html
+        assert "window.assistPanelFill = assistPanelFill" in self.html
+
+    def test_fill_button_uses_data_attributes(self) -> None:
+        assert "data-queue-path" in self.html
+        assert "data-item-index" in self.html
+        assert "data-bet-type" in self.html
+
+    def test_response_field_compatibility(self) -> None:
+        # panel must accept multiple response field spellings
+        assert "valid_candidates" in self.html
+        assert "invalid_fragments" in self.html
+
+    def test_empty_result_message(self) -> None:
+        assert "已建立審核，但沒有可顯示項目" in self.html
+
+    def test_errors_not_silent(self) -> None:
+        # fetch failure, non-JSON response, and ok=false all surface a message
+        assert "連線錯誤" in self.html
+        assert "回應不是有效 JSON" in self.html
+        assert "建立審核失敗" in self.html
 
 
 # ── Panel create-batch endpoint ─────────────────────────────────────
@@ -116,6 +161,7 @@ class TestAssistPanelCreateBatch:
         return {
             "ok": True,
             "batch_id": batch_id,
+            "queue_path": "/tmp/assist-panel-batches/test.json",
             "valid_candidates": vc_out,
             "invalid_fragments": iv_out,
         }
@@ -137,6 +183,14 @@ class TestAssistPanelCreateBatch:
     def test_response_includes_batch_id(self) -> None:
         resp = self._call_create_batch("17.20.29.33.440")
         assert resp.get("batch_id")
+
+    def test_response_includes_queue_path(self) -> None:
+        resp = self._call_create_batch("17.20.29.33.440")
+        assert resp.get("queue_path")
+
+    def test_panel_uses_assist_fill_start_endpoint(self) -> None:
+        html = TestAssistPanelHTML.html
+        assert "/assist-fill/start" in html  # panel calls existing endpoint
 
 
 # ── Launch args test ────────────────────────────────────────────────
