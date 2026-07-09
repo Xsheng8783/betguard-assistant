@@ -832,6 +832,9 @@ def build_workbench_handler(
                 target = (RUNS_DIR / rel).resolve()
                 self._send_file(target)
                 return
+            if path == "/assist-panel":
+                self._handle_assist_panel()
+                return
             self._send_text("not found", status=404)
 
         def do_POST(self) -> None:  # noqa: N802 -- stdlib name
@@ -867,6 +870,16 @@ def build_workbench_handler(
                 # Always redirect to the new review page
                 rel = _runs_url(review_path.relative_to(RUNS_DIR))
                 self._send_redirect(f"/runs/{urllib.parse.quote(rel)}")
+                return
+
+            # GET /assist-panel — slim panel for right-side assist workspace (Phase 1: read-only)
+            if path == "/assist-panel":
+                self._handle_assist_panel()
+                return
+
+            # POST /assist-panel/create-batch — create queue from pasted text, return JSON
+            if path == "/assist-panel/create-batch":
+                self._handle_assist_panel_create_batch()
                 return
 
             # POST /assist-fill — validate candidate and return preview data (read-only)
@@ -1315,6 +1328,133 @@ def build_workbench_handler(
             worker = get_assist_session()
             result = worker.dispatch(CMD_CLOSE, None)
             self._send_json(result)
+
+        def _handle_assist_panel(self) -> None:
+            """Return the slim assist panel HTML (Phase 1: read-only for fill)."""
+            html = """<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Betguard 輔助面板</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,sans-serif;background:#f8fafc;color:#1e293b;font-size:13px;padding:12px}
+h2{font-size:15px;margin-bottom:8px;color:#0f172a}
+textarea{width:100%;min-height:100px;font-size:12px;font-family:monospace;padding:8px;border:1px solid #cbd5e1;border-radius:6px;resize:vertical}
+button{font-size:12px;padding:6px 14px;border-radius:6px;border:none;cursor:pointer;font-weight:600}
+.btn-primary{background:#2563eb;color:#fff}
+.btn-primary:disabled{background:#94a3b8;cursor:not-allowed}
+.section{background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:10px;margin-bottom:10px}
+.badge{display:inline-block;font-size:10px;padding:2px 6px;border-radius:4px;font-weight:600}
+.badge-valid{background:#dbeafe;color:#1e40af}
+.badge-review{background:#fef3c7;color:#92400e}
+.item{padding:6px 0;border-bottom:1px solid #f1f5f9;font-size:11px}
+.item:last-child{border-bottom:none}
+.status{font-size:11px;color:#64748b;margin-top:4px}
+.footer{font-size:10px;color:#94a3b8;text-align:center;margin-top:12px}
+</style>
+</head>
+<body>
+<h2>Betguard 輔助面板</h2>
+<textarea id="batch-text" placeholder="貼上牌單..."></textarea>
+<button class="btn-primary" onclick="createBatch()">建立審核</button>
+<div class="status" id="status-msg"></div>
+<div class="section">
+ <h2>可輔助填入 <span class="badge badge-valid" id="valid-count">0</span></h2>
+ <div id="valid-items"></div>
+</div>
+<div class="section">
+ <h2>Needs Review / Invalid <span class="badge badge-review" id="review-count">0</span></h2>
+ <div id="review-items"></div>
+</div>
+<div class="footer">⚠️ 真站填入後仍需人工確認與送出</div>
+<script>
+function createBatch(){
+ var t=document.getElementById("batch-text").value.trim();
+ if(!t){document.getElementById("status-msg").textContent="請先貼上牌單";return;}
+ document.getElementById("status-msg").textContent="⏳ 建立審核中...";
+ fetch("/assist-panel/create-batch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text:t})})
+  .then(function(r){return r.json();}).then(function(d){
+   document.getElementById("status-msg").textContent=d.ok?"✅ 已建立審核":("❌ "+(d.error||"失敗"));
+   if(d.ok)displayResults(d);
+ }).catch(function(e){document.getElementById("status-msg").textContent="❌ 連線錯誤: "+e;});
+}
+function displayResults(d){
+ var v=d.valid_candidates||[],iv=d.invalid_fragments||[];
+ document.getElementById("valid-count").textContent=v.length;
+ document.getElementById("review-count").textContent=iv.length;
+ var vh="";
+ v.forEach(function(c){
+  vh+="<div class=item><span class='badge badge-valid'>"+(c.bet_type||"normal")+"</span>";
+  vh+="<strong>"+(c.summary||c.raw||"")+"</strong>";
+  vh+="<button disabled class='btn-primary' style='margin-left:8px;font-size:10px;padding:2px 8px'>下一階段開放</button></div>";
+ });
+ document.getElementById("valid-items").innerHTML=vh||"<div class=item style=color:#94a3b8>無</div>";
+ var ih="";
+ iv.forEach(function(c){
+  ih+="<div class=item><span class='badge badge-review'>"+(c.label||"Needs Review")+"</span> <span>"+(c.raw||c.fragment||"")+"</span></div>";
+ });
+ document.getElementById("review-items").innerHTML=ih||"<div class=item style=color:#94a3b8>無</div>";
+}
+</script>
+</body>
+</html>"""
+            self._send_html(html)
+
+        def _handle_assist_panel_create_batch(self) -> None:
+            """Create a queue batch from pasted text and return JSON summary."""
+            import json as _json_module
+
+            data = self._read_json_body()
+            if data is None:
+                return
+            text = (data.get("text") or "").strip()
+            if not text:
+                self._send_json({"ok": False, "error": "empty text"})
+                return
+
+            try:
+                from betguard.webfill.batch_mock_queue import build_batch_mock_queue
+                queue = build_batch_mock_queue(text.split("\n") if "\n" in text else text)
+            except Exception as exc:
+                self._send_json({"ok": False, "error": f"batch create error: {exc}"})
+                return
+
+            valid_candidates = queue.get("preprocessing", {}).get("valid_candidates", [])
+            invalid_fragments = queue.get("preprocessing", {}).get("invalid_fragments", [])
+
+            # Simplify valid candidates for panel display
+            vc_out = []
+            for vc in valid_candidates:
+                result = vc.get("result", {})
+                vc_out.append({
+                    "index": vc.get("index"),
+                    "raw": vc.get("raw") or vc.get("original_fragment", ""),
+                    "summary": vc.get("summary", ""),
+                    "bet_type": result.get("type", "normal"),
+                    "numbers": result.get("numbers") or [],
+                    "stars": result.get("stars") or [],
+                    "money": result.get("money"),
+                })
+            iv_out = []
+            for iv in invalid_fragments:
+                iv_out.append({
+                    "raw": iv.get("raw") or iv.get("original_fragment", ""),
+                    "label": iv.get("label") or iv.get("review_label", "Needs Review"),
+                    "reason": iv.get("reason", ""),
+                })
+
+            # Save queue to a temp file (Phase 1: no full review page integration yet)
+            # The queue ID is the batch_id for later reference
+            batch_id = queue.get("audit", {}).get("batch_id", "unknown")
+
+            self._send_json({
+                "ok": True,
+                "batch_id": batch_id,
+                "valid_candidates": vc_out,
+                "invalid_fragments": iv_out,
+            })
 
         def _handle_manual_done(self) -> None:
             """Mark a pending item as manually done (no real site operation)."""
