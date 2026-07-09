@@ -784,7 +784,7 @@ def build_workbench_handler(
             path = parsed.path
 
             if path == "/" or path == "":
-                self._send_redirect("/workbench")
+                self._send_redirect("/latest-review")
                 return
             if path == "/workbench":
                 self._send_html(_render_workbench_form())
