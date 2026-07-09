@@ -899,6 +899,11 @@ def build_workbench_handler(
                 self._handle_assist_fill_open_site()
                 return
 
+            # POST /assist-fill/manual-done — mark item as manually done (no site op)
+            if path == "/assist-fill/manual-done":
+                self._handle_manual_done()
+                return
+
             # POST /manual-reparse — re-parse corrected text (no file writes)
             if path == "/manual-reparse":
                 self._handle_manual_reparse()
@@ -1048,6 +1053,58 @@ def build_workbench_handler(
 
             # ── Column/zhu-peng path ──
             if bet_type == "column":
+                # Manual candidate column → use candidate data directly
+                if manual_id and candidate:
+                    from betguard.webfill.zhu_peng_pipeline import zhu_peng_preflight
+                    from datetime import datetime, timezone
+                    # Build zhu_peng item from candidate data
+                    columns = candidate.get("columns") or []
+                    stars = candidate.get("stars") or []
+                    money = candidate.get("money") or 0
+                    amounts = candidate.get("amounts") or {}
+                    if columns:
+                        _item = {
+                            "bet_type": "column",
+                            "numbers": columns,
+                            "columns": columns,
+                            "stars": stars,
+                            "money": money,
+                            "amounts": amounts,
+                            "star_amounts": {str(s): {"unit": 1, "money": money} for s in stars},
+                            "accepted_by_human": True,
+                            "approved_source": {"from_webui_assist_button": True, "source": "webui_column_assist_manual"},
+                        }
+                        pre = zhu_peng_preflight(_item)
+                        if pre["status"] != "READY_FOR_HUMAN_REVIEW":
+                            pre["auto_submit"] = False
+                            pre["auto_confirm"] = False
+                            self._send_json(pre)
+                            return
+                        start_payload = {
+                            "numbers": columns,
+                            "stars": stars,
+                            "amounts": amounts,
+                            "url": "https://www.gts362.com",
+                            "game": candidate.get("game", "539"),
+                        }
+                        start_result = worker.dispatch(CMD_START, start_payload)
+                        if not start_result.get("ok"):
+                            self._send_json(start_result)
+                            return
+                        ready_result = worker.dispatch(CMD_CHECK_READY, None)
+                        if not ready_result.get("ok"):
+                            self._send_json(ready_result)
+                            return
+                        exec_result = worker.dispatch(CMD_ZHU_PENG_EXECUTE, {"item": _item})
+                        exec_result.setdefault("auto_submit", False)
+                        exec_result.setdefault("auto_confirm", False)
+                        exec_result.setdefault("danger_buttons_clicked", [])
+                        self._send_json(exec_result)
+                        return
+                    else:
+                        self._send_json({"ok": False, "error": "manual column candidate has no columns data"})
+                        return
+
                 queue_path_str = (data.get("queue_path") or "").strip()
                 item_index = data.get("item_index")
                 if not queue_path_str or item_index is None:
@@ -1171,6 +1228,44 @@ def build_workbench_handler(
                 return
 
             # ── Normal bet path ──
+            # Auto-create approved_fill_queue entry (Web UI button = human confirm)
+            if bet_type == "normal":
+                queue_path_str = (data.get("queue_path") or "").strip()
+                item_index = data.get("item_index")
+                if queue_path_str and item_index is not None:
+                    resolved = _resolve_queue_path(queue_path_str)
+                    if resolved is not None:
+                        import json as _json_module
+                        from datetime import datetime, timezone
+                        try:
+                            queue = _json_module.loads(resolved.read_text(encoding="utf-8"))
+                        except Exception:
+                            queue = {}
+                        afq = queue.get("approved_fill_queue") or []
+                        if not isinstance(afq, list):
+                            afq = []
+                        exists = any(afi.get("index") == item_index and afi.get("accepted_by_human") for afi in afq)
+                        if not exists:
+                            accepted_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+                            entry = {
+                                "index": item_index,
+                                "bet_type": "normal",
+                                "numbers": list(validation.get("numbers", [])),
+                                "stars": list(validation.get("stars", [])),
+                                "amounts": dict(validation.get("amounts", {})),
+                                "accepted_at": accepted_at,
+                                "accepted_by_human": True,
+                                "approved_source": {
+                                    "from_webui_assist_button": True,
+                                    "source": "webui_normal_assist",
+                                },
+                            }
+                            afq.append(entry)
+                            queue["approved_fill_queue"] = afq
+                            try:
+                                resolved.write_text(_json_module.dumps(queue, ensure_ascii=False, indent=2), encoding="utf-8")
+                            except OSError:
+                                pass
             start_result = worker.dispatch(CMD_START, {
                 "numbers": validation["numbers"],
                 "stars": validation["stars"],
@@ -1221,6 +1316,83 @@ def build_workbench_handler(
             result = worker.dispatch(CMD_CLOSE, None)
             self._send_json(result)
 
+        def _handle_manual_done(self) -> None:
+            """Mark a pending item as manually done (no real site operation)."""
+            import json as _json_module
+            from datetime import datetime, timezone
+            data = self._read_json_body()
+            if data is None:
+                return
+            manual_id = (data.get("manual_candidate_id") or "").strip()
+            queue_path_str = (data.get("queue_path") or "").strip()
+            item_index = data.get("item_index")
+
+            # Manual candidate path
+            if manual_id:
+                candidate = _lookup_manual_candidate(manual_id)
+                if candidate is None:
+                    self._send_json({"ok": False, "error": f"manual candidate not found: {manual_id}"})
+                    return
+                # Just acknowledge — no queue update needed for manual candidates
+                self._send_json({
+                    "ok": True,
+                    "status": "MANUAL_DONE",
+                    "message": "已標記為手動下牌",
+                    "manual_candidate_id": manual_id,
+                    "real_site_operation": False,
+                    "auto_submit": False,
+                    "danger_buttons_clicked": [],
+                })
+                return
+
+            # Queue path
+            if not queue_path_str or item_index is None:
+                self._send_json({"ok": False, "error": "missing queue_path or item_index"})
+                return
+            resolved = _resolve_queue_path(queue_path_str)
+            if resolved is None:
+                self._send_json({"ok": False, "error": f"queue not found: {queue_path_str}"})
+                return
+            try:
+                queue = _json_module.loads(resolved.read_text(encoding="utf-8"))
+            except Exception as exc:
+                self._send_json({"ok": False, "error": f"cannot read queue: {exc}"})
+                return
+            # Find and mark the item
+            items = queue.get("items", [])
+            matched = None
+            for item in items:
+                if item.get("index") == item_index:
+                    matched = item
+                    break
+            if matched is None:
+                self._send_json({"ok": False, "error": f"item #{item_index} not found in queue"})
+                return
+            # Only allow marking if item is in valid/assistable state
+            status = matched.get("status", "")
+            if status in ("INVALID", "NEEDS_REVIEW", "WATCHLIST", "BLOCKED"):
+                self._send_json({"ok": False, "error": f"item #{item_index} is not assistable (status={status})"})
+                return
+            matched["status"] = "MANUAL_DONE"
+            matched["handled_by"] = "webui_manual_done_button"
+            matched["done_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+            matched["accepted_by_human"] = True
+            matched["real_site_operation"] = False
+            queue["status"] = queue.get("status", "")
+            try:
+                resolved.write_text(_json_module.dumps(queue, ensure_ascii=False, indent=2), encoding="utf-8")
+            except OSError:
+                pass  # best-effort
+            self._send_json({
+                "ok": True,
+                "status": "MANUAL_DONE",
+                "message": "已標記為手動下牌",
+                "item_index": item_index,
+                "real_site_operation": False,
+                "auto_submit": False,
+                "danger_buttons_clicked": [],
+            })
+
         def _handle_assist_fill_open_site(self) -> None:
             """Open or reuse the betting site browser (no fill data)."""
             from betguard.webfill.web_assist_session import (
@@ -1265,6 +1437,8 @@ def build_workbench_handler(
                     "game": game,
                     "source": "manual_correction",
                     "bet_type": result.get("bet_type") or result.get("type") or "normal",
+                    "columns": result.get("columns") or None,
+                    "type": result.get("type") or "normal",
                 })
                 result["manual_candidate_id"] = cid
 

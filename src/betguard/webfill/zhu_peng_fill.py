@@ -36,16 +36,24 @@ def _b03_js(inner: str) -> str:
 # ── Number selection ────────────────────────────────────────────────────
 
 def click_number(page: Any, number: int) -> None:
-    """Find the TD whose trimmed innerText equals *number* in B03 and click it."""
+    """Find the TD whose trimmed innerText equals *number* in B03 and click it.
+
+    Skips already-selected numbers (idempotent — prevents toggle-deselect).
+    """
     s = str(number).zfill(2)
     js = _b03_js("""
 (function(){
     var t=__B03__.document.querySelectorAll('td');
     for(var i=0;i<t.length;i++){
         if((t[i].innerText||'').trim()==='""" + s + """'){
-            // Safety: text must not contain danger words.
             var txt=(t[i].innerText||'').trim();
             if(""" + json.dumps(list(DANGER_WORDS)) + """.some(function(w){return txt.indexOf(w)>=0;})) return;
+            // Idempotent: check if already selected via HasSeled
+            var ctx=null;
+            try{ctx=__B03__.ko.contextFor(t[i]);}catch(e){}
+            if(ctx&&ctx.$data&&typeof ctx.$data.HasSeled==='function'&&ctx.$data.HasSeled()){
+                return; // already selected — skip to avoid toggle
+            }
             t[i].click();
             return;
         }
@@ -151,6 +159,25 @@ JSON.stringify((function(){
 
 # ── Full fill plan ──────────────────────────────────────────────────────
 
+def _detect_column_slot_count(page: Any) -> int:
+    """Detect how many visible column header TDs exist in B03 (OnClickZhu)."""
+    js = _b03_js("""
+(function(){
+    var hdrs=__B03__.document.querySelectorAll('td[data-bind*="OnClickZhu"]');
+    var cnt=0;
+    for(var i=0;i<hdrs.length;i++){
+        if(hdrs[i].offsetParent!==null) cnt++;
+    }
+    return cnt;
+})()
+""")
+    raw = _eval(page, js)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 7  # safe default; most sites have 7
+
+
 def build_zhu_peng_plan(parsed_item: dict[str, Any]) -> dict[str, Any]:
     """Convert a parsed item into a ZhuPeng fill plan.
 
@@ -180,8 +207,21 @@ def execute_zhu_peng_plan(page: Any, plan: dict[str, Any]) -> dict[str, Any]:
     blocked = False
 
     # 1) Fill numbers per column
+    # Detect site column limit before any clicks
+    site_column_slots = _detect_column_slot_count(page)
+    steps.append({"step": "site_info", "visible_column_slots": site_column_slots})
+    if len(numbers) > site_column_slots:
+        blocked = True
+        steps[-1]["blocked"] = f"requested {len(numbers)} columns, site supports {site_column_slots}"
+
     for col_idx, col_nums in enumerate(numbers):
+        if blocked:
+            break  # skip fill if already blocked
         if col_idx > 0:
+            if col_idx >= site_column_slots:
+                steps.append({"step": f"col{col_idx}", "blocked": f"column index {col_idx} exceeds site slots {site_column_slots}"})
+                blocked = True
+                break
             click_zhu_column(page, col_idx + 1)  # switch to column
             time.sleep(0.05)
         for num in col_nums:
@@ -212,10 +252,28 @@ def execute_zhu_peng_plan(page: Any, plan: dict[str, Any]) -> dict[str, Any]:
                 blocked = True
                 steps[-1]["blocked"] = "pengValue/domValue mismatch"
 
+    # Collect missing targets from readback
+    missing: list[str] = []
+    filled: list[str] = []
+    for col_idx, col_nums in enumerate(numbers):
+        for num in col_nums:
+            s = str(num).zfill(2)
+            found = any(
+                step.get("col_data_len", 0) > 0
+                for step in steps
+                if step.get("step") == f"col{col_idx}"
+            )
+            if found:
+                filled.append(s)
+            else:
+                missing.append(s)
     return {
         "ok": not blocked,
         "blocked": blocked,
         "numbers": numbers,
         "amounts": amounts,
         "steps": steps,
+        "site_column_slots": site_column_slots,
+        "filled_targets": filled,
+        "missing_targets": missing,
     }

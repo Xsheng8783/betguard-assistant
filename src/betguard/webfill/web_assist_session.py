@@ -86,6 +86,35 @@ def _count_selected_numbers(page: Any, expected: list[str]) -> int:
         return 0
 
 
+def _get_selected_numbers(page: Any) -> set[str]:
+    """Return the set of padded numbers currently selected (HasSeled) in B03."""
+    try:
+        js = (
+            "(function(){"
+            " var f=null;"
+            " for(var wi=0;wi<window.frames.length;wi++){"
+            "  try{if(window.frames[wi].location.href.indexOf('/Front/B/B03')>=0){f=window.frames[wi];break;}}catch(e){}"
+            " }"
+            " if(!f)f=window.frames[2];"
+            " if(!f||!f.ko)return [];"
+            " var tds=f.document.querySelectorAll('td');"
+            " var out=[];"
+            " for(var i=0;i<tds.length;i++){"
+            "  var txt=(tds[i].textContent||'').trim();"
+            "  var ctx=f.ko.contextFor(tds[i]);"
+            "  if(ctx&&ctx.$data&&typeof ctx.$data.HasSeled==='function'&&ctx.$data.HasSeled()){"
+            "   out.push(txt);"
+            "  }"
+            " }"
+            " return out;"
+            "})()"
+        )
+        raw = page.evaluate(js)
+        return set(str(x).strip() for x in (raw or []))
+    except Exception:
+        return set()
+
+
 # ---------------------------------------------------------------------------
 # Per-command result holder
 # ---------------------------------------------------------------------------
@@ -331,15 +360,22 @@ class _AssistWorker(threading.Thread):
                 return
             self.state = BROWSER_IDLE  # browser stays open for reuse
 
-            # Verify selection (informational only — does NOT block success)
+            # Verify selection — BLOCKED if incomplete
             selected = _count_selected_numbers(self._page, padded)
             amounts_ok = any(a.get("executed") for a in self.filled_amounts)
-            success = amounts_ok and len(self.numbers) > 0
+            all_selected = (selected == len(padded))
+            success = amounts_ok and all_selected and len(self.numbers) > 0
             warnings: list[str] = []
-            if selected != len(padded):
+            missing: list[str] = []
+            if not all_selected:
+                # Determine which numbers are missing
+                selected_set = _get_selected_numbers(self._page)
+                for n in padded:
+                    if n not in selected_set:
+                        missing.append(n)
                 warnings.append(
-                    f"post-fill verify: {selected}/{len(padded)} numbers confirmed selected "
-                    f"(fill executed, may be a readback timing issue)"
+                    f"post-fill verify: {selected}/{len(padded)} numbers confirmed selected. "
+                    f"Missing: {', '.join(missing) if missing else 'none'}"
                 )
             result.set({
                 "ok": success,
@@ -351,6 +387,9 @@ class _AssistWorker(threading.Thread):
                 "filled_amounts": self.filled_amounts,
                 "numbers_selected": selected,
                 "numbers_expected": len(padded),
+                "filled_targets": [n for n in padded if n not in missing],
+                "missing_targets": missing,
+                "possible_site_limit": selected < len(padded) and selected == 7,
                 "warnings": warnings,
                 "danger_buttons_detected": self.danger_detected,
                 "danger_buttons_clicked": [],

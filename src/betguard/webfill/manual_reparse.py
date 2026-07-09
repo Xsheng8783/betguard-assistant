@@ -9,6 +9,27 @@ from __future__ import annotations
 from typing import Any
 
 
+def _normalize_x_chain(
+    original_text: str,
+    bet_type: str,
+    columns: list[list[int]] | None,
+) -> tuple[str, list[list[int]] | None]:
+    """Convert single-number X-chain column to normal (連碰).
+
+    "07X17X27X37X05X15X25X35三四50" uses X as a plain number separator,
+    not a zhu-peng column-group separator.  Each parser-generated column
+    contains exactly one number and the text has no '/' — convert to normal.
+    """
+    if bet_type != "column" or not columns:
+        return bet_type, columns
+    all_single = all(len(c) == 1 for c in columns)
+    has_x_sep = any(sep in original_text for sep in ("X", "x", "×"))
+    has_slash = "/" in original_text
+    if all_single and has_x_sep and not has_slash:
+        return "normal", None
+    return bet_type, columns
+
+
 def reparse_text(text: str, *, game: str = "auto") -> dict[str, Any]:
     """Re-parse a single line of corrected text using the standard pipeline.
 
@@ -82,6 +103,10 @@ def reparse_text(text: str, *, game: str = "auto") -> dict[str, Any]:
             "reason": "needs_review",
         }
 
+    bet_type = getattr(parsed, "type", "normal")
+    columns = getattr(parsed, "columns", None)
+    bet_type, columns = _normalize_x_chain(text, bet_type, columns)
+
     return {
         "ok": True,
         "numbers": numbers,
@@ -90,8 +115,8 @@ def reparse_text(text: str, *, game: str = "auto") -> dict[str, Any]:
         "amounts": amounts,
         "summary": _format_summary(parsed),
         "source": "manual_correction",
-        "type": getattr(parsed, "type", "normal"),
-        "columns": getattr(parsed, "columns", None),
+        "type": bet_type,
+        "columns": columns,
     }
 
 

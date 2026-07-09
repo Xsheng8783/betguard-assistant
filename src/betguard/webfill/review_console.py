@@ -733,11 +733,25 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
         // Store for addManualCandidateRow
         _lastReparseResult = data;
         _lastReparseText = textarea.value || '';
-        if (resultEl) resultEl.innerHTML = '<div style="color:#059669;font-weight:600">✅ 解析通過（人工修正）</div>'
+        window._lastReparseColumns = data.columns || null;
+        // Auto-add manual candidate row to pending section if reparse succeeds
+        if (data.manual_candidate_id && data.type) {{
+          var betType = data.type || 'normal';
+          try {{
+            if (typeof window.addManualCandidateRowToPending === 'function') {{
+              window.addManualCandidateRowToPending(data.manual_candidate_id, _lastReparseText, data.summary || '', data.numbers || [], data.stars || [], data.amounts || {{}}, betType);
+            }} else {{
+              // Fallback: reload page so the row appears from server state
+              console.warn('addManualCandidateRowToPending not defined, using addManualCandidateRow');
+              addManualCandidateRow();
+            }}
+          }} catch(e) {{ console.log('auto-add pending row error:', e); }}
+        }}
+        if (resultEl) resultEl.innerHTML = '<div style="color:#059669;font-weight:600">✅ 解析通過 — 已加入可輔助填入區</div>'
           + '<div>號碼: ' + nums + '</div>'
           + '<div>金額: ' + (amtHtml || data.money + '元') + '</div>'
           + '<div style="font-size:11px;color:#64748b">' + (data.summary || '') + '</div>'
-          + (data.manual_candidate_id ? '<button onclick="addManualCandidateRow()" style="margin-top:6px;font-size:12px;background:#059669;color:#fff;border:none;padding:4px 12px;border-radius:6px;cursor:pointer">➕ 加入待輔助填入</button>' : '');
+          + (data.manual_candidate_id ? '<p style="margin-top:4px;font-size:11px;color:#2563eb">已加入可輔助填入區，請從上方表格點擊「輔助填入」</p>' : '');
       }} else {{
         if (resultEl) resultEl.innerHTML = '<span style="color:#dc2626">❌ ' + (data.error || '解析失敗') + '</span>'
           + (data.reason ? ' <span style="color:#64748b;font-size:10px">(' + data.reason + ')</span>' : '');
@@ -1139,7 +1153,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       btn.setAttribute('data-assist-index', cid);
       btn.textContent = '輔助填入';
       btn.onclick = function() {{
-        previewAssist(cid, fragment, summary, _lastReparseResult.numbers || [], _lastReparseResult.stars || [], _lastReparseResult.amounts || {{}}, '');
+        previewAssist(cid, fragment, summary, _lastReparseResult.numbers || [], _lastReparseResult.stars || [], _lastReparseResult.amounts || {{}}, _lastReparseResult.type || 'normal');
       }};
       row.lastElementChild.appendChild(btn);
 
@@ -1147,6 +1161,110 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       document.getElementById('pending-empty').style.display = 'none';
       document.getElementById('pending-table').style.display = '';
     }}
+
+    // v0.5.32: mark a pending item as manually done (no real site op)
+    window.markManualDone = function(btn) {{
+      var idx = btn.getAttribute('data-assist-index');
+      var row = btn.closest('tr');
+      if (!idx) return;
+      btn.disabled = true;
+      btn.textContent = '⏳';
+
+      // Determine request body: manual_id or queue_path+item_index
+      var reqBody;
+      if (idx && String(idx).indexOf('manual-') === 0) {{
+        reqBody = {{manual_candidate_id: idx}};
+      }} else {{
+        var qp = (typeof queuePath !== 'undefined') ? queuePath : (document.body.getAttribute('data-queue-path') || '');
+        reqBody = {{queue_path: qp, item_index: parseInt(idx)}};
+      }}
+
+      fetch('/assist-fill/manual-done', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify(reqBody)
+      }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
+        if (data.ok) {{
+          // Move row to done section
+          if (row) {{
+            var doneBody = document.getElementById('done-tbody');
+            if (doneBody) {{
+              // Update row appearance
+              row.querySelectorAll('button').forEach(function(b) {{ b.disabled = true; }});
+              var cells = row.querySelectorAll('td');
+              if (cells.length >= 5) {{
+                cells[4].innerHTML = '<span style="color:var(--green);font-size:11px">✅ ' + (data.message || '已手動下牌') + '</span>';
+              }}
+              doneBody.appendChild(row);
+            }}
+            document.getElementById('done-empty').style.display = 'none';
+          }}
+          // Show next-item banner
+          refreshPendingQueue();
+          var banner = document.getElementById('next-item-banner');
+          if (banner) {{
+            if (window._pendingQueue && window._pendingQueue.length > 0) {{
+              banner.innerHTML = '<span style="color:var(--slate)">完成本筆 ➜ 還有 <strong>' + window._pendingQueue.length + '</strong> 筆可輔助填入</span> '
+                + '<button onclick="showNextPending()" style="background:var(--blue);color:#fff;border:none;padding:6px 16px;border-radius:6px;cursor:pointer;font-weight:600">📝 預覽下一筆</button>';
+              banner.style.display = 'flex';
+            }} else {{
+              banner.innerHTML = '✅ 全部已輔助填入完成';
+              banner.style.display = 'flex';
+            }}
+          }}
+        }} else {{
+          alert(data.error || '標記失敗');
+          btn.disabled = false;
+          btn.textContent = '✓ 已手動下牌';
+        }}
+      }}).catch(function(err) {{
+        alert('連線錯誤: ' + err);
+        btn.disabled = false;
+        btn.textContent = '✓ 已手動下牌';
+      }});
+    }};
+
+    // v0.5.32: add a manual-reparse candidate to pending section by ID
+    window.addManualCandidateRowToPending = function(cid, text, summary, numbers, stars, amounts, betType) {{
+      try {{
+        var tbody = document.getElementById('pending-tbody');
+        if (!tbody) return;
+        // Avoid duplicates
+        if (tbody.querySelector('tr[data-assist-index="' + cid + '"]')) return;
+        var numbersDisplay = (numbers || []).map(function(n) {{ return (n < 10 ? '0' : '') + n; }}).join(', ');
+        var label = summary || (numbersDisplay + ' | 人工修正');
+        var fragment = (text || summary || '').substring(0, 40);
+        var tr = document.createElement('tr');
+        tr.setAttribute('data-assist-index', cid);
+        tr.innerHTML = '<td>' + cid + '</td>'
+          + '<td style="font-size:10px;color:#64748b">🔧 人工修正</td>'
+          + '<td style="font-weight:600">' + fragment + '</td>'
+          + '<td style="font-size:11px">' + (numbersDisplay || '') + '</td>'
+          + '<td></td>';
+        var btn = document.createElement('button');
+        btn.className = 'assist-btn';
+        btn.setAttribute('data-assist-index', cid);
+        btn.setAttribute('data-fragment', fragment);
+        btn.setAttribute('data-summary', label);
+        btn.setAttribute('data-numbers', JSON.stringify((betType === 'column' && window._lastReparseColumns) ? window._lastReparseColumns : (numbers || [])));
+        btn.setAttribute('data-stars', JSON.stringify(stars || []));
+        btn.setAttribute('data-amounts', JSON.stringify(amounts || {{}}));
+        btn.setAttribute('data-bet-type', betType || 'normal');
+        btn.textContent = '輔助填入';
+        btn.onclick = function() {{ openAssistPreviewFromBtn(this); }};
+        tr.lastElementChild.appendChild(btn);
+        // Also add manual-done button
+        var mdBtn = document.createElement('button');
+        mdBtn.style.cssText = 'font-size:11px;background:#64748b;color:#fff;border:none;padding:3px 8px;border-radius:4px;cursor:pointer;margin-left:4px';
+        mdBtn.textContent = '✓ 已手動下牌';
+        mdBtn.setAttribute('data-assist-index', cid);
+        mdBtn.onclick = function() {{ window.markManualDone(mdBtn); }};
+        tr.lastElementChild.appendChild(mdBtn);
+        tbody.appendChild(tr);
+        document.getElementById('pending-empty').style.display = 'none';
+        document.getElementById('pending-table').style.display = '';
+      }} catch(e) {{ console.log('addManualCandidateRowToPending error:', e); }}
+    }};
 
     // ---- assist fill (one-button auto flow) ----
     var assistItem = null;
@@ -1311,6 +1429,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
           }} catch(e) {{ console.log('rowBtn error:', e); }}
           assistInProgress = false;
           setAssistStage('done');
+          markCurrentDoneAndNext();
         }} else {{
           var errMsg = data.error || 'unknown';
           if (data.warnings && data.warnings.length) errMsg += ' | ' + data.warnings.join('; ');
@@ -1391,6 +1510,110 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
         assistInProgress = false;
       }});
     }}
+
+    // ── v0.5.32: auto-expand first pending row ──
+    // Auto-expand first pending item preview (preview only, no fill)
+    // Open assist preview from button data attributes (no eval, no click)
+    function openAssistPreviewFromBtn(btn) {{
+      var idx = btn.getAttribute('data-assist-index');
+      var fragment = btn.getAttribute('data-fragment') || '';
+      var summary = btn.getAttribute('data-summary') || '';
+      try {{ var numbers = JSON.parse(btn.getAttribute('data-numbers') || '[]'); }} catch(e) {{ var numbers = []; }}
+      try {{ var stars = JSON.parse(btn.getAttribute('data-stars') || '[]'); }} catch(e) {{ var stars = []; }}
+      try {{ var amounts = JSON.parse(btn.getAttribute('data-amounts') || '{{}}'); }} catch(e) {{ var amounts = {{}}; }}
+      var betType = btn.getAttribute('data-bet-type') || 'normal';
+      previewAssist(idx, fragment, summary, numbers, stars, amounts, betType);
+    }}
+
+    function autoExpandFirstPending() {{
+      var rows = document.querySelectorAll('#pending-tbody tr[data-assist-index]');
+      if (rows.length > 0) {{
+        var btn = rows[0].querySelector('.assist-btn');
+        if (btn) openAssistPreviewFromBtn(btn);
+      }}
+    }}
+    document.addEventListener('DOMContentLoaded', function() {{
+      setTimeout(autoExpandFirstPending, 300);
+    }});
+
+    // ── v0.5.32: batch next-item flow ──
+    var _pendingQueue = [];
+    var _currentPendingIdx = -1;
+
+    function refreshPendingQueue() {{
+      _pendingQueue = [];
+      var rows = document.querySelectorAll('#pending-tbody tr[data-assist-index]');
+      rows.forEach(function(r) {{
+        _pendingQueue.push(r.getAttribute('data-assist-index'));
+      }});
+      window._pendingQueue = _pendingQueue;
+      if (_pendingQueue.length > 0) {{
+        document.getElementById('pending-empty').style.display = 'none';
+      }}
+    }}
+
+    function showNextPending() {{
+      refreshPendingQueue();
+      window._pendingQueue = _pendingQueue;
+      if (_pendingQueue.length === 0) {{
+        document.getElementById('pending-empty').style.display = '';
+        document.getElementById('next-item-banner').style.display = 'none';
+        return;
+      }}
+      // Find the first pending row and click its assist button
+      var rows = document.querySelectorAll('#pending-tbody tr[data-assist-index]');
+      if (rows.length > 0) {{
+        var banner = document.getElementById('next-item-banner');
+        if (banner) banner.style.display = 'none';
+        var btn = rows[0].querySelector('.assist-btn');
+        if (btn) openAssistPreviewFromBtn(btn);
+      }}
+    }}
+
+    function markCurrentDoneAndNext() {{
+      // Move the current assist item from pending to done
+      var lastAssistIdx = assistItem ? assistItem.idx : null;
+      if (lastAssistIdx) {{
+        var row = document.querySelector('#pending-tbody tr[data-assist-index="' + lastAssistIdx + '"]');
+        if (row) {{
+          // Move to done section
+          var doneBody = document.getElementById('done-tbody');
+          if (doneBody) {{
+            doneBody.appendChild(row);
+          }}
+          // Update the assist button
+          var btn = row.querySelector('.assist-btn');
+          if (btn) {{ btn.textContent = '已輔助填入'; btn.classList.add('done'); btn.disabled = true; }}
+        }}
+        // Show the done section header
+        document.getElementById('done-empty').style.display = 'none';
+      }}
+      // Show next-item banner
+      refreshPendingQueue();
+      var banner = document.getElementById('next-item-banner');
+      if (banner) {{
+        if (_pendingQueue.length > 0) {{
+          banner.innerHTML = '<span style="color:var(--slate)">完成本筆 ➜ 還有 <strong>' + _pendingQueue.length + '</strong> 筆可輔助填入</span> '
+            + '<button onclick="showNextPending()" style="background:var(--blue);color:#fff;border:none;padding:6px 16px;border-radius:6px;cursor:pointer;font-weight:600">📝 預覽下一筆</button>';
+          banner.style.display = 'flex';
+        }} else {{
+          banner.innerHTML = '✅ 全部已輔助填入完成';
+          banner.style.display = 'flex';
+        }}
+      }}
+    }}
+
+    // Add next-item banner below pending section
+    (function addNextBanner() {{
+      var pendingSection = document.getElementById('pending-tbody');
+      if (!pendingSection) return;
+      var banner = document.createElement('div');
+      banner.id = 'next-item-banner';
+      banner.style.cssText = 'display:none;align-items:center;justify-content:space-between;padding:12px 16px;margin-top:12px;background:#f0f9ff;border-radius:8px;border:1px solid #bfdbfe;font-size:14px';
+      pendingSection.parentNode.insertBefore(banner, pendingSection.parentNode.querySelector('#pending-empty') || pendingSection.nextSibling);
+      // Initial queue refresh
+      refreshPendingQueue();
+    }})();
   </script>
   <div id="history-side-panel" class="history-panel">
     <div class="history-panel-header">
@@ -1532,11 +1755,42 @@ def _candidate_with_labels(item: dict[str, Any]) -> dict[str, Any]:
     if _is_car_related(item, result):
         review_labels.append("car_bet")
         review_labels = list(dict.fromkeys(review_labels))
+
+    # ── Normalize X-chain single-number columns → normal ──
+    from betguard.webfill.manual_reparse import _normalize_x_chain
+    raw_type = result.get("type", "normal")
+    raw_columns = result.get("columns")
+    original_text = item.get("original_fragment") or item.get("raw", "")
+    bet_type, _ = _normalize_x_chain(original_text, raw_type, raw_columns)
+
+    # Regenerate summary if type changed from column to normal
+    summary = item.get("summary", "")
+    if raw_type == "column" and bet_type == "normal":
+        # Clear columns from result to avoid stale column references
+        result = dict(result)
+        columns = result.pop("columns", None)
+        result["type"] = "normal"
+        # Build a normal-style summary — use numbers if present, else flatten columns
+        numbers = result.get("numbers") or []
+        if not numbers and columns:
+            numbers = [n for c in columns for n in c]
+            result["numbers"] = numbers
+        nums_str = ", ".join(str(n) for n in numbers)
+        stars = result.get("stars", [])
+        stars_str = "".join({2: "二", 3: "三", 4: "四"}.get(s, str(s)) for s in sorted(stars)) + "星" if stars else ""
+        money = result.get("money", "")
+        parts = [f"一般：{nums_str}"]
+        if stars_str:
+            parts.append(stars_str)
+        if money:
+            parts.append(f"{money}元")
+        summary = "｜".join(parts)
+
     return {
         "index": item.get("index"),
         "original_fragment": item.get("original_fragment") or item.get("raw"),
-        "parsed_summary": item.get("summary", ""),
-        "bet_type": result.get("type"),
+        "parsed_summary": summary,
+        "bet_type": bet_type,
         "review_labels": review_labels,
         "result": result,
     }
@@ -1587,7 +1841,10 @@ def _candidate_row(item: dict[str, Any]) -> str:
         f"<td>{fragment}</td>"
         f"<td>{summary}</td>"
         f"<td>{bet_type}</td>"
-        f"<td><button class='assist-btn' data-assist-index=\"{idx}\" onclick='previewAssist(\"{idx}\",\"{fragment}\",\"{summary}\",{numbers},{stars},{amounts_json},\"{bet_type}\")'>輔助填入</button></td>"
+        f"<td>"
+        f"<button class='assist-btn' data-assist-index=\"{idx}\" data-fragment=\"{fragment}\" data-summary=\"{summary}\" data-numbers='{numbers}' data-stars='{stars}' data-amounts='{amounts_json}' data-bet-type=\"{bet_type}\" onclick='openAssistPreviewFromBtn(this)'>輔助填入</button> "
+        f"<button class='manual-done-btn' data-assist-index=\"{idx}\" onclick='markManualDone(this)' style='font-size:11px;background:#64748b;color:#fff;border:none;padding:3px 8px;border-radius:4px;cursor:pointer;margin-left:4px'>✓ 已手動下牌</button>"
+        f"</td>"
         "</tr>"
     )
 
