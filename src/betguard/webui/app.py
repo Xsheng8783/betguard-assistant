@@ -172,6 +172,26 @@ def _render_dashboard(version: str, git_commit: str) -> str:
     return _HTML_HEAD.format(title="Betguard 本地工作台") + body + _HTML_FOOTER
 
 
+def _render_empty_dashboard() -> str:
+    """Render the clean dashboard homepage with zero items (no auto-load of old reviews)."""
+    from betguard.webfill.review_console import render_review_console_html
+
+    empty_queue: dict[str, Any] = {
+        "status": "IDLE",
+        "items": [],
+        "preprocessing": {
+            "valid_candidates": [],
+            "invalid_candidates": [],
+            "invalid_fragments": [],
+            "watchlist_items": [],
+            "summary": {"candidate_count": 0, "valid_count": 0, "invalid_unsupported_count": 0, "warnings_count": 0},
+        },
+        "approved_fill_queue": [],
+        "human_required_each_item": True,
+    }
+    return render_review_console_html(empty_queue, queue_path=None)
+
+
 def _render_workbench_form(error: str | None = None) -> str:
     error_block = (
         f'<p style="color:#c33"><strong>{error}</strong></p>' if error else ""
@@ -784,7 +804,7 @@ def build_workbench_handler(
             path = parsed.path
 
             if path == "/" or path == "":
-                self._send_redirect("/latest-review")
+                self._send_html(_render_empty_dashboard())
                 return
             if path == "/workbench":
                 self._send_html(_render_workbench_form())
