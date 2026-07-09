@@ -255,12 +255,20 @@ class _AssistWorker(threading.Thread):
             self._playwright = sync_playwright().start()
             self._browser = self._playwright.chromium.launch(
                 headless=False,
-                args=["--start-maximized"],
+                args=["--start-maximized", "--disable-popup-blocking"],
             )
             self._context = self._browser.new_context(no_viewport=True)
             self._page = self._context.new_page()
             url = payload.get("url", "https://www.gts362.com")
             self._page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            # Phase 1: open assist panel in a separate popup window
+            try:
+                self._page.evaluate(
+                    "() => { window.open('http://127.0.0.1:8765/assist-panel',"
+                    " 'betguard_panel', 'width=420,height=1040,left=1480,top=0'); }"
+                )
+            except Exception:
+                pass  # panel failure must not block the main flow
         except Exception as exc:
             self._cleanup()
             self.state = IDLE
