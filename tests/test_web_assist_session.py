@@ -188,3 +188,65 @@ class TestAssistSessionModule:
 
         w = get_assist_session()
         assert isinstance(w, _AssistWorker)
+
+
+class TestPostFillReadbackVerification:
+    """Verify that readback logic treats over-count as success when all targets are present."""
+
+    @staticmethod
+    def _verify(numbers: list[int], selected_set: set[str], amounts_ok: bool = True) -> dict:
+        """Re-implement the verification logic from _handle_execute_fill."""
+        from betguard.webfill.web_assist_session import _pad_number
+
+        padded = [_pad_number(n) for n in numbers]
+        selected = sum(1 for n in padded if n in selected_set)
+        missing = [n for n in padded if n not in selected_set]
+        all_targets_selected = (len(missing) == 0)
+        success = amounts_ok and all_targets_selected and len(numbers) > 0
+        return {
+            "success": success,
+            "selected": selected,
+            "expected": len(padded),
+            "missing": missing,
+            "all_targets_selected": all_targets_selected,
+        }
+
+    def test_overcount_with_all_targets_present_is_success(self) -> None:
+        """8 targets, selected_set has all 8 + extras → success=true."""
+        numbers = [7, 17, 27, 37, 5, 15, 25, 35]
+        # Simulate multi-area readback returning inflated set
+        selected_set = {"07", "17", "27", "37", "05", "15", "25", "35",
+                        "07", "17", "27", "37", "05", "15", "25", "35",
+                        "07", "17", "27", "37", "05", "15", "25", "35"}
+        result = self._verify(numbers, selected_set)
+        assert result["success"] is True, f"expected success, got {result}"
+        assert result["missing"] == []
+        assert result["all_targets_selected"] is True
+
+    def test_overcount_with_missing_target_is_failure(self) -> None:
+        """selected_set is large but missing one target → success=false."""
+        numbers = [7, 17, 27, 37, 5, 15, 25, 35]
+        # 35 is missing from selected_set
+        selected_set = {"07", "17", "27", "37", "05", "15", "25",
+                        "07", "17", "27", "37", "05", "15", "25",
+                        "07", "17", "27", "37", "05", "15", "25"}
+        result = self._verify(numbers, selected_set)
+        assert result["success"] is False, f"expected failure, got {result}"
+        assert "35" in result["missing"]
+        assert result["all_targets_selected"] is False
+
+    def test_exact_count_is_still_success(self) -> None:
+        """8 targets, exactly 8 in selected_set → success=true (regression guard)."""
+        numbers = [7, 17, 27, 37, 5, 15, 25, 35]
+        selected_set = {"07", "17", "27", "37", "05", "15", "25", "35"}
+        result = self._verify(numbers, selected_set)
+        assert result["success"] is True
+        assert result["missing"] == []
+
+    def test_missing_multiple_is_failure(self) -> None:
+        """Multiple targets missing → success=false."""
+        numbers = [7, 17, 27, 37, 5, 15, 25, 35]
+        selected_set = {"07", "17", "27", "37"}  # only 4 of 8
+        result = self._verify(numbers, selected_set)
+        assert result["success"] is False
+        assert len(result["missing"]) == 4

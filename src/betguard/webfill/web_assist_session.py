@@ -150,6 +150,7 @@ class _AssistWorker(threading.Thread):
         self._cmd_queue: queue.Queue[tuple[str, Any, _CommandResult]] = queue.Queue()
         self._playwright: Any = None
         self._browser: Any = None
+        self._context: Any = None
         self._page: Any = None
         # Session data
         self.numbers: list[int] = []
@@ -252,8 +253,12 @@ class _AssistWorker(threading.Thread):
 
         try:
             self._playwright = sync_playwright().start()
-            self._browser = self._playwright.chromium.launch(headless=False)
-            self._page = self._browser.new_page()
+            self._browser = self._playwright.chromium.launch(
+                headless=False,
+                args=["--start-maximized"],
+            )
+            self._context = self._browser.new_context(no_viewport=True)
+            self._page = self._context.new_page()
             url = payload.get("url", "https://www.gts362.com")
             self._page.goto(url, wait_until="domcontentloaded", timeout=15000)
         except Exception as exc:
@@ -360,23 +365,29 @@ class _AssistWorker(threading.Thread):
                 return
             self.state = BROWSER_IDLE  # browser stays open for reuse
 
-            # Verify selection — BLOCKED if incomplete
+            # Verify selection — BLOCKED only if targets are actually missing
             selected = _count_selected_numbers(self._page, padded)
             amounts_ok = any(a.get("executed") for a in self.filled_amounts)
-            all_selected = (selected == len(padded))
-            success = amounts_ok and all_selected and len(self.numbers) > 0
-            warnings: list[str] = []
+            # Use actual target presence, not raw count (site may double-count)
+            selected_set = _get_selected_numbers(self._page)
             missing: list[str] = []
-            if not all_selected:
-                # Determine which numbers are missing
-                selected_set = _get_selected_numbers(self._page)
-                for n in padded:
-                    if n not in selected_set:
-                        missing.append(n)
-                warnings.append(
-                    f"post-fill verify: {selected}/{len(padded)} numbers confirmed selected. "
-                    f"Missing: {', '.join(missing) if missing else 'none'}"
-                )
+            for n in padded:
+                if n not in selected_set:
+                    missing.append(n)
+            all_targets_selected = (len(missing) == 0)
+            success = amounts_ok and all_targets_selected and len(self.numbers) > 0
+            warnings: list[str] = []
+            if selected != len(padded):
+                if selected > len(padded):
+                    warnings.append(
+                        f"post-fill verify: {selected}/{len(padded)} confirmed "
+                        f"(over-count from multi-area readback — all targets verified)"
+                    )
+                else:
+                    warnings.append(
+                        f"post-fill verify: {selected}/{len(padded)} numbers confirmed selected. "
+                        f"Missing: {', '.join(missing)}"
+                    )
             result.set({
                 "ok": success,
                 "state": DONE,
@@ -430,6 +441,11 @@ class _AssistWorker(threading.Thread):
     def _cleanup(self) -> None:
         """Close browser and stop playwright. Runs on worker thread."""
         try:
+            if self._context is not None:
+                self._context.close()
+        except Exception:
+            pass
+        try:
             if self._browser is not None:
                 self._browser.close()
         except Exception:
@@ -440,6 +456,7 @@ class _AssistWorker(threading.Thread):
         except Exception:
             pass
         self._browser = None
+        self._context = None
         self._page = None
         self._playwright = None
 
