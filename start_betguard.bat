@@ -1,8 +1,9 @@
 @echo off
 setlocal enabledelayedexpansion
 
-cd /d "C:\Users\USER\Documents\Codex\2026-06-30\init-python-betguard-assistant-539-1\betguard-assistant"
-set "PYTHONPATH=%CD%\src"
+REM Portable: use BAT location as project root
+cd /d "%~dp0"
+set "PYTHONPATH=%~dp0src"
 
 for /f "tokens=*" %%i in ('git describe --tags --always 2^>nul') do set "GIT_TAG=%%i"
 if "%GIT_TAG%"=="" set "GIT_TAG=(unknown)"
