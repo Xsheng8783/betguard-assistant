@@ -559,3 +559,55 @@ def test_start_assist_has_column_safety_guard() -> None:
     html_text = render_review_console_html(queue)
     # The startAssist function must contain the column bet guard
     assert "betType === 'column'" in html_text or "assistItem.betType === 'column'" in html_text
+
+
+# ========================================================================
+# Assist-panel sync payload (server-rendered, single source of truth)
+# ========================================================================
+
+
+def _extract_sync_candidates(html_text: str) -> list:
+    m = re.search(r"var assistSyncCandidates = (\[.*?\]);", html_text, re.S)
+    assert m, "assistSyncCandidates must be embedded server-side"
+    return json.loads(m.group(1).replace("<\/", "</"))
+
+
+def test_review_html_embeds_assist_sync_candidates_with_full_fields() -> None:
+    queue = build_batch_mock_queue(f"26.27.28 {TWO_THREE}100")
+    html_text = render_review_console_html(queue, queue_path="runs/x/queue_test.json")
+    data = _extract_sync_candidates(html_text)
+    assert len(data) == 1, "one valid candidate must produce one sync entry"
+    entry = data[0]
+    assert entry["index"] == 1
+    assert entry["raw"]
+    assert entry["summary"]
+    assert entry["bet_type"] == "normal"
+    assert entry["numbers"] == [26, 27, 28]
+    assert entry["stars"] == [2, 3]
+    assert entry["amounts"] == {"2": 100, "3": 100}
+
+
+def test_assist_sync_candidates_match_pending_row_count() -> None:
+    queue = build_batch_mock_queue(
+        f"06.13.23.22 {TWO_THREE}100\n01.02.03 {TWO_THREE}100\n17.29.1000"
+    )
+    html_text = render_review_console_html(queue)
+    data = _extract_sync_candidates(html_text)
+    model = build_review_console_model(queue)
+    assert len(data) == len(model["valid_candidates"])
+    assert len(data) == model["preprocessing"]["valid_count"]
+
+
+def test_assist_sync_candidates_empty_for_no_valid_batch() -> None:
+    queue = build_batch_mock_queue("17.29.1000")
+    html_text = render_review_console_html(queue)
+    model = build_review_console_model(queue)
+    if model["preprocessing"]["valid_count"] == 0:
+        assert _extract_sync_candidates(html_text) == []
+
+
+def test_publish_prefers_server_candidates_over_dom_scrape() -> None:
+    queue = build_batch_mock_queue(f"26.27.28 {TWO_THREE}100")
+    html_text = render_review_console_html(queue)
+    assert "Array.isArray(assistSyncCandidates)" in html_text
+    assert "betguard_assist_panel_state" in html_text

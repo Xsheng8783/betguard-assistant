@@ -645,6 +645,17 @@ def _find_latest_review() -> Path | None:
     return candidates[-1]
 
 
+def _find_latest_queue_json() -> Path | None:
+    """Return the most recent queue json under runs/, or None."""
+    if not RUNS_DIR.exists():
+        return None
+    candidates = list(RUNS_DIR.glob("**/queue_*.json"))
+    candidates += list(RUNS_DIR.glob("assist-panel-batches/batch_*.json"))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
 def _find_latest_unrecognized() -> Path | None:
     """Return the most recent unrecognized_*.html under runs/, or None."""
     if not RUNS_DIR.exists():
@@ -662,6 +673,8 @@ def _find_latest_unrecognized() -> Path | None:
 
 # In-memory manual correction candidate registry (keyed by candidate_id)
 _manual_candidates: dict[str, dict[str, Any]] = {}
+# Server-side assist-panel state (cross-browser sync)
+_ASSIST_PANEL_STATE: dict[str, Any] = {}
 
 def _register_manual_candidate(candidate: dict[str, Any]) -> str:
     """Register a manually corrected candidate and return its unique ID."""
@@ -835,6 +848,12 @@ def build_workbench_handler(
             if path == "/assist-panel":
                 self._handle_assist_panel()
                 return
+            if path == "/api/assist-panel/state":
+                self._handle_assist_panel_state()
+                return
+            if path == "/assist-panel/state":
+                self._handle_assist_panel_state()
+                return
             self._send_text("not found", status=404)
 
         def do_POST(self) -> None:  # noqa: N802 -- stdlib name
@@ -875,6 +894,11 @@ def build_workbench_handler(
             # GET /assist-panel — slim panel for right-side assist workspace (Phase 1: read-only)
             if path == "/assist-panel":
                 self._handle_assist_panel()
+                return
+
+            # POST /api/assist-panel/state — server-side state sync (cross-browser)
+            if path == "/api/assist-panel/state":
+                self._handle_api_assist_panel_state_post()
                 return
 
             # POST /assist-panel/create-batch — create queue from pasted text, return JSON
@@ -1329,6 +1353,30 @@ def build_workbench_handler(
             result = worker.dispatch(CMD_CLOSE, None)
             self._send_json(result)
 
+        def _handle_assist_panel_state(self) -> None:
+            """Return the current server-side assist-panel state."""
+            self._send_json({"ok": True, "state": _ASSIST_PANEL_STATE if _ASSIST_PANEL_STATE else None})
+
+        def _handle_api_assist_panel_state_post(self) -> None:
+            """Receive assist-panel state from the main Review page (cross-browser sync)."""
+            import json as _json_module
+            data = self._read_json_body()
+            if data is None:
+                return
+            queue_path = (data.get("queue_path") or "").strip()
+            valid_candidates = data.get("valid_candidates") or []
+            ts = data.get("timestamp") or 0
+            if not queue_path or not valid_candidates:
+                self._send_json({"ok": False, "error": "missing queue_path or valid_candidates"})
+                return
+            global _ASSIST_PANEL_STATE
+            _ASSIST_PANEL_STATE = {
+                "queue_path": queue_path,
+                "valid_candidates": valid_candidates,
+                "timestamp": ts,
+            }
+            self._send_json({"ok": True, "received": len(valid_candidates)})
+
         def _handle_assist_panel(self) -> None:
             """Return the slim assist panel HTML (Phase 1: read-only for fill)."""
             html = """<!doctype html>
@@ -1415,6 +1463,12 @@ function createBatch() {
     } else {
       setStatus("✅ 已建立審核");
     }
+    // Publish state so main Review page can pick it up
+    try {
+      var st = { queue_path: panelState.queuePath, valid_summary: valid.map(function (v) { return v.index; }), timestamp: Date.now() };
+      localStorage.setItem("betguard_assist_panel_state", JSON.stringify(st));
+      try { var ch = new BroadcastChannel("betguard_assist_panel"); ch.postMessage(st); ch.close(); } catch (_) {}
+    } catch (_) {}
   }).catch(function (e) {
     btn.disabled = false;
     setStatus("❌ 連線錯誤: " + ((e && e.message) ? e.message : e));
@@ -1530,6 +1584,21 @@ function assistPanelFill(queuePath, itemIndex, betType, btn, statusEl) {
     if (data.ok) {
       show("✅ 已輔助填入，請在真站人工確認後再送出");
       if (btn) { btn.textContent = "已填入"; }
+      // Remove the item from the valid list after 2s
+      var row = btn.closest(".item");
+      if (row) {
+        setTimeout(function () {
+          row.style.transition = "opacity 0.3s";
+          row.style.opacity = "0";
+          setTimeout(function () {
+            row.parentNode.removeChild(row);
+            // Update count
+            var vc = document.getElementById("valid-items");
+            var remaining = vc.querySelectorAll(".item:not([style*='opacity: 0'])").length;
+            document.getElementById("valid-count").textContent = remaining;
+          }, 300);
+        }, 2000);
+      }
     } else {
       if (btn) { btn.disabled = false; }
       var err = data.error || "未知錯誤";
@@ -1559,6 +1628,69 @@ document.getElementById("valid-items").addEventListener("click", function (e) {
 window.createBatch = createBatch;
 window.assistPanelFillBtn = assistPanelFillBtn;
 window.assistPanelFill = assistPanelFill;
+
+// ── Sync with main Review page ──
+(function () {
+  var lastStamp = 0;
+
+  function applyState(s) {
+    if (!s || !s.queue_path) return;
+    panelState.queuePath = s.queue_path;
+    var vc = s.valid_candidates || [];
+    if (vc.length > 0) {
+      renderResults(vc, []);
+      setStatus("✅ 已同步主審核台（" + vc.length + " 筆可輔助填入）");
+    }
+  }
+
+  function pollServerState() {
+    fetch("/assist-panel/state", { method: "GET" })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (d.ok && d.state && d.state.timestamp > lastStamp) {
+          lastStamp = d.state.timestamp;
+          applyState(d.state);
+        }
+      }).catch(function(_) {});
+  }
+
+  // 1) Primary: fetch server-side state (works cross-browser)
+  pollServerState();
+
+  // 2) Periodic poll every 3s for live updates
+  setInterval(pollServerState, 3000);
+
+  // 3) Fallback: localStorage (same-browser)
+  try {
+    var stored = localStorage.getItem("betguard_assist_panel_state");
+    if (stored) {
+      var s = JSON.parse(stored);
+      if (s.timestamp > lastStamp) { lastStamp = s.timestamp; applyState(s); }
+    }
+  } catch (_) {}
+
+  // 4) BroadcastChannel (same-browser live)
+  try {
+    new BroadcastChannel("betguard_assist_panel").onmessage = function (e) {
+      if (e.data && e.data.timestamp > lastStamp) {
+        lastStamp = e.data.timestamp;
+        applyState(e.data);
+      }
+    };
+  } catch (_) {}
+
+  // 5) Cross-tab storage event
+  try {
+    window.addEventListener("storage", function (e) {
+      if (e.key === "betguard_assist_panel_state" && e.newValue) {
+        try {
+          var ns = JSON.parse(e.newValue);
+          if (ns.timestamp > lastStamp) { lastStamp = ns.timestamp; applyState(ns); }
+        } catch (_) {}
+      }
+    });
+  } catch (_) {}
+})();
 </script>
 </body>
 </html>"""

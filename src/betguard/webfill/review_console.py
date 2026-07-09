@@ -123,6 +123,14 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     if not valid_rows:
         valid_rows = '<div class="empty-block">目前沒有正確候選</div>'
 
+    # Assist-panel sync payload — server-rendered from the SAME source as the
+    # pending rows, so the panel can never disagree with the table.
+    # "</" is escaped so user text can't terminate the surrounding <script>.
+    assist_sync_json = json.dumps(
+        [_candidate_sync_entry(item) for item in model["valid_candidates"]],
+        ensure_ascii=False,
+    ).replace("</", "<\\/")
+
     metadata_rows = "".join(
         f"<li>{_e(str(item.get('raw', item)))}</li>" for item in model["ignored_metadata_lines"][:8]
     ) or "<li>無</li>"
@@ -554,7 +562,6 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     <section class="card" style="border-left: 4px solid var(--blue);flex:3">
       <h2 style="display:flex;align-items:center;gap:12px">
         <span class="badge valid" style="background:#dbeafe;color:#1e40af;font-size:14px">📝 待輔助填入</span>
-        <a href="/workbench" style="font-size:11px;color:var(--blue);text-decoration:underline;font-weight:400">＋ 貼新牌單</a>
       </h2>
       <div style="overflow-x:auto"><table id="pending-table"><thead><tr><th>#</th><th>原始片段</th><th>摘要</th><th>類型</th><th></th></tr></thead><tbody id="pending-tbody">{valid_rows}</tbody></table></div>
       <div class="empty-block" id="pending-empty" style="display:none">全部已輔助填入 ✅</div>
@@ -566,7 +573,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     </section>
   </div>
 
-  <details class="paste-block">
+  <details class="paste-block" open>
     <summary>📋 貼上牌單建立審核</summary>
     <div class="paste-body">
       <textarea id="paste-input" placeholder="貼上 LINE / 聊天室牌單..."></textarea>
@@ -651,6 +658,8 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
 <script>
   var currentFilter = 'all';
   var dailyReportStats = {daily_report_stats};
+  // Server-rendered assist-panel sync candidates (same source as pending rows)
+  var assistSyncCandidates = {assist_sync_json};
 
   // ---- localStorage + review card state ----
   var batchId = (window.location.href.match(/queue_([^/.]+)\.json/) || [])[1]
@@ -1648,6 +1657,51 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       pendingSection.parentNode.insertBefore(banner, pendingSection.parentNode.querySelector('#pending-empty') || pendingSection.nextSibling);
       // Initial queue refresh
       refreshPendingQueue();
+
+      // Publish state to assist-panel via localStorage + BroadcastChannel
+      try {{
+        // Primary source: server-rendered sync data — the exact same list the
+        // pending rows were built from. DOM scraping below is only a fallback
+        // for legacy pages that lack assistSyncCandidates.
+        var validOut = [];
+        if (typeof assistSyncCandidates !== "undefined" && Array.isArray(assistSyncCandidates)) {{
+          validOut = assistSyncCandidates;
+        }}
+        if (!validOut.length) document.querySelectorAll("#pending-tbody .assist-btn").forEach(function(btn) {{
+            var nums = []; try {{ nums = JSON.parse(btn.getAttribute("data-numbers") || "[]"); }} catch(_) {{}}
+            var stars = []; try {{ stars = JSON.parse(btn.getAttribute("data-stars") || "[]"); }} catch(_) {{}}
+            var amts = {{}}; try {{ amts = JSON.parse(btn.getAttribute("data-amounts") || "{{}}"); }} catch(_) {{}}
+            var idx = btn.getAttribute("data-assist-index");
+            validOut.push({{
+              index: parseInt(idx) || 0,
+              raw: btn.getAttribute("data-fragment") || "",
+              summary: btn.getAttribute("data-summary") || "",
+              bet_type: btn.getAttribute("data-bet-type") || "normal",
+              numbers: nums,
+              stars: stars,
+              amounts: amts
+            }});
+        }});
+        var state = {{
+          queue_path: queuePath || (document.body.getAttribute("data-queue-path") || ""),
+          valid_candidates: validOut,
+          timestamp: Date.now()
+        }};
+        localStorage.setItem("betguard_assist_panel_state", JSON.stringify(state));
+        // Also POST to server (cross-browser sync)
+        try {{
+          fetch("/api/assist-panel/state", {{
+            method: "POST",
+            headers: {{"Content-Type": "application/json"}},
+            body: JSON.stringify(state)
+          }}).catch(function(e) {{ console.warn("assist-panel state POST failed:", e); }});
+        }} catch(e) {{}}
+        try {{
+          var ch = new BroadcastChannel("betguard_assist_panel");
+          ch.postMessage(state);
+          ch.close();
+        }} catch(e) {{}}
+      }} catch(e) {{}}
     }})();
   </script>
   <div id="history-side-panel" class="history-panel">
@@ -1831,16 +1885,15 @@ def _candidate_with_labels(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _candidate_row(item: dict[str, Any]) -> str:
-    idx = _e(str(item.get('index')))
-    fragment = _e(str(item.get('original_fragment')))
-    summary = _e(str(item.get('parsed_summary')))
-    bet_type = _e(str(item.get('bet_type')))
-    # Build assist-fill data attributes from the parsed result
+def _candidate_sync_entry(item: dict[str, Any]) -> dict[str, Any]:
+    """Build the assist-panel sync payload entry for one valid candidate.
+
+    Single source of truth shared by the pending-row HTML and the
+    localStorage/BroadcastChannel sync payload — both must always describe
+    the same item the same way.
+    """
     parsed = item.get("result", {}) or item.get("review_result", {}) or {}
-    numbers = json.dumps(parsed.get("numbers", []))
     stars_raw = parsed.get("stars", []) or []
-    stars = json.dumps(stars_raw)
 
     # Derive per-star amounts: bets > money expansion > explicit amounts
     result_amounts_raw = parsed.get("amounts", {}) or {}
@@ -1869,7 +1922,35 @@ def _candidate_row(item: dict[str, Any]) -> str:
             m = 0
         if m > 0:
             star_amounts = {str(int(s)): m for s in stars_raw}
-    amounts_json = json.dumps(star_amounts) if star_amounts else "{}"
+
+    try:
+        index = int(item.get("index"))
+    except (TypeError, ValueError):
+        index = 0
+    return {
+        "index": index,
+        "raw": str(item.get("original_fragment") or ""),
+        "summary": str(item.get("parsed_summary") or ""),
+        # Resolve from item first, then parsed result; never default an
+        # unknown type to "normal" — the panel only offers fill for normal.
+        "bet_type": str(
+            item.get("bet_type") or parsed.get("type") or parsed.get("bet_type") or ""
+        ),
+        "numbers": parsed.get("numbers", []) or [],
+        "stars": stars_raw,
+        "amounts": star_amounts,
+    }
+
+
+def _candidate_row(item: dict[str, Any]) -> str:
+    entry = _candidate_sync_entry(item)
+    idx = _e(str(item.get('index')))
+    fragment = _e(entry["raw"])
+    summary = _e(entry["summary"])
+    bet_type = _e(entry["bet_type"])
+    numbers = json.dumps(entry["numbers"])
+    stars = json.dumps(entry["stars"])
+    amounts_json = json.dumps(entry["amounts"]) if entry["amounts"] else "{}"
     return (
         f'<tr class="assist-row-{idx}">'
         f"<td>{idx}</td>"
