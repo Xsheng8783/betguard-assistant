@@ -311,12 +311,12 @@ def test_dashboard_and_sop_routes(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     with _running_server(handler) as port:
         conn = HTTPConnection("127.0.0.1", port, timeout=10)
         try:
-            # GET / (redirects to workbench)
+            # GET / (returns clean dashboard HTML)
             conn.request("GET", "/")
             r = conn.getresponse()
-            assert r.status == 302
+            assert r.status == 200
             body = r.read().decode("utf-8")
-            assert "/workbench" in r.getheader("Location", "")
+            assert "Betguard 本地審核台" in body or "待輔助填入" in body
 
             # GET /workbench
             conn.request("GET", "/workbench")
@@ -478,15 +478,16 @@ def _get(port: int, path: str) -> tuple[int, str]:
 
 
 # K-1: dashboard has a /history link
-def test_dashboard_redirects_to_workbench(tmp_path: Path) -> None:
+def test_dashboard_shows_clean_homepage(tmp_path: Path) -> None:
     handler = build_workbench_handler(project_version="v0.5", git_commit="abc")
     with _running_server(handler) as port:
-        # / redirects to /workbench
+        # / returns clean dashboard (no old review data)
         conn = HTTPConnection("127.0.0.1", port, timeout=10)
         conn.request("GET", "/")
         r = conn.getresponse()
-        assert r.status == 302
-        assert "/workbench" in r.getheader("Location", "")
+        assert r.status == 200
+        body = r.read().decode("utf-8")
+        assert "待輔助填入" in body
 
 
 # K-2: /history with no orders.jsonl shows the empty state
