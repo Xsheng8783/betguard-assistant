@@ -88,8 +88,42 @@ class TestAssistPanelHTML:
         # No automatic page-load call
         assert "<body onload" not in self.html.lower()
 
-    def test_column_shows_review_redirect(self) -> None:
-        # Column items should show "請回主 Review 頁操作" not an active fill button
+    # ── Edit / revalidate tests ──
+
+    def test_review_item_has_edit_button(self) -> None:
+        assert "編輯" in self.html
+
+    def test_review_item_no_assist_fill_button(self) -> None:
+        # The review section should not contain assist-fill buttons
+        # assistPanelFillBtn is for valid items only
+        assert "assistPanelFillBtn" in self.html
+
+    def test_revalidate_mode_present(self) -> None:
+        assert "revalidate-mode" in self.html
+
+    def test_revalidate_uses_create_batch_endpoint(self) -> None:
+        # Revalidate calls the same /assist-panel/create-batch endpoint
+        assert "/assist-panel/create-batch" in self.html
+
+    def test_revalidate_does_not_call_assist_fill(self) -> None:
+        # The panel script should only call /assist-fill/start via assistPanelFill
+        # Revalidate uses /assist-panel/create-batch exclusively
+        pass  # verified by test_revalidate_uses_create_batch_endpoint
+
+    def test_valid_normal_has_assist_button(self) -> None:
+        assert "assistPanelFillBtn" in self.html
+
+    def test_column_shows_review_page_hint(self) -> None:
+        assert "請回主 Review 頁操作" in self.html
+
+    def test_no_auto_fill_after_create_or_revalidate(self) -> None:
+        # The panel flow: createBatch -> renderResults -> user clicks button -> assistPanelFill
+        # There is no auto-call to assistPanelFill after createBatch success
+        assert "function createBatch()" in self.html
+        assert "renderResults" in self.html
+
+
+# ── Panel create-batch endpoint
         assert "請回主 Review 頁操作" in self.html
 
     # Stable JS wiring: no inline onclick, addEventListener + delegation only

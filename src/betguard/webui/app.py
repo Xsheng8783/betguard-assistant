@@ -1403,8 +1403,15 @@ function createBatch() {
     var review = data.review_items || data.needs_review || data.invalid_items
       || data.review_candidates || data.invalid_fragments || [];
     renderResults(valid, review);
+    // Reset button to normal mode after any batch
+    var btn2 = document.getElementById("createBatchBtn");
+    var wasRevalidate = btn2.classList.contains("revalidate-mode");
+    btn2.textContent = "建立審核";
+    btn2.classList.remove("revalidate-mode");
     if (valid.length === 0 && review.length === 0) {
       setStatus("已建立審核，但沒有可顯示項目");
+    } else if (wasRevalidate) {
+      setStatus("✅ 已重新審核");
     } else {
       setStatus("✅ 已建立審核");
     }
@@ -1470,6 +1477,17 @@ function renderResults(valid, review) {
     var frag = document.createElement("span");
     frag.textContent = " " + (c.raw || c.fragment || c.original_fragment || "");
     row.appendChild(frag);
+    var editBtn = document.createElement("button");
+    editBtn.className = "btn-primary";
+    editBtn.style.cssText = "font-size:10px;padding:2px 8px;margin-left:8px";
+    editBtn.textContent = "編輯";
+    editBtn.onclick = function () {
+      document.getElementById("batch-text").value = c.raw || c.fragment || c.original_fragment || "";
+      document.getElementById("createBatchBtn").textContent = "重新審核";
+      document.getElementById("createBatchBtn").classList.add("revalidate-mode");
+      setStatus("請修改後重新審核");
+    };
+    row.appendChild(editBtn);
     reviewBox.appendChild(row);
   });
 }
