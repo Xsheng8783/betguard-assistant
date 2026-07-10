@@ -1,7 +1,7 @@
 ; Inno Setup script for Betguard Assistant v0.5.34-beta
 
 #define MyAppName "Betguard Assistant"
-#define MyAppVersion "0.5.34-beta"
+#define MyAppVersion "0.5.35-beta"
 #define MyAppPublisher "Betguard"
 #define MyAppURL "http://127.0.0.1:8765"
 #define MyAppExeName "BetguardAssistant.exe"
@@ -16,7 +16,7 @@ DisableDirPage=no
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 OutputDir=..\release
-OutputBaseFilename=Betguard-Assistant-v0.5.34-beta-Setup
+OutputBaseFilename=Betguard-Assistant-v0.5.35-beta-Setup
 Compression=lzma2
 SolidCompression=no
 WizardStyle=modern
