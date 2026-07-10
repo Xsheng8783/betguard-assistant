@@ -66,6 +66,78 @@ def _fast_select_numbers_knockout(page: Any, numbers: list[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
+
+def _verify_filled_amounts(
+    expected_amounts: dict[int, int],
+    filled: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Pure function: verify filled amounts against expected, no Playwright needed."""
+    if not expected_amounts:
+        return {"amounts_verified": False, "missing_amount_stars": [], "amount_mismatches": [],
+                "error": "no expected amounts"}
+    if not filled:
+        missing = sorted(expected_amounts.keys())
+        return {"amounts_verified": False, "missing_amount_stars": missing, "amount_mismatches": [],
+                "error": "no filled results"}
+
+    # Build result map — detect duplicate stars
+    seen: set[int] = set()
+    duplicates: list[int] = []
+    result_map: dict[int, dict[str, Any]] = {}
+    for a in filled:
+        s = a.get("star")
+        if s is None:
+            continue
+        star_i = int(s)
+        if star_i in seen:
+            duplicates.append(star_i)
+        seen.add(star_i)
+        if star_i not in result_map:
+            result_map[star_i] = a
+
+    amounts_verified = True
+    missing_amount_stars: list[int] = []
+    amount_mismatches: list[dict[str, Any]] = []
+
+    for star_i, expected in sorted(expected_amounts.items()):
+        ar = result_map.get(star_i)
+        if ar is None:
+            amounts_verified = False
+            missing_amount_stars.append(star_i)
+            continue
+        executed = bool(ar.get("executed"))
+        verified = bool(ar.get("verified", False))  # safe default: False
+        actual = str(ar.get("actual_amount", ""))
+        if not executed or not verified:
+            amounts_verified = False
+            amount_mismatches.append({
+                "star": star_i, "expected": expected, "actual": actual,
+                "executed": executed, "verified": verified,
+            })
+            continue
+        actual_norm = actual.strip().lstrip("0") or "0"
+        expected_norm = str(expected).lstrip("0") or "0"
+        if actual_norm != expected_norm:
+            amounts_verified = False
+            amount_mismatches.append({
+                "star": star_i, "expected": expected, "actual": actual,
+                "executed": True, "verified": True,
+                "error": "amount readback mismatch",
+            })
+
+    if duplicates:
+        amounts_verified = False
+        amount_mismatches.append({
+            "error": "duplicate star results", "stars": duplicates,
+        })
+
+    return {
+        "amounts_verified": amounts_verified,
+        "missing_amount_stars": missing_amount_stars,
+        "amount_mismatches": amount_mismatches,
+    }
+
+
 def _fill_amounts_on_b03(page: Any, amounts: dict[str, int]) -> list[dict[str, Any]]:
     """Fill per-star amounts via Playwright on the B03 frame.
 
@@ -90,12 +162,39 @@ def _fill_amounts_on_b03(page: Any, amounts: dict[str, int]) -> list[dict[str, A
                 loc = frame.locator(amount_css).nth(position)
             star_name = STAR_NAMES.get(star, str(star))
             loc.fill(str(amt))
+            # Readback: re-locate and read actual input value
+            actual = ""
+            verified = False
+            try:
+                loc.dispatch_event("input")
+                loc.dispatch_event("change")
+                loc.blur()
+                # Wait for knockout re-render (sync Playwright API)
+                page.wait_for_timeout(50)
+                if frame is None:
+                    rloc = page.locator(amount_css).nth(position)
+                else:
+                    rloc = frame.locator(amount_css).nth(position)
+                actual = str(rloc.input_value() or "")
+                verified = (actual.strip().lstrip("0") or "0") == (str(amt).lstrip("0") or "0")
+            except Exception:
+                try:
+                    # Last resort: evaluate JS to read value
+                    actual = str(loc.evaluate("el => el.value") or "")
+                    verified = (actual.strip().lstrip("0") or "0") == (str(amt).lstrip("0") or "0")
+                except Exception:
+                    actual = ""
+                    verified = False
             executed.append({
                 "type": "SET_AMOUNT",
                 "star": star,
                 "star_name": star_name,
                 "amount": amt,
+                "expected_amount": amt,
+                "actual_amount": actual,
+                "position": position,
                 "executed": True,
+                "verified": verified,
             })
         except Exception as exc:
             executed.append({

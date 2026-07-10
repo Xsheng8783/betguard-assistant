@@ -1422,8 +1422,11 @@ button{font-size:12px;padding:6px 14px;border-radius:6px;border:none;cursor:poin
 .item.muted{color:#94a3b8}
 .assist-fill-btn{background:#2563eb;color:#fff;margin-left:8px;font-size:10px;padding:2px 8px}
 .assist-fill-btn:disabled{background:#94a3b8;cursor:not-allowed}
-.fill-status{font-size:10px;color:#64748b;margin-left:4px}
-.muted-note{font-size:10px;color:#94a3b8;margin-left:8px}
+.muted{{color:#94a3b8;font-size:11px}}
+.muted-note{{font-size:10px;color:#94a3b8;margin-left:8px}}
+.item.assist-completed{{opacity:0.55;background:#f1f5f9}}
+.completed-bar{{display:flex;align-items:center;gap:8px;padding:4px 0;font-size:11px}}
+.completed-bar button:disabled{{opacity:0.4;cursor:not-allowed}}
 .status{font-size:11px;color:#64748b;margin-top:4px}
 .footer{font-size:10px;color:#94a3b8;text-align:center;margin-top:12px}
 </style>
@@ -1435,6 +1438,10 @@ button{font-size:12px;padding:6px 14px;border-radius:6px;border:none;cursor:poin
 <div class="status" id="status-msg"></div>
 <div class="section">
  <h2>可輔助填入 <span class="badge badge-valid" id="valid-count">0</span></h2>
+ <div class="completed-bar">
+   <span style="font-size:10px;color:#64748b">已輔助填入：<strong id="completed-count">0</strong> 筆</span>
+   <button id="clear-completed-btn" style="font-size:10px;padding:2px 8px;border:1px solid #e2e8f0;border-radius:4px;background:#fff;cursor:pointer" disabled onclick="clearCompleted()">清除已反灰</button>
+ </div>
  <div id="valid-items"></div>
 </div>
 <div class="section">
@@ -1654,6 +1661,19 @@ function emptyRow() {
   return d;
 }
 
+function updateCompletedCount() {
+  var cnt = document.querySelectorAll("#valid-items .item.assist-completed").length;
+  document.getElementById("completed-count").textContent = cnt;
+  var btn = document.getElementById("clear-completed-btn");
+  btn.disabled = (cnt === 0);
+}
+function clearCompleted() {
+  document.querySelectorAll("#valid-items .item.assist-completed").forEach(function (el) {
+    el.parentNode.removeChild(el);
+  });
+  updateCompletedCount();
+}
+
 function assistPanelFillBtn(btn) {
   var queuePath = btn.getAttribute("data-queue-path") || panelState.queuePath;
   var itemIndex = parseInt(btn.getAttribute("data-item-index"), 10);
@@ -1689,27 +1709,67 @@ function assistPanelFill(queuePath, itemIndex, betType, manualId, btn, statusEl)
       show("❌ 回應不是有效 JSON");
       return;
     }
-    if (data.ok) {
-      show("✅ 已輔助填入，請在真站人工確認後再送出");
-      if (btn) { btn.textContent = "已填入"; }
-      // Remove the item from the valid list after 2s
+    // Defensive: normal bets require full amount verification; column keeps existing contract
+    var betType = (btn ? btn.getAttribute("data-bet-type") : "") || "normal";
+    var isColumn = (betType === "column" || betType === "zhu_peng");
+    var reallyOk;
+    if (isColumn) {
+      // Column/zhu_peng: keep existing success contract (no amounts_verified required)
+      reallyOk = data.ok === true;
+    } else {
+      // Normal: require ok + amounts_verified + no missing targets/stars
+      reallyOk = data.ok === true
+        && data.amounts_verified !== false
+        && (!data.missing_targets || data.missing_targets.length === 0)
+        && (!data.missing_amount_stars || data.missing_amount_stars.length === 0)
+        && (!data.amount_mismatches || data.amount_mismatches.length === 0);
+    }
+    if (reallyOk) {
+      show("已輔助填入，請確認真站");
+      // Gray-out: add assist-completed class, show re-fill + remove buttons
       var row = btn.closest(".item");
       if (row) {
-        setTimeout(function () {
-          row.style.transition = "opacity 0.3s";
-          row.style.opacity = "0";
-          setTimeout(function () {
-            row.parentNode.removeChild(row);
-            // Update count
-            var vc = document.getElementById("valid-items");
-            var remaining = vc.querySelectorAll(".item:not([style*='opacity: 0'])").length;
-            document.getElementById("valid-count").textContent = remaining;
-          }, 300);
-        }, 2000);
+        row.classList.add("assist-completed");
+        // Replace fill button area with status + actions
+        var td = btn.parentElement;
+        btn.textContent = "✓ 已填";
+        btn.style.background = "#059669";
+        btn.onclick = function () { td.removeChild(btn); assistPanelFillBtn(setupNewFillBtn(row)); };
+        // Add re-fill button
+        var reBtn = document.createElement("button");
+        reBtn.className = "assist-fill-btn";
+        reBtn.textContent = "重填";
+        reBtn.style.cssText = "font-size:10px;padding:2px 6px;margin-left:4px;background:#f59e0b";
+        reBtn.onclick = function () {
+          row.classList.remove("assist-completed");
+          updateCompletedCount();
+          assistPanelFillBtn(btn);
+        };
+        td.appendChild(reBtn);
+        // Add remove button
+        var rmBtn = document.createElement("button");
+        rmBtn.textContent = "移除";
+        rmBtn.style.cssText = "font-size:10px;padding:2px 6px;margin-left:4px;background:#ef4444;color:#fff;border:none;border-radius:3px;cursor:pointer";
+        rmBtn.onclick = function () {
+          row.parentNode.removeChild(row);
+          updateCompletedCount();
+        };
+        td.appendChild(rmBtn);
+        updateCompletedCount();
       }
     } else {
       if (btn) { btn.disabled = false; }
       var err = data.error || "未知錯誤";
+      var extra = [];
+      if (data.missing_targets && data.missing_targets.length > 0)
+        extra.push("缺號: " + data.missing_targets.join(", "));
+      if (data.missing_amount_stars && data.missing_amount_stars.length > 0)
+        extra.push("缺星別: " + data.missing_amount_stars.join(", "));
+      if (data.amount_mismatches && data.amount_mismatches.length > 0)
+        extra.push("金額不符: " + data.amount_mismatches.map(function (m) { return m.star + "星預期" + m.expected + "/實際" + m.actual; }).join(", "));
+      if (data.amounts_verified === false) extra.push("金額驗證失敗");
+      if (extra.length > 0) err = err + " (" + extra.join("; ") + ")";
+      if (!data.ok) err = "❌ " + err;
       if (data.missing_targets && data.missing_targets.length) {
         err += " 缺號:" + data.missing_targets.join(",");
       }

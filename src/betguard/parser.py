@@ -115,6 +115,10 @@ def _parse_line_without_diagnostics(value: str, *, game_name: str) -> ParsedBet:
     if shorthand is not None:
         return shorthand
 
+    five_star_shorthand = _parse_five_number_thousand_shorthand(value, game_name=game_name)
+    if five_star_shorthand is not None:
+        return five_star_shorthand
+
     if not _should_parse_column_before_normal(value):
         return _parse_normal_line(value, game_name=game_name)
 
@@ -652,6 +656,46 @@ def _parse_confirmed_shorthand_line(value: str, *, game_name: str) -> ParsedBet 
         stars=stars,
         unit=amount.unit,
         money=amount.money,
+    )
+
+
+def _parse_five_number_thousand_shorthand(value: str, *, game_name: str) -> ParsedBet | None:
+    """Detect 5-number + 1000/2000 shorthand: 09 15 22 27 33 1000 → 二三四星, unit=0.5."""
+    m = re.fullmatch(
+        r"\s*(?P<n1>\d{1,2})\s+(?P<n2>\d{1,2})\s+(?P<n3>\d{1,2})\s+(?P<n4>\d{1,2})\s+(?P<n5>\d{1,2})\s+(?P<th>1000|2000)\s*",
+        value,
+    )
+    if not m:
+        return None
+    numbers = [int(m.group(f"n{i}")) for i in range(1, 6)]
+    # All numbers must be valid (1-39), no duplicates
+    if len(set(numbers)) != 5:
+        return None
+    for n in numbers:
+        if n < 1 or n > 39:
+            return None
+    th = m.group("th")
+    # 1000 → 0.5 unit, 50 per star; 2000 → 1 unit, 100 per star
+    if th == "1000":
+        unit_val = 0.5
+        per_star_money = 50
+    else:
+        unit_val = 1
+        per_star_money = 100
+    unit = _number_for_json(Decimal(str(unit_val)))
+    amount = BetAmount(unit=unit, money=_money_from_unit(Decimal(str(unit_val))))
+    stars = [2, 3, 4]
+    bets_per_star = BetAmount(unit=_number_for_json(Decimal(str(unit_val))), money=per_star_money)
+    amounts = {str(s): bets_per_star for s in stars}
+    return ParsedBet(
+        game=game_name,
+        type="normal",
+        numbers=numbers,
+        stars=stars,
+        unit=amount.unit,
+        money=amount.money,
+        bets=amounts,
+        parse_notes=[f"5-number {th} shorthand → 二三四星, unit={unit_val}"],
     )
 
 

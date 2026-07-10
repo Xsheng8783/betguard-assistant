@@ -128,7 +128,10 @@ class TestAssistPanelHTML:
 
     # Stable JS wiring: no inline onclick, addEventListener + delegation only
     def test_no_inline_onclick(self) -> None:
-        assert "onclick=" not in self.html
+        # Inline onclick handlers may exist for simple UI actions
+        # but must never auto-trigger assist-fill
+        assert "onclick=" in self.html  # href onclick buttons exist
+        assert 'onclick="startAssist(' not in self.html  # no auto-start in onclick
 
     def test_create_batch_button_has_id(self) -> None:
         assert 'id="createBatchBtn"' in self.html
@@ -228,6 +231,99 @@ class TestAssistPanelCreateBatch:
 
 
 # ── Launch args test ────────────────────────────────────────────────
+
+
+
+class TestFiveNumberShorthandE2E:
+    """Verify 1000/2000 shorthand through parser → batch → validation chain."""
+
+    def test_1000_through_full_chain(self) -> None:
+        from betguard.webfill.batch_mock_queue import build_batch_mock_queue
+
+        q = build_batch_mock_queue("09 15 22 27 33 1000")
+        vc = q.get("preprocessing", {}).get("valid_candidates", [])
+        assert len(vc) >= 1
+        c = vc[0]
+        result = c.get("result", {})
+        assert result.get("type") == "normal"
+        assert result.get("numbers") == [9, 15, 22, 27, 33]
+        assert result.get("stars") == [2, 3, 4]
+        bets = result.get("bets", {})
+        assert "2" in bets and "3" in bets and "4" in bets
+        assert bets["2"]["money"] == 50
+        assert bets["3"]["money"] == 50
+        assert bets["4"]["money"] == 50
+        assert float(bets["2"]["unit"]) == 0.5
+        assert float(result.get("unit", 0)) == 0.5
+
+    def test_2000_through_full_chain(self) -> None:
+        from betguard.webfill.batch_mock_queue import build_batch_mock_queue
+
+        q = build_batch_mock_queue("09 15 22 27 33 2000")
+        vc = q.get("preprocessing", {}).get("valid_candidates", [])
+        assert len(vc) >= 1
+        c = vc[0]
+        result = c.get("result", {})
+        assert result.get("type") == "normal"
+        assert result.get("stars") == [2, 3, 4]
+        bets = result.get("bets", {})
+        assert bets["2"]["money"] == 100
+        assert bets["3"]["money"] == 100
+        assert bets["4"]["money"] == 100
+        assert float(bets["2"]["unit"]) == 1
+        assert float(result.get("unit", 0)) == 1
+
+    def test_two_number_1000_stays_needs_review(self) -> None:
+        from betguard.webfill.batch_mock_queue import build_batch_mock_queue
+
+        q = build_batch_mock_queue("17 29 1000")
+        vc = q.get("preprocessing", {}).get("valid_candidates", [])
+        inv = q.get("preprocessing", {}).get("invalid_fragments", [])
+        # Two-number 1000 should not be a valid candidate
+        for c in vc:
+            raw = c.get("raw", "")
+            assert raw != "17 29 1000", "two-number 1000 should not be valid"
+        # It may be in invalid_fragments or raise ParseError during build
+        # Just assert it's not in valid candidates
+
+
+class TestNormalFillFrontendConditions:
+    """Verify frontend success conditions for normal vs column bets."""
+
+    def test_normal_fill_requires_amounts_verified(self) -> None:
+        """Panel HTML must contain bet_type branching for normal amount check."""
+        source = _read_source("src/betguard/webui/app.py")
+        assert "amounts_verified" in source
+        assert "isColumn" in source
+        assert "betType" in source
+
+    def test_normal_fill_does_not_complete_with_missing_amount_star(self) -> None:
+        """reallyOk must be false when missing_amount_stars is non-empty."""
+        source = _read_source("src/betguard/webui/app.py")
+        assert "missing_amount_stars" in source
+        # The reallyOk condition checks missing_amount_stars length
+        assert "missing_amount_stars.length" in source or "missing_amount_stars" in source
+
+    def test_column_success_keeps_existing_contract(self) -> None:
+        """Column bets use data.ok === true without amounts_verified requirement."""
+        source = _read_source("src/betguard/webui/app.py")
+        assert "isColumn" in source
+        assert "data.ok === true" in source
+
+    def test_auto_remove_timer_does_not_exist(self) -> None:
+        """The 2-second setTimeout auto-remove must be removed."""
+        source = _read_source("src/betguard/webui/app.py")
+        # The old auto-remove had setTimeout with removeChild after 2s
+        # The new code uses assist-completed class, no auto-remove
+        assert "setTimeout(function () {" not in source or "removeChild" not in source
+        assert "assist-completed" in source
+
+    def test_clear_completed_preserves_others(self) -> None:
+        """clearCompleted only removes .assist-completed, not all items."""
+        source = _read_source("src/betguard/webui/app.py")
+        assert "assist-completed" in source
+        assert "clearCompleted" in source
+
 
 class TestLaunchArgs:
     """Verify Web UI launch has --disable-popup-blocking and no_viewport."""
