@@ -152,7 +152,7 @@ class TestAssistPanelHTML:
         assert "assistPanelFillBtn" in self.html
 
     def test_fill_button_uses_data_attributes(self) -> None:
-        assert "data-manual-candidate-id" in self.html
+        assert "data-queue-path" in self.html and "data-item-index" in self.html
 
 
         assert "data-bet-type" in self.html
@@ -485,7 +485,7 @@ class TestManualCandidateFlow:
         assert result.get("source") == "manual_correction"
 
     def test_panel_html_has_data_manual_id(self) -> None:
-        assert "data-manual-candidate-id" in TestAssistPanelHTML.html
+        assert "data-queue-path" in TestAssistPanelHTML.html and "data-item-index" in TestAssistPanelHTML.html
 
     def test_panel_html_uses_manual_candidate_id(self) -> None:
         """Panel JS must read d.manual_candidate_id, not d.manual_id."""
@@ -519,3 +519,10 @@ def _read_source(path: str) -> str:
         assert "fetch(" not in mark_handled_fn
         assert "XMLHttpRequest" not in mark_handled_fn
         assert "http" not in mark_handled_fn.lower()
+    def test_fill_button_has_queue_path_and_item_index(self) -> None:
+        """Regression: batch items must use data-queue-path + data-item-index,
+        not a made-up manual_candidate_id like idx0."""
+        assert "data-queue-path" in self.html
+        assert "data-item-index" in self.html
+        # Must NOT use idx0/idxi fallback
+        assert "idx0" not in self.html or "data-queue-path" in self.html

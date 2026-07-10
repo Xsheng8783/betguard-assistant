@@ -105,25 +105,26 @@ function renderValid(items) {
   if (!items.length) { container.innerHTML = '<div class="muted">目前沒有可輔助填入項目</div>'; return; }
   var html = "";
   items.forEach(function (c, i) {
-    var cid = c.manual_candidate_id || ("idx" + i);
+    var itemId = c.manual_candidate_id || ("item-" + i);
     var nums = (c.numbers || []).join(", ");
     var stars = (c.stars || []).join("") + "星";
     var unit = c.unit != null ? c.unit + "支" : "";
     var money = c.money != null ? c.money + "元" : "";
     var summary = c.summary || nums;
     var betType = c.bet_type || c.type || "normal";
-    html += '<div class="item" id="valid-item-' + cid + '">'
+    var idx = c.index != null ? c.index : (c.item_index != null ? c.item_index : i);
+    html += '<div class="item" id="valid-item-' + itemId + '">'
       + '<div><strong>' + (nums || summary) + '</strong></div>'
       + '<div style="font-size:14px;color:#64748b">' + betType + ' | ' + stars;
     if (unit) html += ' | ' + unit;
     if (money) html += ' | ' + money;
     html += '</div>'
       + '<button class="assist-fill-btn" onclick="assistPanelFillBtn(this)"'
-      + ' data-manual-candidate-id="' + cid + '"'
-      + ' data-bet-type="' + betType + '"'
-      + ' data-numbers="' + JSON.stringify(c.numbers || []) + '"'
-      + ' data-stars="' + JSON.stringify(c.stars || []) + '"'
-      + ' data-amounts="' + JSON.stringify(c.amounts || {}) + '">輔助填入</button>'
+      + ' data-queue-path="' + panelState.queuePath + '"'
+      + ' data-item-index="' + idx + '"'
+      + ' data-bet-type="' + betType + '"';
+    if (c.manual_candidate_id) html += ' data-manual-id="' + c.manual_candidate_id + '"';
+    html += '>輔助填入</button>'
       + '</div>';
   });
   container.innerHTML = html;
@@ -208,25 +209,24 @@ function clearCompleted() {
 }
 
 function assistPanelFillBtn(btn) {
-  var cid = btn.getAttribute("data-manual-candidate-id");
-  var betType = btn.getAttribute("data-bet-type");
-  var numbers = JSON.parse(btn.getAttribute("data-numbers") || "[]");
-  var stars = JSON.parse(btn.getAttribute("data-stars") || "[]");
-  var amounts = JSON.parse(btn.getAttribute("data-amounts") || "{}");
+  var queuePath = btn.getAttribute("data-queue-path") || panelState.queuePath;
+  var itemIndex = parseInt(btn.getAttribute("data-item-index"), 10);
+  var betType = btn.getAttribute("data-bet-type") || "normal";
+  var manualId = btn.getAttribute("data-manual-id") || "";
   btn.disabled = true;
   btn.textContent = "處理中...";
+  var body;
+  if (manualId) {
+    body = JSON.stringify({ manual_candidate_id: manualId, bet_type: betType });
+  } else {
+    body = JSON.stringify({ queue_path: queuePath, item_index: itemIndex, bet_type: betType });
+  }
   fetch("/assist-fill/start", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      manual_candidate_id: cid,
-      bet_type: betType,
-      numbers: numbers,
-      stars: stars,
-      amounts: amounts
-    })
+    body: body
   }).then(function (r) { return r.json(); }).then(function (data) {
-    var row = document.getElementById("valid-item-" + cid);
+    var row = btn.parentElement;
     var isColumn = (betType === "column" || betType === "zhu_peng" || betType === "zhupeng");
     var reallyOk = isColumn ? (data.ok === true) : (data.ok === true && data.amounts_verified === true && !(data.missing_targets && data.missing_targets.length) && !(data.missing_amount_stars && data.missing_amount_stars.length));
     if (reallyOk && row) {
