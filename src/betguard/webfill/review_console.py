@@ -315,6 +315,8 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       font-size: 11px; padding: 3px 8px; border-radius: 6px; cursor: pointer;
       border: 1px solid #e2e8f0; background: #fff; white-space: nowrap;
     }}
+    .btn-copy-text {{ font-size:11px;padding:3px 8px;border:1px solid #cbd5e1;border-radius:4px;background:#f8fafc;color:#475569;cursor:pointer; }}
+    .btn-copy-text:hover {{ background:#e2e8f0; }}
     .btn-state-done.active {{ background: #059669; color: #fff; border-color: #059669; }}
     .btn-state-manual.active {{ background: #2563eb; color: #fff; border-color: #2563eb; }}
     .btn-edit {{ color: #64748b; }}
@@ -591,9 +593,11 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
         <span class="stat-chip">📊 共 <strong>{comfort["total_count"]}</strong> 筆</span>
         <span class="stat-chip green">✅ 可填入 <strong>{comfort["assistable_count"]}</strong></span>
         <span class="stat-chip blue">📝 未處理 <strong>{comfort["unprocessed_count"]}</strong></span>
-        <span class="stat-chip red">⚠️ 需確認 <strong>{comfort["needs_review_count"]}</strong></span>
+        <span class="stat-chip red needs-total">⚠️ 需確認 <strong>{comfort["needs_review_count"]}</strong></span>
         <span class="stat-chip amber">👀 Watchlist <strong>{comfort["watchlist_count"]}</strong></span>
         <span class="stat-chip">❌ Invalid <strong>{comfort["invalid_count"]}</strong></span>
+        <span class="stat-chip needs-unprocessed" style="font-size:11px"><strong>0</strong> 筆待手動處理</span>
+        <span class="stat-chip needs-processed" style="font-size:11px;color:#64748b"><strong>0</strong> 筆已手動處理</span>
       </div>
     </section>
     <section class="safety-card">
@@ -664,7 +668,8 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
   // ---- localStorage + review card state ----
   var batchId = (window.location.href.match(/queue_([^/.]+)\.json/) || [])[1]
     || (window.location.href.match(/review_([^/.]+)\.html/) || [])[1]
-    || 'betguard-' + Date.now();
+    || (document.body.getAttribute('data-queue-path') || '').replace(/[^a-zA-Z0-9_\-]/g, '_').substring(0, 64)
+    || 'betguard-' + location.pathname.replace(/[^a-zA-Z0-9_\-]/g, '_').substring(0, 64);
   var cardStateKey = 'betguard-card-state-' + batchId;
   function loadCardStates() {{
     try {{ return JSON.parse(localStorage.getItem(cardStateKey) || '{{}}'); }} catch(e) {{ return {{}}; }}
@@ -679,6 +684,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     else {{ states[String(idx)] = state; }}
     saveCardStates(states);
     updateCardButtons(idx);
+    updateReviewCounts();
   }}
   function updateCardButtons(idx) {{
     var card = document.querySelector('.review-card[data-batch-id="' + idx + '"]');
@@ -694,10 +700,45 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
   function toggleCardState(idx, newState) {{
     var cur = getCardState(idx);
     setCardState(idx, cur === newState ? null : newState);
+    updateReviewCounts();
+  }}
+  function copyCardText(idx, evt) {{
+    var card = document.querySelector('.review-card[data-batch-id="' + idx + '"]');
+    if (!card) return;
+    var frag = card.getAttribute('data-fragment') || '';
+    if (!frag) return;
+    // Use Clipboard API
+    if (navigator.clipboard && navigator.clipboard.writeText) {{
+      navigator.clipboard.writeText(frag).then(function () {{
+        var btn = evt.target;
+        var orig = btn.textContent;
+        btn.textContent = '✅ 已複製';
+        btn.style.color = '#059669';
+        setTimeout(function () {{ btn.textContent = orig; btn.style.color = ''; }}, 1500);
+      }}).catch(function () {{ prompt('請手動複製:', frag); }});
+    }} else {{
+      prompt('請手動複製:', frag);
+    }}
+  }}
+  function updateReviewCounts() {{
+    var total = 0, unprocessed = 0, processed = 0;
+    document.querySelectorAll('.review-card[data-batch-id]').forEach(function (c) {{
+      var s = getCardState(c.getAttribute('data-batch-id'));
+      total++;
+      if (s === 'done' || s === 'manual') processed++;
+      else unprocessed++;
+    }});
+    var totalEl = document.querySelector('.stat-chip.needs-total strong');
+    var unprocEl = document.querySelector('.stat-chip.needs-unprocessed strong');
+    var procEl = document.querySelector('.stat-chip.needs-processed strong');
+    if (totalEl) totalEl.textContent = total;
+    if (unprocEl) unprocEl.textContent = unprocessed;
+    if (procEl) procEl.textContent = processed;
   }}
   (function() {{
     var states = loadCardStates();
     Object.keys(states).forEach(function(idx) {{ updateCardButtons(idx); }});
+    updateReviewCounts();
   }})();
   // ---- edit panel ----
   function toggleEditPanel(idx) {{
@@ -1779,6 +1820,7 @@ def _review_card(item: dict[str, Any], kind: str) -> str:
         f"<div style='text-align:left'><strong>原因：</strong>{reason}</div>"
         f"</details>"
         f"<div class='card-state-btns'>"
+        f"<button class='btn-copy-text' onclick=\"copyCardText('{idx}',event)\">📋 複製原文</button>"
         f"<button class='btn-state-done' onclick=\"toggleCardState('{idx}','done')\">✓ 已處理</button>"
         f"<button class='btn-state-manual' onclick=\"toggleCardState('{idx}','manual')\">✏️ 已手動下注</button>"
         f"<button class='btn-edit' onclick=\"toggleEditPanel('{idx}')\">[編輯修正]</button>"

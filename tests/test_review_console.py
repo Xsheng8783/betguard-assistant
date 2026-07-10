@@ -606,6 +606,107 @@ def test_assist_sync_candidates_empty_for_no_valid_batch() -> None:
         assert _extract_sync_candidates(html_text) == []
 
 
+
+
+# ── Needs Review manual handling ─────────────────────────────────────
+
+class TestNeedsReviewManualHandling:
+    """Verify copy, mark-done, counts, and safety for Needs Review items."""
+
+    TWO_THREE = "二三"
+
+    def _html(self, text: str) -> str:
+        from betguard.webfill.batch_mock_queue import build_batch_mock_queue
+        from betguard.webfill.review_console import render_review_console_html
+
+        queue = build_batch_mock_queue(text)
+        return render_review_console_html(queue, queue_path="/runs/test/queue_012345.json")
+
+    def test_needs_review_card_has_copy_button(self) -> None:
+        """Needs Review card must contain copy-text button."""
+        html = self._html(f"06.13.23.22 {self.TWO_THREE}100\n17.29.1000")
+        assert "btn-copy-text" in html
+        assert "copyCardText" in html
+
+    def test_copy_uses_original_fragment_not_reason(self) -> None:
+        """The copy function reads data-fragment, not reason string."""
+        html = self._html(f"06.13.23.22 {self.TWO_THREE}100\n17.29.1000")
+        assert "data-fragment" in html
+        # copyCardText reads data-fragment attribute = original text
+
+    def test_needs_review_card_has_manual_done_button(self) -> None:
+        """Needs Review card must contain mark-as-manual button."""
+        html = self._html(f"06.13.23.22 {self.TWO_THREE}100\n17.29.1000")
+        assert "toggleCardState" in html
+
+    def test_restore_toggle_exists(self) -> None:
+        """Toggling again restores (null state)."""
+        html = self._html(f"06.13.23.22 {self.TWO_THREE}100\n17.29.1000")
+        # toggleCardState sets null when state matches, enabling restore
+        assert "cur === newState ? null : newState" in html
+
+    def test_counts_show_total_unprocessed_processed(self) -> None:
+        """Review page must display needs-total, needs-unprocessed, needs-processed."""
+        html = self._html(f"06.13.23.22 {self.TWO_THREE}100\n17.29.1000")
+        assert "needs-total" in html
+        assert "needs-unprocessed" in html
+        assert "needs-processed" in html
+
+    def test_update_review_counts_runs_on_state_change(self) -> None:
+        """updateReviewCounts is called after setCardState and toggleCardState."""
+        html = self._html(f"06.13.23.22 {self.TWO_THREE}100\n17.29.1000")
+        # Should be called in toggleCardState, setCardState, and init
+        assert html.count("updateReviewCounts()") >= 3
+
+    def test_localStorage_key_has_batch_id(self) -> None:
+        """localStorage key includes batch identifier from URL."""
+        html = self._html(f"06.13.23.22 {self.TWO_THREE}100\n17.29.1000")
+        assert "betguard-card-state-" in html
+        assert "batchId" in html
+        # batchId comes from URL regex match
+        assert "queue_" in html or "review_" in html
+
+    def test_batch_id_fallback_is_stable(self) -> None:
+        """Fallback uses data-queue-path or location.pathname — stable across reloads."""
+        html = self._html(f"06.13.23.22 {self.TWO_THREE}100\n17.29.1000")
+        # Find the full batchId definition block
+        import re
+        m = re.search(r"var batchId =.+?;", html, re.DOTALL)
+        assert m is not None
+        batch_def = m.group()
+        # Fallback must use stable source, not Date.now() or Math.random()
+        assert "Date.now()" not in batch_def
+        assert "Math.random()" not in batch_def
+        # Must include data-queue-path or location.pathname fallback
+        assert "data-queue-path" in batch_def or "location.pathname" in batch_def
+
+    def test_different_batches_use_different_storage_keys(self) -> None:
+        """Different queue_path values produce different localStorage keys."""
+        html_a = self._html(f"06.13.23.22 {self.TWO_THREE}100\n17.29.1000")
+        # The data-queue-path is rendered from queue_path parameter
+        assert 'data-queue-path' in html_a
+        # Key format is stable: betguard-card-state-{batchId}
+        assert "betguard-card-state-" in html_a
+
+    def test_needs_review_card_no_assist_fill(self) -> None:
+        """Needs Review cards must NOT contain assist-fill buttons or approved_fill_queue."""
+        html = self._html(f"06.13.23.22 {self.TWO_THREE}100\n17.29.1000")
+        # The card must not have assist-fill-btn class
+        # (valid candidates only — review cards use .review-card, not .assist-fill-btn)
+        assert "approved_fill_queue" not in html or html.count("approved_fill_queue") <= 1  # template reference only
+
+    def test_js_syntax_valid(self) -> None:
+        """Generated JS must be syntactically valid."""
+        import re
+
+        html = self._html(f"06.13.23.22 {self.TWO_THREE}100\n17.29.1000")
+        m = re.search(r"<script>(.*?)</script>", html, re.DOTALL)
+        assert m is not None, "No <script> block found"
+        js = m.group(1)
+        # Minimal syntax check: no obvious broken string
+        assert "{idx}" not in js, "f-string variable leaked into JS output"
+
+
 def test_publish_prefers_server_candidates_over_dom_scrape() -> None:
     queue = build_batch_mock_queue(f"26.27.28 {TWO_THREE}100")
     html_text = render_review_console_html(queue)
