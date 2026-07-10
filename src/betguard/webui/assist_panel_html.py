@@ -142,7 +142,10 @@ function renderReview(items) {
     html += '<div class="item" id="review-item-' + cid + '">'
       + '<div style="font-size:17px;word-break:break-all">' + escapeHtml(raw) + '</div>';
     if (reason) html += '<div style="font-size:13px;color:#b91c1c">' + escapeHtml(reason) + '</div>';
-    html += '<button class="btn-manual" onclick="markManualDone(this)"'
+    html += '<button class="btn-manual" onclick="editReviewItem(this)"'
+      + ' data-id="' + cid + '"'
+      + ' data-raw="' + escapeHtml(raw).replace('"', '&quot;') + '">編輯</button>'
+      + '<button class="btn-manual" onclick="markManualDone(this)"'
       + ' data-id="' + cid + '"'
       + ' data-manual-candidate-id="' + cid + '">已手動下注</button>'
       + '<button class="btn-manual" onclick="markHandled(this)"'
@@ -166,6 +169,68 @@ function markHandled(btn) {
   cnt.textContent = n;
   if (n === 0) {
     document.getElementById("review-items").innerHTML = '<div class="muted">目前沒有需要人工確認的項目</div>';
+  }
+}
+
+function editReviewItem(btn) {
+  var cid = btn.getAttribute("data-id");
+  var raw = btn.getAttribute("data-raw") || "";
+  var row = document.getElementById("review-item-" + cid);
+  if (!row) return;
+  // Replace card content with inline editor
+  row.innerHTML = '<textarea id="edit-text-' + cid + '" style="width:100%;min-height:80px;font-size:15px;font-family:monospace;margin-bottom:6px">'
+    + escapeHtml(raw) + '</textarea>'
+    + '<button class="btn-manual" onclick="submitEdit('' + cid + '')">重新解析</button>'
+    + '<button class="btn-manual" onclick="cancelEdit('' + cid + '', '' + escapeHtml(raw).replace(/'/g, "\\'") + '')" style="background:#94a3b8">取消</button>';
+}
+
+function submitEdit(cid) {
+  var ta = document.getElementById("edit-text-" + cid);
+  if (!ta) return;
+  var newText = ta.value.trim();
+  if (!newText) { setStatus("請輸入牌文"); return; }
+  setStatus("重新解析中...");
+  fetch("/manual-reparse", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text: newText })
+  }).then(function (r) { return r.json(); }).then(function (data) {
+    if (!data.ok) { setStatus(data.error || "解析失敗"); return; }
+    // Remove the old review card
+    var row = document.getElementById("review-item-" + cid);
+    if (row) row.remove();
+    // If reparse produced valid candidates, re-render
+    if (data.valid_candidates && data.valid_candidates.length) {
+      panelState.validCandidates = (panelState.validCandidates || []).concat(data.valid_candidates);
+      renderValid(panelState.validCandidates);
+    }
+    // Re-render review items
+    if (data.invalid_fragments || data.needs_review) {
+      panelState.reviewCandidates = data.invalid_fragments || data.needs_review || [];
+      renderReview(panelState.reviewCandidates);
+    }
+    updateReviewCount();
+    setStatus("已重新解析");
+  }).catch(function () { setStatus("解析失敗"); });
+}
+
+function cancelEdit(cid, originalRaw) {
+  var row = document.getElementById("review-item-" + cid);
+  if (!row) return;
+  // Restore original card
+  row.innerHTML = '<div style="font-size:17px;word-break:break-all">' + escapeHtml(originalRaw) + '</div>'
+    + '<button class="btn-manual" onclick="editReviewItem(this)" data-id="' + cid + '" data-raw="' + originalRaw.replace(/"/g, '&quot;') + '">編輯</button>'
+    + '<button class="btn-manual" onclick="markManualDone(this)" data-id="' + cid + '" data-manual-candidate-id="' + cid + '">已手動下注</button>'
+    + '<button class="btn-manual" onclick="markHandled(this)" data-id="' + cid + '">已處理</button>';
+}
+
+function updateReviewCount() {
+  var cnt = document.getElementById("review-count");
+  var items = document.getElementById("review-items");
+  var itemEls = items.querySelectorAll(".item");
+  cnt.textContent = itemEls.length;
+  if (itemEls.length === 0) {
+    items.innerHTML = '<div class="muted">目前沒有需要人工確認的項目</div>';
   }
 }
 
