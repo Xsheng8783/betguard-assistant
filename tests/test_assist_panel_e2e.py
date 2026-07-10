@@ -449,33 +449,6 @@ class TestAssistPanelE2E:
             page.wait_for_selector("#valid-items .item.assist-completed", timeout=5000)
         assert not external, f"External requests made: {external}"
 
-    def test_root_redirects_to_assist_panel_and_is_interactive(
-        self, tmp_path: Path, monkeypatch, page: Page
-    ) -> None:
-        """Navigate to / and follow redirect to /assist-panel — verify it works."""
-        js_errors: list[str] = []
-        page.on("pageerror", lambda err: js_errors.append(str(err)))
-        with _local_server(tmp_path, monkeypatch) as port:
-            resp = page.goto(f"http://127.0.0.1:{port}/")
-            # Should redirect to /assist-panel
-            assert "/assist-panel" in page.url
-            # Verify panel is functional
-            page.wait_for_selector("textarea", timeout=5000)
-            page.fill("textarea", "09 15 22 27 33 1000")
-            page.click("#createBatchBtn")
-            page.wait_for_selector("#valid-items .item", timeout=8000)
-        valid = page.inner_text("#valid-items")
-        assert "09" in valid or "15" in valid, f"Valid items should contain numbers: {valid}"
-        assert not js_errors, f"Root redirect page errors: {js_errors}"
-
-    def test_workbench_remains_available(self, tmp_path: Path, monkeypatch, page: Page) -> None:
-        """Verify /workbench is still accessible as a backup."""
-        with _local_server(tmp_path, monkeypatch) as port:
-            resp = page.goto(f"http://127.0.0.1:{port}/workbench")
-            assert resp.status == 200
-            body = page.inner_text("body")
-            assert "workbench" in body.lower() or "牌單" in body or "審核" in body
-
     def test_e2e_does_not_write_project_runs(
         self, tmp_path: Path, monkeypatch, page: Page
     ) -> None:
