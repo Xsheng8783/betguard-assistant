@@ -1444,7 +1444,7 @@ button{font-size:12px;padding:6px 14px;border-radius:6px;border:none;cursor:poin
 <div class="footer">⚠️ 真站填入後仍需人工確認與送出</div>
 <script>
 "use strict";
-var panelState = { queuePath: "" };
+var panelState = { queuePath: "", validCandidates: [], reviewCandidates: [] };
 
 function setStatus(msg) {
   document.getElementById("status-msg").textContent = msg;
@@ -1470,6 +1470,8 @@ function createBatch() {
     var valid = data.valid_items || data.valid_candidates || data.valid || [];
     var review = data.review_items || data.needs_review || data.invalid_items
       || data.review_candidates || data.invalid_fragments || [];
+    panelState.validCandidates = valid;
+    panelState.reviewCandidates = review;
     renderResults(valid, review);
     // Reset button to normal mode after any batch
     var btn2 = document.getElementById("createBatchBtn");
@@ -1514,7 +1516,15 @@ function renderResults(valid, review) {
     badge.textContent = c.bet_type || "normal";
     row.appendChild(badge);
     var label = document.createElement("strong");
-    label.textContent = " " + (c.summary || c.raw || "");
+    var candSummary = c.summary;
+    if (!candSummary && c.manual_reparse) {
+      candSummary = (c.numbers || []).map(function (n) { return (n < 10 ? "0" : "") + n; }).join(", ");
+      var stars = c.stars || [];
+      if (stars.length > 0) candSummary += "｜" + stars.join(",") + "星";
+      var amtKeys = Object.keys(c.amounts || {});
+      if (amtKeys.length > 0) candSummary += "｜" + amtKeys.map(function (k) { return k + "星=" + c.amounts[k]; }).join(", ");
+    }
+    label.textContent = " " + (candSummary || c.raw || "");
     row.appendChild(label);
     var betType = c.bet_type || "normal";
     if (betType === "normal") {
@@ -1525,6 +1535,9 @@ function renderResults(valid, review) {
       fillBtn.setAttribute("data-queue-path", panelState.queuePath);
       fillBtn.setAttribute("data-item-index", String(c.index));
       fillBtn.setAttribute("data-bet-type", betType);
+      if (c.manual_candidate_id) {
+        fillBtn.setAttribute("data-manual-id", c.manual_candidate_id);
+      }
       row.appendChild(fillBtn);
       var st = document.createElement("span");
       st.className = "fill-status";
@@ -1580,17 +1593,27 @@ function renderResults(valid, review) {
             reparseBtn.disabled = false;
             reparseBtn.textContent = "重新解析";
             if (d.ok) {
-              // Add single item to valid candidates — keep existing items
-              var existing = [];
-              document.getElementById("valid-items").querySelectorAll(".item").forEach(function (el) {
-                var idx = el.getAttribute("data-idx");
-                if (idx) existing.push(parseInt(idx));
-              });
-              var newIdx = d.manual_id || "manual-" + Date.now();
+              var manualId = d.manual_candidate_id;
+              if (!manualId) {
+                setStatus("❌ 解析成功但缺少 manual_candidate_id");
+                return;
+              }
+              // Build summary from numbers/stars/amounts
+              var numsStr = (d.numbers || []).map(function (n) { return (n < 10 ? "0" : "") + n; }).join(", ");
+              var starsStr = (d.stars || []).length > 0 ? "｜" + d.stars.join(",") + "星" : "";
+              var amtStr = "";
+              var amts = d.amounts || {};
+              var amtKeys = Object.keys(amts);
+              if (amtKeys.length > 0) {
+                amtStr = "｜" + amtKeys.map(function (k) { return k + "星=" + amts[k]; }).join(", ");
+              }
+              var summaryText = numsStr + starsStr + amtStr;
+
               var newItem = {
-                index: d.index || (existing.length + 1),
+                index: manualId,
+                manual_candidate_id: manualId,
                 raw: edited,
-                summary: d.summary || "",
+                summary: summaryText || d.summary || "",
                 bet_type: d.type || "normal",
                 numbers: d.numbers || [],
                 stars: d.stars || [],
@@ -1600,19 +1623,12 @@ function renderResults(valid, review) {
                 manual_reparse: true,
                 original_raw: c.raw || ""
               };
-              // Add to valid candidates in-memory
-              panelState._extraCandidates = panelState._extraCandidates || [];
-              panelState._extraCandidates.push(newItem);
-              // Re-render valid + review (remove this item from review)
-              reviewBox.removeChild(row);
-              var vc = [];
-              document.getElementById("valid-items").querySelectorAll(".item").forEach(function (el) {
-                var nums = [];
-                try { nums = JSON.parse(el.getAttribute("data-numbers") || "[]"); } catch (_) {}
-                vc.push({ index: parseInt(el.getAttribute("data-idx")) || 0, raw: el.getAttribute("data-raw") || "", summary: el.getAttribute("data-summary") || "", bet_type: el.getAttribute("data-bet") || "normal", numbers: nums });
+              // Append to validCandidates, remove this item from reviewCandidates
+              panelState.validCandidates.push(newItem);
+              panelState.reviewCandidates = panelState.reviewCandidates.filter(function (r) {
+                return (r.raw || r.fragment || "") !== (c.raw || c.fragment || "");
               });
-              vc.push({ index: vc.length + 1, raw: edited, summary: d.summary || "", bet_type: d.type || "normal", numbers: d.numbers || [], stars: d.stars || [], amounts: d.amounts || {} });
-              renderResults(vc, []);
+              renderResults(panelState.validCandidates, panelState.reviewCandidates);
               setStatus("✅ 已解析並加入可輔助填入");
             } else {
               setStatus("❌ 解析失敗: " + (d.error || "無法解析"));
@@ -1642,22 +1658,29 @@ function assistPanelFillBtn(btn) {
   var queuePath = btn.getAttribute("data-queue-path") || panelState.queuePath;
   var itemIndex = parseInt(btn.getAttribute("data-item-index"), 10);
   var betType = btn.getAttribute("data-bet-type") || "normal";
+  var manualId = btn.getAttribute("data-manual-id") || "";
   var statusEl = btn.parentElement ? btn.parentElement.querySelector(".fill-status") : null;
-  assistPanelFill(queuePath, itemIndex, betType, btn, statusEl);
+  assistPanelFill(queuePath, itemIndex, betType, manualId, btn, statusEl);
 }
 
-function assistPanelFill(queuePath, itemIndex, betType, btn, statusEl) {
+function assistPanelFill(queuePath, itemIndex, betType, manualId, btn, statusEl) {
   function show(msg) {
     if (statusEl) { statusEl.textContent = msg; } else { setStatus(msg); }
   }
-  if (!queuePath) { show("❌ 缺少 queue_path，請重新建立審核"); return; }
-  if (isNaN(itemIndex)) { show("❌ item_index 無效"); return; }
+  if (!manualId && !queuePath) { show("❌ 缺少 queue_path，請重新建立審核"); return; }
+  if (!manualId && isNaN(itemIndex)) { show("❌ item_index 無效"); return; }
   if (btn) { btn.disabled = true; }
   show("⏳ 檢查頁面並填入中...");
+  var body;
+  if (manualId) {
+    body = JSON.stringify({ manual_candidate_id: manualId, bet_type: betType });
+  } else {
+    body = JSON.stringify({ queue_path: queuePath, item_index: itemIndex, bet_type: betType });
+  }
   fetch("/assist-fill/start", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ queue_path: queuePath, item_index: itemIndex, bet_type: betType })
+    body: body
   }).then(function (r) { return r.text(); }).then(function (raw) {
     var data;
     try { data = JSON.parse(raw); }
@@ -1723,6 +1746,8 @@ window.assistPanelFill = assistPanelFill;
     panelState.queuePath = s.queue_path;
     var vc = s.valid_candidates || [];
     if (vc.length > 0) {
+      panelState.validCandidates = vc;
+      panelState.reviewCandidates = [];
       renderResults(vc, []);
       setStatus("✅ 已同步主審核台（" + vc.length + " 筆可輔助填入）");
     }

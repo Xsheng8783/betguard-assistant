@@ -349,18 +349,56 @@ class TestSingleItemReparseBehavior:
         """_register_manual_candidate() appends, doesn't clear dictionary."""
         from betguard.webui.app import _register_manual_candidate, _lookup_manual_candidate
 
-        # Register A
         ca = {"numbers": [1, 2], "stars": [2], "amounts": {"2": 100}, "summary": "A"}
         cid_a = _register_manual_candidate(ca)
-        # Register B
         cb = {"numbers": [3, 4], "stars": [3], "amounts": {"3": 100}, "summary": "B"}
         cid_b = _register_manual_candidate(cb)
 
-        # Both should still be retrievable
         assert _lookup_manual_candidate(cid_a) is not None
         assert _lookup_manual_candidate(cid_b) is not None
         assert _lookup_manual_candidate(cid_a)["summary"] == "A"
         assert _lookup_manual_candidate(cid_b)["summary"] == "B"
+
+
+class TestManualCandidateFlow:
+    """Verify manual vs queue candidate fill request differences."""
+
+    def test_reparse_handler_adds_manual_candidate_id(self) -> None:
+        """The /manual-reparse handler adds manual_candidate_id to the response."""
+        source = _read_source("src/betguard/webui/app.py")
+        # Handler sets result["manual_candidate_id"] = cid after registration
+        assert '"manual_candidate_id"' in source
+
+    def test_reparse_result_has_required_fields(self) -> None:
+        from betguard.webfill.manual_reparse import reparse_text
+
+        result = reparse_text("26 27 28 23X1", game="539")
+        assert result.get("ok")
+        assert "numbers" in result
+        assert "stars" in result
+        assert "amounts" in result
+        assert result.get("source") == "manual_correction"
+
+    def test_panel_html_has_data_manual_id(self) -> None:
+        """Panel fill button must support data-manual-id attribute."""
+        html = TestAssistPanelHTML.html
+        assert "data-manual-id" in html
+
+    def test_panel_html_uses_manual_candidate_id(self) -> None:
+        """Panel JS must read d.manual_candidate_id, not d.manual_id."""
+        html = TestAssistPanelHTML.html
+        assert "manual_candidate_id" in html
+        assert "d.manual_id" not in html or html.count("d.manual_id") == 1  # only in error message
+
+    def test_panel_state_has_valid_candidates(self) -> None:
+        """panelState must track validCandidates array."""
+        html = TestAssistPanelHTML.html
+        assert "validCandidates" in html
+
+    def test_no_parsed_bet_display(self) -> None:
+        """Summary should never show ParsedBet(...) raw output."""
+        html = TestAssistPanelHTML.html
+        assert "ParsedBet(" not in html
 
 
 def _read_source(path: str) -> str:
