@@ -38,7 +38,9 @@ button{font-size:15px;padding:8px 16px;border-radius:6px;border:none;cursor:poin
 </style>
 </head>
 <body>
-<h2>Betguard 輔助面板</h2>
+<h2 style="display:flex;align-items:center;gap:8px">Betguard 輔助面板
+<button id="pin-btn" onclick="togglePin()" style="font-size:13px;padding:4px 10px;min-height:unset;background:#f59e0b;color:#fff">釘選視窗</button>
+</h2>
 <textarea id="batch-text" placeholder="貼上牌單..."></textarea>
 <button id="createBatchBtn" type="button" class="btn-primary">建立審核</button>
 <div class="status" id="status-msg"></div>
@@ -159,6 +161,34 @@ function escapeHtml(s) {
   return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 }
 
+var pinState = false;
+
+function togglePin() {
+  pinState = !pinState;
+  var btn = document.getElementById("pin-btn");
+  fetch("/api/window-pin", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enable: pinState })
+  }).then(function (r) { return r.json(); }).then(function (data) {
+    if (data.ok) {
+      btn.textContent = pinState ? "已釘選" : "釘選視窗";
+      btn.style.background = pinState ? "#059669" : "#f59e0b";
+      try { localStorage.setItem("betguard_pin", pinState ? "1" : "0"); } catch (_) {}
+    } else {
+      pinState = !pinState;
+      setStatus(data.error || "操作失敗");
+    }
+  }).catch(function () {
+    pinState = !pinState;
+  });
+}
+
+// Restore pin state on load
+(function() {
+  try { var v = localStorage.getItem("betguard_pin"); if (v === "1") { pinState = false; togglePin(); } } catch (_) {}
+})();
+
 function markHandled(btn) {
   var cid = btn.getAttribute("data-id");
   var row = document.getElementById("review-item-" + cid);
@@ -180,8 +210,8 @@ function editReviewItem(btn) {
   // Replace card content with inline editor
   row.innerHTML = '<textarea id="edit-text-' + cid + '" style="width:100%;min-height:80px;font-size:15px;font-family:monospace;margin-bottom:6px">'
     + escapeHtml(raw) + '</textarea>'
-    + '<button class="btn-manual" onclick="submitEdit('' + cid + '')">重新解析</button>'
-    + '<button class="btn-manual" onclick="cancelEdit('' + cid + '', '' + escapeHtml(raw).replace(/'/g, "\\'") + '')" style="background:#94a3b8">取消</button>';
+    + '<button class="btn-manual" onclick="submitEdit(&quot;' + cid + '&quot;)">重新解析</button>'
+    + '<button class="btn-manual" onclick="cancelEdit(&quot;' + cid + '&quot;)" style="background:#94a3b8">取消</button>';
 }
 
 function submitEdit(cid) {
@@ -195,22 +225,29 @@ function submitEdit(cid) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text: newText })
   }).then(function (r) { return r.json(); }).then(function (data) {
-    if (!data.ok) { setStatus(data.error || "解析失敗"); return; }
-    // Remove the old review card
-    var row = document.getElementById("review-item-" + cid);
-    if (row) row.remove();
-    // If reparse produced valid candidates, re-render
-    if (data.valid_candidates && data.valid_candidates.length) {
-      panelState.validCandidates = (panelState.validCandidates || []).concat(data.valid_candidates);
+    if (data.ok) {
+      // Remove old review card
+      var row = document.getElementById("review-item-" + cid);
+      if (row) row.remove();
+      // Build valid candidate from reparse result
+      var newCand = {
+        numbers: data.numbers || [],
+        stars: data.stars || [],
+        amounts: data.amounts || {},
+        summary: data.summary || newText,
+        bet_type: data.bet_type || data.type || "normal",
+        type: data.type || "normal",
+        manual_candidate_id: data.manual_candidate_id,
+        raw: newText,
+        index: panelState.validCandidates ? panelState.validCandidates.length + 1 : 1
+      };
+      panelState.validCandidates = (panelState.validCandidates || []).concat([newCand]);
       renderValid(panelState.validCandidates);
+      updateReviewCount();
+      setStatus("已加入可輔助填入");
+    } else {
+      setStatus(data.error || data.reason || "解析失敗，仍需人工確認");
     }
-    // Re-render review items
-    if (data.invalid_fragments || data.needs_review) {
-      panelState.reviewCandidates = data.invalid_fragments || data.needs_review || [];
-      renderReview(panelState.reviewCandidates);
-    }
-    updateReviewCount();
-    setStatus("已重新解析");
   }).catch(function () { setStatus("解析失敗"); });
 }
 

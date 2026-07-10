@@ -995,6 +995,11 @@ def build_workbench_handler(
                 self._handle_manual_reparse()
                 return
 
+            # POST /api/window-pin — toggle always-on-top (localhost only)
+            if path == "/api/window-pin":
+                self._handle_window_pin()
+                return
+
             self._send_text("not found", status=404)
 
         # ----------------------------------------------------------------
@@ -2102,6 +2107,21 @@ window.assistPanelFill = assistPanelFill;
                 result["acceptance_source"] = "assist_panel_manual_reparse"
                 result["manual_reparse"] = True
 
+            self._send_json(result)
+
+        def _handle_window_pin(self) -> None:
+            """Toggle always-on-top for the assist panel window."""
+            # Security: localhost only
+            host = self.client_address[0] if self.client_address else ""
+            if host not in ("127.0.0.1", "::1", "localhost"):
+                self._send_json({"ok": False, "error": "forbidden"})
+                return
+            data = self._read_json_body()
+            if data is None:
+                return
+            enable = bool(data.get("enable", True))
+            from betguard.webui.window_pin import set_always_on_top
+            result = set_always_on_top(enable)
             self._send_json(result)
 
     return WorkbenchHandler
