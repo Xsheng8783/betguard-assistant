@@ -1427,8 +1427,11 @@ def build_workbench_handler(
             self._send_json({"ok": True, "received": len(valid_candidates)})
 
         def _handle_assist_panel(self) -> None:
-            """Return the slim assist panel HTML (Phase 1: read-only for fill)."""
-            html = """<!doctype html>
+            """Return the slim assist panel HTML."""
+            from betguard.webui.assist_panel_html import ASSIST_PANEL_HTML
+            self._send_html(ASSIST_PANEL_HTML)
+            return
+            _old_html = """
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8">

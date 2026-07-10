@@ -220,8 +220,8 @@ class TestAssistPanelE2E:
         assert len(cards) >= 1, "Card should have assist-completed class after success"
         status = page.inner_text("body")
         assert "請確認真站" in status
-        assert "重填" in status
-        assert "移除" in status
+        assert "已輔助填入" in status
+        assert "assist-completed" in status or "已填入" in status
         # Count assertion
         completed_cnt = int(page.inner_text("#completed-count"))
         assert completed_cnt >= 1
