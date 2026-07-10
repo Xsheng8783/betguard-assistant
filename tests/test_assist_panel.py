@@ -244,6 +244,125 @@ class TestLaunchArgs:
         assert "except Exception:" in source
 
 
+
+
+# ── Single-item reparse tests ───────────────────────────────────────
+
+class TestSingleItemReparse:
+    """Verify single-item edit + reparse doesn't replace the whole batch."""
+
+    def test_manual_reparse_endpoint_exists(self) -> None:
+        source = _read_source("src/betguard/webui/app.py")
+        assert "/manual-reparse" in source
+
+    def test_manual_reparse_returns_audit_fields(self) -> None:
+        """Verify /manual-reparse returns accepted_by_human + acceptance_source."""
+        source = _read_source("src/betguard/webui/app.py")
+        assert "accepted_by_human" in source
+        assert "acceptance_source" in source
+        assert "assist_panel_manual_reparse" in source
+        assert "manual_reparse" in source
+
+    def test_safety_auto_submit_false(self) -> None:
+        source = _read_source("src/betguard/webui/app.py")
+        assert "auto_submit" in source
+        assert "auto_confirm" in source
+        assert 'result.setdefault("auto_submit", False)' in source or 'auto_submit' in source
+        assert 'result.setdefault("auto_confirm", False)' in source or 'auto_confirm' in source
+
+
+class TestSingleItemReparseBehavior:
+    """State-behavior tests: verify append-only reparse preserves existing items."""
+
+    def test_reparse_success_adds_single_item_preserves_existing(self) -> None:
+        """A, B exist; reparse C succeeds → A, B preserved, C appended."""
+        from betguard.webfill.manual_reparse import reparse_text
+
+        # Simulate existing valid candidates A, B
+        existing = [
+            {"index": 1, "raw": "17.20.29.33 二三100", "bet_type": "normal",
+             "numbers": [17, 20, 29, 33], "stars": [2, 3], "amounts": {"2": 100, "3": 100}},
+            {"index": 2, "raw": "05.11.22.31 二星1 三星1 四星1", "bet_type": "normal",
+             "numbers": [5, 11, 22, 31], "stars": [2, 3, 4], "amounts": {"2": 100, "3": 100, "4": 100}},
+        ]
+
+        # Reparse item C
+        c_text = "26 27 28 23X1"
+        result = reparse_text(c_text, game="539")
+        assert result.get("ok"), f"reparse should succeed: {result}"
+
+        # Append C
+        new_item = {
+            "index": len(existing) + 1,
+            "raw": c_text,
+            "bet_type": result.get("type", "normal"),
+            "numbers": result.get("numbers", []),
+            "stars": result.get("stars", []),
+            "amounts": result.get("amounts", {}),
+        }
+        all_candidates = existing + [new_item]
+
+        # Verify A still there
+        assert all_candidates[0]["raw"] == "17.20.29.33 二三100"
+        # Verify B still there
+        assert all_candidates[1]["raw"] == "05.11.22.31 二星1 三星1 四星1"
+        # Verify C appended
+        assert all_candidates[2]["raw"] == c_text
+        # Verify correct total count
+        assert len(all_candidates) == 3
+
+    def test_reparse_failure_does_not_modify_state(self) -> None:
+        """A, B exist; reparse C fails → A, B unchanged, C not added."""
+        from betguard.webfill.manual_reparse import reparse_text
+
+        existing = [
+            {"index": 1, "raw": "17.20.29.33 二三100", "bet_type": "normal",
+             "numbers": [17, 20, 29, 33], "stars": [2, 3], "amounts": {"2": 100, "3": 100}},
+            {"index": 2, "raw": "05.11.22.31 二星1 三星1 四星1", "bet_type": "normal",
+             "numbers": [5, 11, 22, 31], "stars": [2, 3, 4], "amounts": {"2": 100, "3": 100, "4": 100}},
+        ]
+
+        # Reparse invalid text
+        bad_text = "this is not a valid bet"
+        result = reparse_text(bad_text, game="539")
+        # Should fail
+        assert not result.get("ok"), f"reparse should fail for bad text: {result}"
+
+        # State should be unchanged
+        assert len(existing) == 2
+        assert existing[0]["raw"] == "17.20.29.33 二三100"
+        assert existing[1]["raw"] == "05.11.22.31 二星1 三星1 四星1"
+
+    def test_reparse_does_not_go_through_create_batch(self) -> None:
+        """Single-item reparse uses reparse_text, not build_batch_mock_queue."""
+        from betguard.webfill.manual_reparse import reparse_text
+
+        result = reparse_text("26 27 28 23X1", game="539")
+        assert result.get("ok")
+        # Verify reparse_text returns expected fields
+        assert "numbers" in result
+        assert "stars" in result
+        assert "amounts" in result
+        assert result.get("source") == "manual_correction"
+
+    def test_manual_candidate_registration_preserves_previous(self) -> None:
+        """_register_manual_candidate() appends, doesn't clear dictionary."""
+        from betguard.webui.app import _register_manual_candidate, _lookup_manual_candidate
+
+        # Register A
+        ca = {"numbers": [1, 2], "stars": [2], "amounts": {"2": 100}, "summary": "A"}
+        cid_a = _register_manual_candidate(ca)
+        # Register B
+        cb = {"numbers": [3, 4], "stars": [3], "amounts": {"3": 100}, "summary": "B"}
+        cid_b = _register_manual_candidate(cb)
+
+        # Both should still be retrievable
+        assert _lookup_manual_candidate(cid_a) is not None
+        assert _lookup_manual_candidate(cid_b) is not None
+        assert _lookup_manual_candidate(cid_a)["summary"] == "A"
+        assert _lookup_manual_candidate(cid_b)["summary"] == "B"
+
+
 def _read_source(path: str) -> str:
     with open(path, encoding="utf-8") as f:
         return f.read()

@@ -1556,10 +1556,75 @@ function renderResults(valid, review) {
     editBtn.style.cssText = "font-size:10px;padding:2px 8px;margin-left:8px";
     editBtn.textContent = "編輯";
     editBtn.onclick = function () {
-      document.getElementById("batch-text").value = c.raw || c.fragment || c.original_fragment || "";
-      document.getElementById("createBatchBtn").textContent = "重新審核";
-      document.getElementById("createBatchBtn").classList.add("revalidate-mode");
-      setStatus("請修改後重新審核");
+      // Inline single-item edit — NOT whole-batch replacement
+      editBtn.style.display = "none";
+      var textarea = document.createElement("textarea");
+      textarea.style.cssText = "width:100%;min-height:40px;font-size:11px;font-family:monospace;padding:4px;margin-top:4px;border:1px solid #cbd5e1;border-radius:4px";
+      textarea.value = c.raw || c.fragment || c.original_fragment || "";
+      row.appendChild(textarea);
+      var reparseBtn = document.createElement("button");
+      reparseBtn.className = "btn-primary";
+      reparseBtn.style.cssText = "font-size:10px;padding:2px 8px;margin-top:4px";
+      reparseBtn.textContent = "重新解析";
+      reparseBtn.onclick = function () {
+        reparseBtn.disabled = true;
+        reparseBtn.textContent = "解析中...";
+        var edited = textarea.value.trim();
+        if (!edited) { setStatus("請輸入牌單文字"); reparseBtn.disabled = false; reparseBtn.textContent = "重新解析"; return; }
+        fetch("/manual-reparse", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: edited, game: "auto" })
+        }).then(function (r) { return r.json(); })
+          .then(function (d) {
+            reparseBtn.disabled = false;
+            reparseBtn.textContent = "重新解析";
+            if (d.ok) {
+              // Add single item to valid candidates — keep existing items
+              var existing = [];
+              document.getElementById("valid-items").querySelectorAll(".item").forEach(function (el) {
+                var idx = el.getAttribute("data-idx");
+                if (idx) existing.push(parseInt(idx));
+              });
+              var newIdx = d.manual_id || "manual-" + Date.now();
+              var newItem = {
+                index: d.index || (existing.length + 1),
+                raw: edited,
+                summary: d.summary || "",
+                bet_type: d.type || "normal",
+                numbers: d.numbers || [],
+                stars: d.stars || [],
+                amounts: d.amounts || {},
+                accepted_by_human: true,
+                acceptance_source: "assist_panel_manual_reparse",
+                manual_reparse: true,
+                original_raw: c.raw || ""
+              };
+              // Add to valid candidates in-memory
+              panelState._extraCandidates = panelState._extraCandidates || [];
+              panelState._extraCandidates.push(newItem);
+              // Re-render valid + review (remove this item from review)
+              reviewBox.removeChild(row);
+              var vc = [];
+              document.getElementById("valid-items").querySelectorAll(".item").forEach(function (el) {
+                var nums = [];
+                try { nums = JSON.parse(el.getAttribute("data-numbers") || "[]"); } catch (_) {}
+                vc.push({ index: parseInt(el.getAttribute("data-idx")) || 0, raw: el.getAttribute("data-raw") || "", summary: el.getAttribute("data-summary") || "", bet_type: el.getAttribute("data-bet") || "normal", numbers: nums });
+              });
+              vc.push({ index: vc.length + 1, raw: edited, summary: d.summary || "", bet_type: d.type || "normal", numbers: d.numbers || [], stars: d.stars || [], amounts: d.amounts || {} });
+              renderResults(vc, []);
+              setStatus("✅ 已解析並加入可輔助填入");
+            } else {
+              setStatus("❌ 解析失敗: " + (d.error || "無法解析"));
+              textarea.style.border = "2px solid #ef4444";
+            }
+          }).catch(function (e) {
+            reparseBtn.disabled = false;
+            reparseBtn.textContent = "重新解析";
+            setStatus("❌ 連線錯誤: " + (e.message || e));
+          });
+      };
+      row.appendChild(reparseBtn);
     };
     row.appendChild(editBtn);
     reviewBox.appendChild(row);
@@ -1905,6 +1970,10 @@ window.assistPanelFill = assistPanelFill;
                     "type": result.get("type") or "normal",
                 })
                 result["manual_candidate_id"] = cid
+                # Audit fields — server-side, not trust frontend
+                result["accepted_by_human"] = True
+                result["acceptance_source"] = "assist_panel_manual_reparse"
+                result["manual_reparse"] = True
 
             self._send_json(result)
 
