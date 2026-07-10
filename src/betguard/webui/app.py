@@ -804,7 +804,7 @@ def build_workbench_handler(
             path = parsed.path
 
             if path == "/" or path == "":
-                self._send_html(_render_empty_dashboard())
+                self._send_redirect("/assist-panel")
                 return
             if path == "/workbench":
                 self._send_html(_render_workbench_form())
