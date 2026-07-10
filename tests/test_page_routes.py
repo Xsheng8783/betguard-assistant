@@ -1,3 +1,9 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
 from betguard.webfill.cli import build_parser
 from betguard.webfill.page_routes import parse_page_routes_from_html
 from betguard.webfill.selector_discovery import extract_global_routes_from_html
@@ -77,3 +83,50 @@ def test_webfill_cli_accepts_page_argument() -> None:
     )
 
     assert args.page == STAR_PAGE
+
+class TestStartBat:
+    """Verify start_betguard.bat structure and safety -- ASCII, no BOM."""
+
+    @staticmethod
+    def _bat_bytes() -> bytes:
+        bat_path = Path(__file__).resolve().parent.parent / "start_betguard.bat"
+        return bat_path.read_bytes()
+
+    @staticmethod
+    def _bat_text() -> str:
+        return TestStartBat._bat_bytes().decode("ascii")
+
+    def test_bat_is_ascii_without_bom(self) -> None:
+        raw = self._bat_bytes()
+        assert raw[:3] != b'\xef\xbb\xbf', "BAT must NOT have UTF-8 BOM"
+        assert raw.startswith(b"@echo off"), "BAT must start with @echo off"
+        raw.decode("ascii")  # must not raise
+
+    def test_bat_no_unicode_or_emoji(self) -> None:
+        raw = self._bat_bytes()
+        for i, b in enumerate(raw):
+            if b >= 0x80:
+                pytest.fail(f"Non-ASCII byte 0x{b:02x} at offset {i}")
+
+    def test_bat_uses_relative_path(self) -> None:
+        text = self._bat_text()
+        assert "%~dp0" in text
+        assert "C:\\Users" not in text
+        assert "chcp" not in text.lower()
+
+    def test_bat_blocks_occupied_port(self) -> None:
+        text = self._bat_text()
+        assert 'set "OCCUPIED_PID="' in text
+        assert "netstat" in text
+        assert "LISTENING" in text
+        assert "if defined OCCUPIED_PID goto port_in_use" in text
+        assert ":port_in_use" in text
+        assert "exit /b 1" in text
+
+    def test_bat_starts_server_in_persistent_console(self) -> None:
+        text = self._bat_text()
+        assert "python -m betguard.webui.app" in text
+        assert "cmd /k" in text
+        assert "http://127.0.0.1:8765/" in text
+        server_line = [ln for ln in text.splitlines() if "cmd /k" in ln and "python" in ln]
+        assert len(server_line) == 1, "Server start must be on one line with cmd /k"

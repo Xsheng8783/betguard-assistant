@@ -903,6 +903,11 @@ def test_assist_fill_start_accepts_registered_manual_id(tmp_path: Path, monkeypa
     """Registered manual candidate should be accepted by assist-fill/start.
     The fill may fail (no browser) but must NOT reject with 'candidate not found'."""
     from betguard.webui.app import _register_manual_candidate
+    import sys
+
+    # Mock Playwright to prevent real browser launch
+    monkeypatch.setitem(sys.modules, "playwright", type(sys)("playwright"))
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", type(sys)("playwright.sync_api"))
 
     # Register a valid candidate
     cid = _register_manual_candidate({
@@ -918,7 +923,7 @@ def test_assist_fill_start_accepts_registered_manual_id(tmp_path: Path, monkeypa
         try:
             _status, body = _post_json(port, "/assist-fill/start", {
                 "manual_candidate_id": cid,
-            }, timeout=8)
+            }, timeout=5)
             # Should NOT say "candidate not found" (even if fill fails)
             assert "manual candidate not found" not in body.get("error", "")
             assert body.get("auto_submit") is not True

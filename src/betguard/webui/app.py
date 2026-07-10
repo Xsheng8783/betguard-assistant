@@ -32,6 +32,12 @@ import urllib.parse
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+class DedicatedHTTPServer(ThreadingHTTPServer):
+    """HTTPServer that refuses to bind if port is already in use."""
+
+    allow_reuse_address = False
 from pathlib import Path
 from typing import Any
 
@@ -2301,7 +2307,18 @@ def main(argv: list[str] | None = None) -> int:
     commit = _git_short_head()
     handler = build_workbench_handler(project_version=version, git_commit=commit)
 
-    server = ThreadingHTTPServer((args.host, args.port), handler)
+    try:
+        server = DedicatedHTTPServer((args.host, args.port), handler)
+    except OSError as exc:
+        if exc.winerror == 10048 or "address already in use" in str(exc).lower():
+            print(
+                "無法啟動：" + args.host + ":" + str(args.port) + " 已被占用。\n"
+                "請關閉舊的 Betguard 伺服器後重試。",
+                file=sys.stderr,
+            )
+        else:
+            print(f"無法啟動：{exc}", file=sys.stderr)
+        return 1
     print(
         f"Betguard workbench listening on http://{args.host}:{args.port}/  "
         f"(version={version}, commit={commit})",
