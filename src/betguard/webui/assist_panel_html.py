@@ -217,11 +217,22 @@ function submitEdit(cid) {
 function cancelEdit(cid, originalRaw) {
   var row = document.getElementById("review-item-" + cid);
   if (!row) return;
-  // Restore original card
-  row.innerHTML = '<div style="font-size:17px;word-break:break-all">' + escapeHtml(originalRaw) + '</div>'
-    + '<button class="btn-manual" onclick="editReviewItem(this)" data-id="' + cid + '" data-raw="' + originalRaw.replace(/"/g, '&quot;') + '">編輯</button>'
-    + '<button class="btn-manual" onclick="markManualDone(this)" data-id="' + cid + '" data-manual-candidate-id="' + cid + '">已手動下注</button>'
-    + '<button class="btn-manual" onclick="markHandled(this)" data-id="' + cid + '">已處理</button>';
+  // Re-render this single card by rebuilding from panelState
+  var found = null;
+  if (panelState.reviewCandidates) {
+    for (var i = 0; i < panelState.reviewCandidates.length; i++) {
+      var item = panelState.reviewCandidates[i];
+      var icid = item.manual_candidate_id || ("rev" + i);
+      if (icid === cid) { found = item; break; }
+    }
+  }
+  if (found) {
+    renderReview(panelState.reviewCandidates);
+  } else {
+    // Fallback: remove row
+    row.remove();
+    updateReviewCount();
+  }
 }
 
 function updateReviewCount() {
