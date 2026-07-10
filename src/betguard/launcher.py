@@ -1,11 +1,11 @@
-"""Windows launcher for Betguard Assistant — packaged app entry point.
+"""Windows launcher for Betguard Assistant -- packaged app entry point.
 
 Starts the local web server, waits for it, then opens the browser.
 Handles re-launch gracefully (no duplicate server).
 In frozen mode, sets PLAYWRIGHT_BROWSERS_PATH to the bundled Chromium.
 
-All user-facing messages use plain Chinese — no emoji (cp950 safe).
-Errors are logged to UTF-8 log file and shown via messagebox.
+Frozen mode: main EXE accepts --serve flag to run as server subprocess.
+Development mode: uses ``python -m betguard.webui.app`` directly.
 """
 from __future__ import annotations
 
@@ -36,11 +36,10 @@ def _log_error(msg: str) -> None:
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
     except Exception:
-        pass  # never crash on logging failure
+        pass
 
 
 def _safe_print(msg: str) -> None:
-    """Print only if stdout supports it; fall back to logging."""
     try:
         print(msg)
     except UnicodeEncodeError:
@@ -48,12 +47,20 @@ def _safe_print(msg: str) -> None:
 
 
 def _show_error(title: str, message: str) -> None:
-    """Show error via messagebox (no emoji, cp950 safe)."""
     try:
         import ctypes
-        ctypes.windll.user32.MessageBoxW(0, message, title, 0x10)  # MB_ICONERROR
+        ctypes.windll.user32.MessageBoxW(0, message, title, 0x10)
     except Exception:
         _log_error(f"{title}: {message}")
+
+
+def _run_server() -> None:
+    """Directly start the web UI server. Used for both --serve mode and dev mode."""
+    _setup_bundled_chromium()
+    # Remove --serve from argv so argparse in server doesn't reject it
+    sys.argv = [a for a in sys.argv if a != "--serve"]
+    from betguard.webui.app import main as server_main
+    server_main()
 
 
 def _setup_bundled_chromium() -> None:
@@ -83,37 +90,43 @@ def _is_server_running() -> bool:
         return False
 
 
-def _find_project_root() -> str:
-    launcher_dir = os.path.dirname(os.path.abspath(__file__))
-    src_dir = os.path.join(launcher_dir, "src")
-    if os.path.isdir(src_dir):
-        return launcher_dir
-    return launcher_dir
-
-
-def _start_server(project_root: str) -> subprocess.Popen | None:
-    env = os.environ.copy()
-    src_path = os.path.join(project_root, "src")
-    if os.path.isdir(src_path):
-        env["PYTHONPATH"] = src_path
+def _start_server() -> subprocess.Popen | None:
+    """Start the server subprocess. In frozen mode uses --serve, in dev mode uses python -m."""
+    if _is_frozen():
+        cmd = [sys.executable, "--serve"]
+        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     else:
-        env["PYTHONPATH"] = project_root
-    cmd = [sys.executable, "-X", "utf8", "-m", "betguard.webui.app"]
+        cmd = [sys.executable, "-X", "utf8", "-m", "betguard.webui.app"]
+        creationflags = 0
+    log_file = _open_server_log()
     try:
         return subprocess.Popen(
             cmd,
-            cwd=project_root,
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            creationflags=creationflags,
         )
     except Exception as e:
         _log_error(f"Server start failed: {e}")
         return None
 
 
+def _open_server_log():
+    """Open server log for writing. In frozen mode, use UTF-8 log file."""
+    try:
+        log_dir = os.path.join(os.path.expanduser("~"), "Documents", "Betguard Assistant Data", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        return open(os.path.join(log_dir, "server.log"), "a", encoding="utf-8")
+    except Exception:
+        return subprocess.DEVNULL
+
+
 def main() -> None:
+    # --serve mode: the EXE is being invoked as a server subprocess
+    if "--serve" in sys.argv:
+        _run_server()
+        return
+
     try:
         _setup_bundled_chromium()
 
@@ -122,14 +135,13 @@ def main() -> None:
             webbrowser.open(APP_URL)
             return
 
-        project_root = _find_project_root()
         _safe_print("啟動 Betguard Assistant...")
-        proc = _start_server(project_root)
+        proc = _start_server()
         if proc is None:
             msg = "無法啟動伺服器，請檢查安裝是否完整"
             _show_error("Betguard Assistant", msg)
             _log_error(msg)
-            sys.exit(1)
+            return
 
         for _ in range(20):
             if _is_server_running():
@@ -138,18 +150,16 @@ def main() -> None:
                 return
             time.sleep(0.5)
 
-        msg = "伺服器啟動逾時，請手動開啟: " + APP_URL
+        msg = f"伺服器啟動逾時，請手動開啟: {APP_URL}"
         _show_error("Betguard Assistant", msg)
         _log_error(msg)
-        sys.exit(1)
 
     except SystemExit:
         raise
     except Exception:
         tb = traceback.format_exc()
         _log_error(tb)
-        msg = f"Betguard Assistant 發生錯誤\n\n{tb[-500:]}"
-        _show_error("Betguard Assistant 錯誤", msg)
+        _show_error("Betguard Assistant 錯誤", tb[-500:])
         sys.exit(1)
 
 
