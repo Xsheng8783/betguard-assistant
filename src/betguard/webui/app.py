@@ -661,6 +661,25 @@ def _summarize_queue(queue_path: Path) -> dict[str, Any]:
     }
 
 
+def _try_render_review_from_queue(review_path: Path, handler) -> bool:
+    """Re-render a review_*.html from its queue JSON. Returns True on success."""
+    import json as _json_module
+    from betguard.webfill.review_console import render_review_console_html
+
+    run_dir = review_path.parent
+    queue_files = sorted(run_dir.glob("queue_*.json")) or sorted(run_dir.glob("batch_*.json"))
+    if not queue_files:
+        return False
+    try:
+        raw = queue_files[-1].read_text(encoding="utf-8")
+        queue = _json_module.loads(raw)
+        html = render_review_console_html(queue, queue_path=str(queue_files[-1]))
+        handler._send_html(html)
+        return True
+    except Exception:
+        return False
+
+
 def _find_latest_review() -> Path | None:
     """Return the most recent review_*.html under runs/, or None."""
     if not RUNS_DIR.exists():
@@ -869,6 +888,10 @@ def build_workbench_handler(
             if path.startswith("/runs/"):
                 rel = urllib.parse.unquote(path[len("/runs/"):])
                 target = (RUNS_DIR / rel).resolve()
+                # Re-render review pages dynamically so manual-done state is fresh on F5
+                if rel.endswith("review_console.html") or "review_" in rel.split("/")[-1]:
+                    if _try_render_review_from_queue(target, self):
+                        return
                 self._send_file(target)
                 return
             if path == "/assist-panel":
@@ -1989,9 +2012,19 @@ window.assistPanelFill = assistPanelFill;
                 self._send_json({"ok": False, "error": f"item #{item_index} not found in queue"})
                 return
             # Only allow marking if item is in valid/assistable state
+            # In mixed batches, valid items may have BLOCKED batch-level status.
+            # Check valid_candidates first — if the item appears there, it IS valid.
+            valid_candidates = queue.get("preprocessing", {}).get("valid_candidates", [])
+            is_valid = any(
+                vc.get("index") == item_index or vc.get("item_index") == item_index
+                for vc in valid_candidates
+            )
             status = matched.get("status", "")
-            if status in ("INVALID", "NEEDS_REVIEW", "WATCHLIST", "BLOCKED"):
+            if status in ("INVALID", "NEEDS_REVIEW", "WATCHLIST"):
                 self._send_json({"ok": False, "error": f"item #{item_index} is not assistable (status={status})"})
+                return
+            if status == "BLOCKED" and not is_valid:
+                self._send_json({"ok": False, "error": f"item #{item_index} is blocked and not a valid candidate"})
                 return
             matched["status"] = "MANUAL_DONE"
             matched["handled_by"] = "webui_manual_done_button"

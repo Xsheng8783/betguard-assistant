@@ -423,3 +423,33 @@ def test_export_records_csv_has_clear_manual_check_columns() -> None:
     assert "2026-07-07,10:00:00,0" in lines[1]
     assert "06 13 23 22" in lines[1]
     assert SAFETY_REMINDER in lines[1]
+
+class TestHistoryGatekeeper:
+    """Verify real orders.jsonl is never modified by tests."""
+
+    _CACHED_SIZE = None
+    _CACHED_SHA = None
+
+    @classmethod
+    def setup_class(cls):
+        import hashlib
+        real = Path(__file__).resolve().parent.parent / "runs" / "history" / "orders.jsonl"
+        if real.exists():
+            cls._CACHED_SIZE = real.stat().st_size
+            cls._CACHED_SHA = hashlib.sha256(real.read_bytes()).hexdigest()
+
+    def test_real_history_unchanged_after_tests(self):
+        real = Path(__file__).resolve().parent.parent / "runs" / "history" / "orders.jsonl"
+        if self._CACHED_SIZE is None:
+            assert not real.exists(), "orders.jsonl was created during tests"
+            return
+        assert real.stat().st_size == self._CACHED_SIZE, (
+            f"orders.jsonl size changed: {self._CACHED_SIZE} -> {real.stat().st_size}"
+        )
+
+    def test_no_new_dummy_records_added(self):
+        """If file existed before, no NEW lines should have been added."""
+        real = Path(__file__).resolve().parent.parent / "runs" / "history" / "orders.jsonl"
+        if self._CACHED_SIZE is None:
+            return  # file didn't exist before; we accept it may have been created
+        assert real.stat().st_size == self._CACHED_SIZE

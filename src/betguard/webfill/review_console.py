@@ -83,6 +83,8 @@ def build_review_console_model(queue: dict[str, Any], *, queue_path: str | None 
             "safety_reminder": "只輔助填入，不會送出或確認",
         },
         "valid_candidates": [_candidate_with_labels(item) for item in preprocessing.get("valid_candidates", [])],
+        # Split valid candidates into pending / done based on queue items status
+        "done_candidates": _split_done_candidates(preprocessing.get("valid_candidates", []), queue),
         "watchlist": [_watchlist_entry(item) for item in watchlist_source],
         "invalid_fragments": [_invalid_entry(item) for item in invalid_source],
         "ignored_metadata_lines": list(preprocessing.get("ignored_metadata_lines", [])),
@@ -119,7 +121,13 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     if not watchlist_cards:
         watchlist_cards = '<div class="empty-block">目前沒有待觀察項目</div>'
 
-    valid_rows = "".join(_candidate_row(item) for item in model["valid_candidates"])
+    # Exclude done candidates from pending rows
+    # Use string coercion for index matching (queue items may have int, candidates may have int)
+    done_indices = {str(d.get("index") or d.get("item_index") or "") for d in model.get("done_candidates", [])}
+    pending = [c for c in model["valid_candidates"] if str(c.get("index") or c.get("item_index") or "") not in done_indices]
+    valid_rows = "".join(_candidate_row(item) for item in pending)
+    done_rows = "".join(_candidate_row(item) for item in model.get("done_candidates", []))
+    done_count = len(model.get("done_candidates", []))
     if not valid_rows:
         valid_rows = '<div class="empty-block">目前沒有正確候選</div>'
 
@@ -570,7 +578,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     </section>
     <section class="card" style="border-left: 4px solid var(--green);flex:1">
       <h2><span class="badge valid" style="font-size:12px">✅ 已輔助填入</span></h2>
-      <div style="overflow-x:auto;max-height:300px;overflow-y:auto"><table id="done-table"><thead><tr><th>#</th><th>原始片段</th><th>摘要</th></tr></thead><tbody id="done-tbody"></tbody></table></div>
+      <div style="overflow-x:auto;max-height:300px;overflow-y:auto"><table id="done-table"><thead><tr><th>#</th><th>原始片段</th><th>摘要</th></tr></thead><tbody id="done-tbody">{done_rows}</tbody></table></div>
       <div class="empty-block" id="done-empty">尚無已輔助填入項目</div>
     </section>
   </div>
@@ -1880,6 +1888,23 @@ def _actions(queue: dict[str, Any], queue_path: str | None) -> list[str]:
     return actions
 
 
+def _split_done_candidates(valid: list[dict[str, Any]], queue: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return valid candidates whose queue items have DONE or MANUAL_DONE status."""
+    items = queue.get("items", [])
+    done_statuses = {"DONE", "MANUAL_DONE"}
+    done = []
+    for vc in valid:
+        vc_idx = vc.get("index") or vc.get("item_index")
+        if vc_idx is None:
+            continue
+        for item in items:
+            qi = item.get("index")
+            if qi is not None and str(qi) == str(vc_idx) and item.get("status") in done_statuses:
+                done.append(vc)
+                break
+    return done
+
+
 def _candidate_with_labels(item: dict[str, Any]) -> dict[str, Any]:
     result = item.get("result", {})
     review_labels = _extract_review_labels(item)
@@ -2056,7 +2081,7 @@ def _current_item(queue: dict[str, Any]) -> dict[str, Any] | None:
 
 def _last_mock_result(queue: dict[str, Any]) -> dict[str, Any] | None:
     for item in reversed(queue.get("items", [])):
-        if item.get("status") in {"WAITING_FOR_HUMAN_CONFIRM", "DONE"}:
+        if item.get("status") in {"WAITING_FOR_HUMAN_CONFIRM", "DONE", "MANUAL_DONE"}:
             return {
                 "selected_numbers": list(item.get("selected_numbers", [])),
                 "selected_columns": list(item.get("selected_columns", [])),

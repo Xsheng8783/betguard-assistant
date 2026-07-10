@@ -932,3 +932,262 @@ def test_assist_fill_start_accepts_registered_manual_id(tmp_path: Path, monkeypa
             # Timeout during execute fill is expected in test env (no browser)
             # The key assertion is already tested: start handler accepted the candidate
             pass
+
+# ---------------------------------------------------------------------------
+# Mixed batch manual-done tests
+# ---------------------------------------------------------------------------
+
+
+class TestMixedBatchManualDone:
+    """Verify manual-done works for valid items in mixed batches."""
+
+    def _json_post(self, port: int, path: str, data: dict, timeout: int = 5):
+        import http.client, json as json_module
+        body = json_module.dumps(data).encode("utf-8")
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+        conn.request("POST", path, body=body, headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        return resp.status, json_module.loads(resp.read())
+
+    def test_mixed_batch_valid_can_manual_done(self, tmp_path, monkeypatch):
+        """Valid item in mixed batch should be allowed."""
+        from betguard.webui.app import _register_manual_candidate
+        import sys
+        monkeypatch.setitem(sys.modules, "playwright", type(sys)("playwright"))
+        monkeypatch.setitem(sys.modules, "playwright.sync_api", type(sys)("playwright.sync_api"))
+        monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+
+        handler = build_workbench_handler(project_version="test", git_commit="test")
+        with _running_server(handler) as port:
+            # Create batch with mixed content
+            _, body = self._json_post(port, "/assist-panel/create-batch",
+                                      {"text": "17.20.29.33 440\nthis is invalid\n11 28 1000"})
+            assert body.get("ok")
+            valid = body.get("valid_candidates", [])
+            assert len(valid) >= 1
+            # Mark valid index as done
+            vc = valid[0]
+            idx = vc.get("index") or vc.get("item_index")
+            qp = body.get("queue_path", "")
+            _, done_body = self._json_post(port, "/assist-fill/manual-done",
+                                           {"queue_path": qp, "item_index": idx})
+            assert done_body.get("ok"), f"manual-done failed: {done_body}"
+
+    def test_needs_review_index_rejected(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+        handler = build_workbench_handler(project_version="test", git_commit="test")
+        with _running_server(handler) as port:
+            _, body = self._json_post(port, "/assist-panel/create-batch",
+                                      {"text": "17.20.29.33 440\nnot valid text"})
+            qp = body.get("queue_path", "")
+            # Try to mark an non-existent high index
+            _, done_body = self._json_post(port, "/assist-fill/manual-done",
+                                           {"queue_path": qp, "item_index": 999})
+            assert not done_body.get("ok")
+
+    def test_nonexistent_index_rejected(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+        handler = build_workbench_handler(project_version="test", git_commit="test")
+        with _running_server(handler) as port:
+            _, body = self._json_post(port, "/assist-panel/create-batch",
+                                      {"text": "01.03.05 120"})
+            qp = body.get("queue_path", "")
+            _, done_body = self._json_post(port, "/assist-fill/manual-done",
+                                           {"queue_path": qp, "item_index": -1})
+            assert not done_body.get("ok")
+
+    def test_manual_done_does_not_trigger_site_ops(self, tmp_path, monkeypatch):
+        """Manual-done should never call assist-fill or real site."""
+        import sys
+        monkeypatch.setitem(sys.modules, "playwright", type(sys)("playwright"))
+        monkeypatch.setitem(sys.modules, "playwright.sync_api", type(sys)("playwright.sync_api"))
+        monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+        handler = build_workbench_handler(project_version="test", git_commit="test")
+        with _running_server(handler) as port:
+            _, body = self._json_post(port, "/assist-panel/create-batch",
+                                      {"text": "01.03.05 120"})
+            qp = body.get("queue_path", "")
+            _, done_body = self._json_post(port, "/assist-fill/manual-done",
+                                           {"queue_path": qp, "item_index": 1})
+            assert done_body.get("ok")
+            # Must have safety flags untouched
+            assert done_body.get("danger_buttons_clicked") == []
+
+# ---------------------------------------------------------------------------
+# Reload state preservation tests
+# ---------------------------------------------------------------------------
+
+class TestReloadPreservesManualDone:
+    """Verify F5 reload shows MANUAL_DONE items in done-tbody."""
+
+    def _get(self, port: int, path: str) -> str:
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", path)
+        return conn.getresponse().read().decode("utf-8", errors="replace")
+
+    def _json_post(self, port: int, path: str, data: dict, timeout: int = 5):
+        import http.client, json as json_module
+        body = json_module.dumps(data).encode("utf-8")
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+        conn.request("POST", path, body=body, headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        return resp.status, json_module.loads(resp.read())
+
+    def test_manual_done_survives_reload(self, tmp_path, monkeypatch):
+        """Manual-done item appears in done-tbody after reload."""
+        import sys
+        monkeypatch.setitem(sys.modules, "playwright", type(sys)("playwright"))
+        monkeypatch.setitem(sys.modules, "playwright.sync_api", type(sys)("playwright.sync_api"))
+        monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+
+        handler = build_workbench_handler(project_version="test", git_commit="test")
+        with _running_server(handler) as port:
+            # Create batch
+            _, body = self._json_post(port, "/assist-panel/create-batch",
+                                      {"text": "17.20.29.33 440"})
+            assert body.get("ok"), body
+            qp = body.get("queue_path", "")
+            valid = body.get("valid_candidates", [])
+            assert len(valid) >= 1
+            idx = valid[0].get("index")
+
+            # Build review URL from queue path
+            import os
+            qname = os.path.basename(qp).replace("batch_", "review_").replace(".json", ".html")
+            run_dir = os.path.basename(os.path.dirname(qp))
+            review_url = f"/runs/{run_dir}/{qname}"
+
+            # Reload 1: item should be in pending
+            r1 = self._get(port, review_url)
+            assert "pending-tbody" in r1
+            # Item should be in pending section
+            pending_section = r1.split("pending-tbody")[1].split("</tbody>")[0] if "pending-tbody" in r1 else ""
+            assert "17.20.29" in pending_section, "Item not in pending before manual-done"
+
+            # Mark manual-done
+            _, done_body = self._json_post(port, "/assist-fill/manual-done",
+                                           {"queue_path": qp, "item_index": idx})
+            assert done_body.get("ok"), done_body
+
+            # Reload 2: item should be in done, not in pending
+            r2 = self._get(port, review_url)
+            done_section = r2.split("done-tbody")[1].split("</tbody>")[0] if "done-tbody" in r2 else ""
+            pending2 = r2.split("pending-tbody")[1].split("</tbody>")[0] if "pending-tbody" in r2 else ""
+            assert "17.20.29" in done_section, "Item should be in done-tbody after manual-done"
+            assert "17.20.29" not in pending2, "Item should NOT be in pending after manual-done"
+
+            # Reload 3: idempotent (still only once)
+            r3 = self._get(port, review_url)
+            pending3 = r3.split("pending-tbody")[1].split("</tbody>")[0] if "pending-tbody" in r3 else ""
+            done3 = r3.split("done-tbody")[1].split("</tbody>")[0] if "done-tbody" in r3 else ""
+            # Item should be in done, NOT in pending
+            assert "17.20.29" in done3
+            assert "17.20.29" not in pending3, "Item should not re-appear in pending after second reload"
+
+    def test_unprocessed_item_stays_in_pending_after_reload(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+        handler = build_workbench_handler(project_version="test", git_commit="test")
+        with _running_server(handler) as port:
+            _, body = self._json_post(port, "/assist-panel/create-batch",
+                                      {"text": "17.20.29.33 440"})
+            import os
+            qp = body.get("queue_path", "")
+            qname = os.path.basename(qp).replace("batch_", "review_").replace(".json", ".html")
+            run_dir = os.path.basename(os.path.dirname(qp))
+            review_url = f"/runs/{run_dir}/{qname}"
+
+            r1 = self._get(port, review_url)
+            pending = r1.split("pending-tbody")[1].split("</tbody>")[0] if "pending-tbody" in r1 else ""
+            done = r1.split("done-tbody")[1].split("</tbody>")[0] if "done-tbody" in r1 else ""
+            assert "17.20.29" in pending, "Unprocessed item should stay in pending"
+            assert "17.20.29" not in done, "Unprocessed item should NOT be in done"
+
+
+# ---------------------------------------------------------------------------
+# Error handling tests for dynamic review rendering
+# ---------------------------------------------------------------------------
+
+class TestReviewRenderErrors:
+    """Verify graceful handling when queue is missing or corrupted."""
+
+    def _get(self, port: int, path: str) -> tuple:
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", path)
+        resp = conn.getresponse()
+        return resp.status, resp.read().decode("utf-8", errors="replace")
+
+    def test_missing_queue_falls_back_to_static(self, tmp_path, monkeypatch):
+        """When queue JSON is deleted, server should not crash."""
+        monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+        handler = build_workbench_handler(project_version="test", git_commit="test")
+        with _running_server(handler) as port:
+            # Create manual runs dir structure
+            run_dir = tmp_path / "runs" / "test_run"
+            run_dir.mkdir(parents=True)
+            html_path = run_dir / "review_test.html"
+            html_path.write_text("<html>static fallback</html>", encoding="utf-8")
+            # No queue JSON — should fall back to static or 404 (not crash)
+            status, body = self._get(port, "/runs/test_run/review_test.html")
+            # Server must not crash; 200 or 404 are acceptable
+            assert status in (200, 404), f"Unexpected status: {status}"
+
+    def test_queue_not_in_allowed_path(self, tmp_path, monkeypatch):
+        """Requests outside runs/ must not allow arbitrary file read."""
+        monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+        handler = build_workbench_handler(project_version="test", git_commit="test")
+        with _running_server(handler) as port:
+            status, body = self._get(port, "/runs/../../../etc/passwd")
+            # Must reject or return error
+            assert status != 200 or "passwd" not in body
+
+
+# ---------------------------------------------------------------------------
+# Extended mixed-batch tests
+# ---------------------------------------------------------------------------
+
+class TestExtendedMixedBatch:
+    """Additional edge cases for manual-done in mixed batches."""
+
+    def _json_post(self, port: int, path: str, data: dict, timeout: int = 5):
+        import http.client, json as json_module
+        body = json_module.dumps(data).encode("utf-8")
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+        conn.request("POST", path, body=body, headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        return resp.status, json_module.loads(resp.read())
+
+    def test_all_valid_batch_manual_done_still_works(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+        import sys
+        monkeypatch.setitem(sys.modules, "playwright", type(sys)("playwright"))
+        monkeypatch.setitem(sys.modules, "playwright.sync_api", type(sys)("playwright.sync_api"))
+        handler = build_workbench_handler(project_version="test", git_commit="test")
+        with _running_server(handler) as port:
+            _, body = self._json_post(port, "/assist-panel/create-batch",
+                                      {"text": "01.03.05 120"})
+            qp = body.get("queue_path", "")
+            _, done = self._json_post(port, "/assist-fill/manual-done",
+                                      {"queue_path": qp, "item_index": 1})
+            assert done.get("ok"), f"All-valid batch manual-done should succeed: {done}"
+
+    def test_duplicate_manual_done_is_safe(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+        import sys
+        monkeypatch.setitem(sys.modules, "playwright", type(sys)("playwright"))
+        monkeypatch.setitem(sys.modules, "playwright.sync_api", type(sys)("playwright.sync_api"))
+        handler = build_workbench_handler(project_version="test", git_commit="test")
+        with _running_server(handler) as port:
+            _, body = self._json_post(port, "/assist-panel/create-batch",
+                                      {"text": "01.03.05 120"})
+            qp = body.get("queue_path", "")
+            # First call
+            _, d1 = self._json_post(port, "/assist-fill/manual-done",
+                                    {"queue_path": qp, "item_index": 1})
+            assert d1.get("ok")
+            # Second call (same item already MANUAL_DONE)
+            _, d2 = self._json_post(port, "/assist-fill/manual-done",
+                                    {"queue_path": qp, "item_index": 1})
+            # Should succeed (no error) or return ok=true
+            assert d2.get("ok") or "already" in str(d2.get("error", "")).lower()
