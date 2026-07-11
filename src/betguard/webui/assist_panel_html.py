@@ -5,7 +5,7 @@ ASSIST_PANEL_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Betguard 輔助面板</title>
+<title>Betguard 牌單助手</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui,"Microsoft JhengHei",sans-serif;background:#f8fafc;color:#1e293b;font-size:16px;padding:14px}
@@ -38,11 +38,11 @@ button{font-size:15px;padding:8px 16px;border-radius:6px;border:none;cursor:poin
 </style>
 </head>
 <body>
-<h2 style="display:flex;align-items:center;gap:8px">Betguard 輔助面板
+<h2 style="display:flex;align-items:center;gap:8px">Betguard 牌單助手
 <button id="pin-btn" onclick="togglePin()" style="font-size:13px;padding:4px 10px;min-height:unset;background:#f59e0b;color:#fff">釘選視窗</button>
 </h2>
 <textarea id="batch-text" placeholder="貼上牌單..."></textarea>
-<button id="createBatchBtn" type="button" class="btn-primary">建立審核</button>
+<button id="createBatchBtn" type="button" class="btn-primary">貼上並建立審核</button>
 <div class="status" id="status-msg"></div>
 <div class="section">
  <h3>可輔助填入 <span class="badge badge-valid" id="valid-count">0</span></h3>
@@ -68,10 +68,43 @@ function setStatus(msg) {
 }
 
 function createBatch() {
-  var text = document.getElementById("batch-text").value.trim();
-  if (!text) { setStatus("請先貼上牌單"); return; }
+  var ta = document.getElementById("batch-text");
   var btn = document.getElementById("createBatchBtn");
+  var text = ta.value.trim();
+
+  if (text) {
+    // Textarea has content — use it directly
+    _doCreateBatch(text, ta, btn);
+  } else {
+    // Try clipboard
+    if (!navigator.clipboard || !navigator.clipboard.readText) {
+      setStatus("無法讀取剪貼簿，請手動貼上後再按一次");
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = "讀取剪貼簿...";
+    setStatus("讀取剪貼簿...");
+    navigator.clipboard.readText().then(function (clipText) {
+      var trimmed = (clipText || "").trim();
+      if (!trimmed) {
+        btn.disabled = false;
+        btn.textContent = "貼上並建立審核";
+        setStatus("剪貼簿沒有可用文字");
+        return;
+      }
+      ta.value = trimmed;
+      _doCreateBatch(trimmed, ta, btn);
+    }).catch(function () {
+      btn.disabled = false;
+      btn.textContent = "貼上並建立審核";
+      setStatus("無法讀取剪貼簿，請手動貼上後再按一次");
+    });
+  }
+}
+
+function _doCreateBatch(text, ta, btn) {
   btn.disabled = true;
+  btn.textContent = "建立中…";
   setStatus("建立審核中...");
   fetch("/assist-panel/create-batch", {
     method: "POST",
@@ -79,6 +112,7 @@ function createBatch() {
     body: JSON.stringify({ text: text })
   }).then(function (r) { return r.text(); }).then(function (raw) {
     btn.disabled = false;
+    btn.textContent = "貼上並建立審核";
     var data;
     try { data = JSON.parse(raw); }
     catch (e) { setStatus("回應不是有效 JSON"); return; }
@@ -95,6 +129,7 @@ function createBatch() {
     setStatus("已建立 " + valid.length + " 筆可輔助， " + review.length + " 筆需確認");
   }).catch(function (e) {
     btn.disabled = false;
+    btn.textContent = "貼上並建立審核";
     setStatus("建立審核失敗");
   });
 }

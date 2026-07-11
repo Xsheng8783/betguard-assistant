@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import sys
 
-_WINDOW_TITLE = "Betguard \u8f14\u52a9\u9762\u677f"  # "Betguard 輔助面板"
+_WINDOW_TITLE = "Betguard \u8f14\u52a9\u9762\u677f"  # "Betguard 牌單助手"
 
 
 def _find_window_by_title(title: str) -> int | None:

@@ -1917,7 +1917,7 @@ window.assistPanelFill = assistPanelFill;
 
             try:
                 from betguard.webfill.batch_mock_queue import build_batch_mock_queue
-                queue = build_batch_mock_queue(text.split("\n") if "\n" in text else text)
+                queue = build_batch_mock_queue(text.split("\n") if "\n" in text else text, game="六合")
             except Exception as exc:
                 self._send_json({"ok": False, "error": f"batch create error: {exc}"})
                 return
@@ -2077,7 +2077,7 @@ window.assistPanelFill = assistPanelFill;
             if data is None:
                 return
             text = (data.get("text") or "").strip()
-            game = (data.get("game") or "auto").strip()
+            game = (data.get("game") or "六合").strip()
             if not text:
                 self._send_json({"ok": False, "error": "empty text"})
                 return
