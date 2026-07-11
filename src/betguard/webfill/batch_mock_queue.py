@@ -31,11 +31,11 @@ FINAL_DECISION = {
 }
 
 
-def build_batch_mock_queue(text_or_lines: str | Iterable[str]) -> dict[str, Any]:
+def build_batch_mock_queue(text_or_lines: str | Iterable[str], *, game: str = "539") -> dict[str, Any]:
     raw_text = "\n".join(text_or_lines) if not isinstance(text_or_lines, str) else text_or_lines
-    preprocessing = preprocess_batch_input(text_or_lines)
+    preprocessing = preprocess_batch_input(text_or_lines, game=game)
     candidates = list(preprocessing.get("candidate_bet_lines", []))
-    review_result = _review_candidates(candidates)
+    review_result = _review_candidates(candidates, game=game)
     can_continue = bool(review_result.get("can_continue"))
     items = []
     for index, review_item in enumerate(review_result.get("items", []), start=1):
@@ -489,8 +489,8 @@ def _review_input(text_or_lines: str | Iterable[str]) -> dict[str, Any]:
     return attach_summaries(review_lines([str(line) for line in text_or_lines]).to_dict())
 
 
-def _review_candidates(candidates: list[dict[str, Any]]) -> dict[str, Any]:
-    reviewed = attach_summaries(review_lines([str(candidate.get("raw", "")) for candidate in candidates]).to_dict())
+def _review_candidates(candidates: list[dict[str, Any]], *, game: str = "539") -> dict[str, Any]:
+    reviewed = attach_summaries(review_lines([str(candidate.get("raw", "")) for candidate in candidates], game=game).to_dict())
     counts = {"ok": 0, "warning": 0, "error": 0}
     for index, item in enumerate(reviewed.get("items", [])):
         candidate = candidates[index] if index < len(candidates) else {}
@@ -511,6 +511,12 @@ def _apply_preprocessing_warnings(result: dict[str, Any], candidate: dict[str, A
     ]
     if not notes:
         return result
+
+    # "改" suffix means user confirmed the amount; suppress ambiguity warnings
+    if any("confirmed_correction" in str(n) for n in candidate.get("preprocessing_notes", [])):
+        # Only suppress if the bet parsed successfully with stars and money
+        if result.get("stars") and result.get("money"):
+            return result
 
     # Column (zhu_peng) bets with parsed stars and money are valid;
     # the "hyphen amount requires manual review" note is a false positive
