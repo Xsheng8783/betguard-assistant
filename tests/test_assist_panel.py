@@ -117,7 +117,7 @@ class TestAssistPanelHTML:
         assert "assistPanelFillBtn" in self.html
 
     def test_column_shows_review_page_hint(self) -> None:
-        assert "輔助面板" in self.html
+        assert "牌單助手" in self.html
 
 
     def test_no_auto_fill_after_create_or_revalidate(self) -> None:
