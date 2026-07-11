@@ -67,7 +67,6 @@ exe = EXE(
     upx=True,
     console=False,
              icon='installer/Betguard.ico',
-    icon=None,
 )
 
 coll = COLLECT(
