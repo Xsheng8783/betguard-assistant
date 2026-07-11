@@ -139,12 +139,14 @@ def _verify_filled_amounts(
 
 
 def _fill_amounts_on_b03(page: Any, amounts: dict[str, int]) -> list[dict[str, Any]]:
-    """Fill per-star amounts via Playwright on the B03 frame.
+    """Fill per-star amounts with retry and readback verification.
 
-    Uses ``window.frames[2]`` to find PengBet.Value inputs and fills them
-    by position (0→二星, 1→三星, 2→四星).  Each fill triggers input/change
-    events to notify knockout.
+    On slow machines the website may re-render after number selection,
+    clearing amount fields.  This function retries up to 3 times per star,
+    reads back the actual value, and logs each attempt to UTF-8 log.
     """
+    import time as _time
+
     executed: list[dict[str, Any]] = []
     amount_css = f'input[data-bind*="{AMOUNT_DATA_BIND_MARKER}"]'
 
@@ -152,60 +154,186 @@ def _fill_amounts_on_b03(page: Any, amounts: dict[str, int]) -> list[dict[str, A
         amt = amounts.get(str(star), amounts.get(star, 0))
         if amt <= 0:
             continue
-        try:
-            # Access B03 frame via window.frames[2] and find PengBet inputs
-            frame = page.frame(url="**" + B03_URL_MARKER + "**")
-            if frame is None:
-                # Fallback: use page-level locator — Playwright may route to B03
-                loc = page.locator(amount_css).nth(position)
-            else:
-                loc = frame.locator(amount_css).nth(position)
-            star_name = STAR_NAMES.get(star, str(star))
-            loc.fill(str(amt))
-            # Readback: re-locate and read actual input value
-            actual = ""
-            verified = False
+        star_name = STAR_NAMES.get(star, str(star))
+        result = None
+
+        for attempt in range(1, 4):  # up to 3 attempts
             try:
-                loc.dispatch_event("input")
-                loc.dispatch_event("change")
-                loc.blur()
-                # Wait for knockout re-render (sync Playwright API)
-                page.wait_for_timeout(50)
-                if frame is None:
-                    rloc = page.locator(amount_css).nth(position)
-                else:
-                    rloc = frame.locator(amount_css).nth(position)
-                actual = str(rloc.input_value() or "")
-                verified = (actual.strip().lstrip("0") or "0") == (str(amt).lstrip("0") or "0")
-            except Exception:
+                # Wait for the amount field to be visible and editable
+                frame = page.frame(url="**" + B03_URL_MARKER + "**")
+                target = frame if frame is not None else page
                 try:
-                    # Last resort: evaluate JS to read value
-                    actual = str(loc.evaluate("el => el.value") or "")
-                    verified = (actual.strip().lstrip("0") or "0") == (str(amt).lstrip("0") or "0")
+                    target.locator(amount_css).nth(position).wait_for(state="visible", timeout=2000)
                 except Exception:
-                    actual = ""
-                    verified = False
-            executed.append({
+                    # Field not yet visible — may still be rendering
+                    page.wait_for_timeout(300)
+                    if attempt < 3:
+                        continue  # retry
+
+                loc = target.locator(amount_css).nth(position)
+                loc.fill(str(amt))
+
+                # Trigger knockout events
+                try:
+                    loc.dispatch_event("input")
+                    loc.dispatch_event("change")
+                    loc.blur()
+                except Exception:
+                    pass
+
+                # Wait for knockout to process
+                page.wait_for_timeout(200)
+
+                # Readback: re-locate (field may have been re-rendered)
+                try:
+                    rloc = target.locator(amount_css).nth(position)
+                    actual = str(rloc.input_value() or "")
+                except Exception:
+                    try:
+                        actual = str(loc.evaluate("el => el.value") or "")
+                    except Exception:
+                        actual = ""
+
+                exp_norm = (str(amt).strip().lstrip("0") or "0")
+                act_norm = (actual.strip().lstrip("0") or "0")
+                verified = exp_norm == act_norm
+
+                _log_amount_attempt(star_name, amt, actual, attempt, verified, "")
+
+                if verified:
+                    result = {
+                        "type": "SET_AMOUNT",
+                        "star": star,
+                        "star_name": star_name,
+                        "amount": amt,
+                        "expected_amount": amt,
+                        "actual_amount": actual,
+                        "position": position,
+                        "executed": True,
+                        "verified": True,
+                        "attempts": attempt,
+                    }
+                    break  # success — exit retry loop
+
+            except Exception as exc:
+                _log_amount_attempt(star_name, amt, "", attempt, False, str(exc))
+                if attempt >= 3:
+                    result = {
+                        "type": "SET_AMOUNT",
+                        "star": star,
+                        "star_name": star_name,
+                        "amount": amt,
+                        "expected_amount": amt,
+                        "actual_amount": "",
+                        "position": position,
+                        "executed": False,
+                        "verified": False,
+                        "error": str(exc),
+                        "attempts": attempt,
+                    }
+
+        if result is None:
+            result = {
                 "type": "SET_AMOUNT",
                 "star": star,
                 "star_name": star_name,
                 "amount": amt,
                 "expected_amount": amt,
-                "actual_amount": actual,
+                "actual_amount": "",
                 "position": position,
-                "executed": True,
-                "verified": verified,
-            })
-        except Exception as exc:
-            executed.append({
-                "type": "SET_AMOUNT",
-                "star": star,
-                "star_name": STAR_NAMES.get(star, str(star)),
-                "amount": amt,
                 "executed": False,
-                "error": str(exc)[:200],
-            })
+                "verified": False,
+                "error": "amount field not visible after 3 attempts",
+                "attempts": 3,
+            }
+        executed.append(result)
+
     return executed
+
+
+def _log_amount_attempt(star_name: str, expected: int, actual: str, attempt: int, verified: bool, error: str) -> None:
+    """Log amount fill attempt to UTF-8 log (no site-sensitive data)."""
+    try:
+        import os
+        log_dir = os.path.join(os.path.expanduser("~"), "Documents", "Betguard Assistant Data", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, "amount_fill.log")
+        import time as _time
+        ts = _time.strftime('%Y-%m-%d %H:%M:%S')
+        status = "OK" if verified else "FAIL"
+        msg = f"[{ts}] {star_name} exp={expected} act={actual!r} attempt={attempt} {status}"
+        if error:
+            msg += f" err={error}"
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(msg + "\n")
+    except Exception:
+        pass
+
+
+# Keep old function signature for compatibility
+_FillVerifier = _verify_filled_amounts
+
+def _precheck_numbers_on_page(page: Any, numbers: list[str]) -> dict[str, Any]:
+    """Verify all target numbers exist on the current page before clicking.
+
+    Checks each number has a unique, visible <td> element on the page.
+    Returns {"ok": True} or {"ok": False, "error": ..., "missing": [...]}.
+    Does NOT click anything.
+    """
+    import json as _json
+    nums_json = _json.dumps([str(n) for n in numbers])
+    js = (
+        "(function() {"
+        " try {"
+        "  var f = null;"
+        "  for (var wi = 0; wi < window.frames.length; wi++) {"
+        "   try { if (window.frames[wi].location.href.indexOf('/Front/B/B03') >= 0) { f = window.frames[wi]; break; } } catch(e) {}"
+        "  }"
+        "  if (!f) f = window.frames[2];"
+        "  if (!f || !f.document) return JSON.stringify({ok: false, error: 'frame_not_found'});"
+        "  var target = " + nums_json + ";"
+        "  var found = {};"
+        "  var missing = [];"
+        "  var ambiguous = [];"
+        "  var tds = f.document.querySelectorAll('td');"
+        "  for (var i = 0; i < tds.length; i++) {"
+        "   var txt = (tds[i].textContent || '').trim();"
+        "   if (target.indexOf(txt) >= 0) {"
+        "    if (found[txt]) {"
+        "     ambiguous.push(txt);"
+        "    } else {"
+        "     found[txt] = true;"
+        "    }"
+        "   }"
+        "  }"
+        "  for (var j = 0; j < target.length; j++) {"
+        "   if (!found[target[j]]) missing.push(target[j]);"
+        "  }"
+        "  if (missing.length > 0) return JSON.stringify({ok: false, error: 'number_not_found', missing: missing});"
+        "  if (ambiguous.length > 0) return JSON.stringify({ok: false, error: 'ambiguous_selector', ambiguous: ambiguous});"
+        "  return JSON.stringify({ok: true});"
+        " } catch(e) { return JSON.stringify({ok: false, error: 'precheck_error: ' + String(e)}); }"
+        "})()"
+    )
+    try:
+        raw = page.evaluate(js)
+        result = _json.loads(raw)
+        if not result.get("ok"):
+            missing = result.get("missing", [])
+            if missing:
+                result["error"] = f"目前頁面找不到號碼{','.join(missing)}，請確認遊戲頁面"
+            return result
+        return {"ok": True}
+    except Exception as exc:
+        return {"ok": False, "error": f"precheck failed: {exc}"}
+
+
+# Import pure verifier from separate module
+try:
+    from betguard.webfill.amount_verify import _verify_filled_amounts
+except ImportError:
+    pass  # amount_verify not available; use local definition
+
 
 
 # ---------------------------------------------------------------------------
