@@ -1,4 +1,4 @@
-"""Windows launcher for Betguard Assistant -- packaged app entry point.
+"""Windows launcher for Betguard 牌單助手 -- packaged app entry point.
 
 Starts the local web server, waits for it, then opens the browser.
 Handles re-launch gracefully (no duplicate server).
@@ -30,7 +30,7 @@ def _is_frozen() -> bool:
 def _log_error(msg: str) -> None:
     """Write error to UTF-8 log file in Documents."""
     try:
-        log_dir = os.path.join(os.path.expanduser("~"), "Documents", "Betguard Assistant Data", "logs")
+        log_dir = os.path.join(os.path.expanduser("~"), "Documents", "Betguard 牌單助手 Data", "logs")
         os.makedirs(log_dir, exist_ok=True)
         log_path = os.path.join(log_dir, "launcher.log")
         with open(log_path, "a", encoding="utf-8") as f:
@@ -72,8 +72,8 @@ def _setup_bundled_chromium() -> None:
     if os.path.isdir(internal):
         browser_dir = internal
     if not os.path.isdir(browser_dir):
-        msg = f"找不到 bundled Chromium\n預期路徑: {browser_dir}\n請重新安裝 Betguard Assistant"
-        _show_error("Betguard Assistant", msg)
+        msg = f"找不到 bundled Chromium\n預期路徑: {browser_dir}\n請重新安裝 Betguard 牌單助手"
+        _show_error("Betguard 牌單助手", msg)
         _log_error(msg)
         sys.exit(1)
     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = browser_dir
@@ -114,7 +114,7 @@ def _start_server() -> subprocess.Popen | None:
 def _open_server_log():
     """Open server log for writing. In frozen mode, use UTF-8 log file."""
     try:
-        log_dir = os.path.join(os.path.expanduser("~"), "Documents", "Betguard Assistant Data", "logs")
+        log_dir = os.path.join(os.path.expanduser("~"), "Documents", "Betguard 牌單助手 Data", "logs")
         os.makedirs(log_dir, exist_ok=True)
         return open(os.path.join(log_dir, "server.log"), "a", encoding="utf-8")
     except Exception:
@@ -131,27 +131,27 @@ def main() -> None:
         _setup_bundled_chromium()
 
         if _is_server_running():
-            _safe_print("Betguard Assistant 已在執行中，開啟瀏覽器...")
+            _safe_print("Betguard 牌單助手 已在執行中，開啟瀏覽器...")
             webbrowser.open(APP_URL)
             return
 
-        _safe_print("啟動 Betguard Assistant...")
+        _safe_print("啟動 Betguard 牌單助手...")
         proc = _start_server()
         if proc is None:
             msg = "無法啟動伺服器，請檢查安裝是否完整"
-            _show_error("Betguard Assistant", msg)
+            _show_error("Betguard 牌單助手", msg)
             _log_error(msg)
             return
 
         for _ in range(20):
             if _is_server_running():
                 webbrowser.open(APP_URL)
-                _safe_print("Betguard Assistant 已啟動")
+                _safe_print("Betguard 牌單助手 已啟動")
                 return
             time.sleep(0.5)
 
         msg = f"伺服器啟動逾時，請手動開啟: {APP_URL}"
-        _show_error("Betguard Assistant", msg)
+        _show_error("Betguard 牌單助手", msg)
         _log_error(msg)
 
     except SystemExit:
@@ -159,7 +159,7 @@ def main() -> None:
     except Exception:
         tb = traceback.format_exc()
         _log_error(tb)
-        _show_error("Betguard Assistant 錯誤", tb[-500:])
+        _show_error("Betguard 牌單助手 錯誤", tb[-500:])
         sys.exit(1)
 
 

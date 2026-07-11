@@ -1,13 +1,14 @@
 ; Inno Setup script for Betguard Assistant v0.5.34-beta
 
-#define MyAppName "Betguard Assistant"
+#define MyAppName "Betguard 牌單助手"
 #define MyAppVersion "0.5.35-beta"
 #define MyAppPublisher "Betguard"
 #define MyAppURL "http://127.0.0.1:8765"
 #define MyAppExeName "BetguardAssistant.exe"
 
 [Setup]
-AppId={{BETGUARD-ASSIST-000001}}
+AppId={{BETGUARD-ASSISTANT-001}
+SetupIconFile=installer\Betguard.ico
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
@@ -16,7 +17,7 @@ DisableDirPage=no
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 OutputDir=..\release
-OutputBaseFilename=Betguard-Assistant-v0.5.35-beta-Setup
+OutputBaseFilename=Betguard-Setup
 Compression=lzma2
 SolidCompression=no
 WizardStyle=modern
@@ -29,7 +30,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "建立桌面捷徑"; GroupDescription: "額外捷徑:"
-Name: "launch"; Description: "啟動 Betguard Assistant"; GroupDescription: "安裝完成後:"
+Name: "launch"; Description: "啟動 Betguard 牌單助手"; GroupDescription: "安裝完成後:"
 
 [Files]
 Source: "..\dist\BetguardAssistant\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "playwright-browsers\*"
@@ -41,7 +42,7 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 Name: "{autoprograms}\解除安裝 {#MyAppName}"; Filename: "{uninstallexe}"
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "啟動 Betguard Assistant"; Flags: nowait postinstall skipifsilent; Tasks: launch
+Filename: "{app}\{#MyAppExeName}"; Description: "啟動 Betguard 牌單助手"; Flags: nowait postinstall skipifsilent; Tasks: launch
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
