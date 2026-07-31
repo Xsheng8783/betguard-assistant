@@ -61,6 +61,7 @@ def validate_bet(bet: ParsedBet) -> ValidationResult:
 
 
 def _validate_car(bet: ParsedBet, errors: list[str]) -> None:
+    errors.append("車牌型尚未支援，請人工確認")
     game = ACTIVE_GAMES[bet.game]
 
     if bet.number is None:

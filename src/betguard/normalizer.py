@@ -32,6 +32,7 @@ _GAME_HINT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"^天天[：:。．]\s*"), "tiantianle"),
     (re.compile(r"^六合彩[：:。．]?\s*"), "liuhecai"),
     (re.compile(r"^六合[：:。．]\s*"), "liuhecai"),
+    (re.compile(r"^六和[：:。．]?\s*"), "liuhecai"),
     (re.compile(r"^大樂透[：:。．]?\s*"), "daletou"),
 ]
 
@@ -43,7 +44,7 @@ _GAME_HINT_LABELS: dict[str, str] = {
 
 
 def extract_game_hint(text: str) -> tuple[str, str]:
-    """Extract game hint from text prefix. Returns (hint_key, remaining_text)."""
+    """Extract game hint from text prefix."""
     for pattern, hint in _GAME_HINT_PATTERNS:
         m = pattern.match(text)
         if m:
