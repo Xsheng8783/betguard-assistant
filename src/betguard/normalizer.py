@@ -13,6 +13,19 @@ UNIT_WORD = "\u652f"
 FULL_OPEN_PAREN = "\uff08"
 FULL_CLOSE_PAREN = "\uff09"
 MULTIPLY_SIGN = "\u00d7"
+FULL_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
+FULL_COMMA = "\uff0c"
+FULL_PERIOD = "\uff0e"
+# Bracket pairs to normalize
+_BRACKET_PAIRS = [
+    ("\u3010", "["), ("\u3011", "]"),  # 【 】
+    ("\uff3b", "["), ("\uff3d", "]"),  # ［ ］
+]
+# Known prefix labels that can be safely stripped
+_STRIP_PREFIXES_RE = re.compile(
+    r"^(?:今彩\s*539[：:]\s*|539[：:]\s*|號碼[：:]\s*|主支[：:]\s*|牌[：:]\s*"
+    r"|本期[：:]\s*|下注[：:]\s*|參考[：:]\s*|今彩\s*)?"
+)
 
 
 @dataclass(frozen=True)
@@ -37,6 +50,28 @@ def normalize_for_parser(text: str) -> NormalizationResult:
         notes.append("normalized full-width parentheses")
     value = updated
 
+    # Fullwidth digits
+    updated = value.translate(FULL_DIGITS)
+    if updated != value:
+        notes.append("normalized full-width digits")
+    value = updated
+
+    # Fullwidth comma and period
+    updated = value.replace(FULL_COMMA, ",").replace(FULL_PERIOD, ".")
+    if updated != value:
+        notes.append("normalized full-width punctuation")
+    value = updated
+
+    # Bracket normalization
+    for fw, hw in _BRACKET_PAIRS:
+        value = value.replace(fw, hw)
+
+    # Strip known prefixes
+    updated = _STRIP_PREFIXES_RE.sub("", value).strip()
+    if updated != value:
+        notes.append("stripped known prefix label")
+    value = updated
+
     updated = _unwrap_star_parentheses(value)
     if updated != value:
         notes.append("unwrapped parenthesized star segment")
@@ -57,10 +92,10 @@ def normalize_for_parser(text: str) -> NormalizationResult:
         notes.append("normalized whitespace")
     value = updated
 
-    # Strip only trailing Chinese punctuation (，。、) so an otherwise-parseable
+    # Strip only trailing Chinese/ASCII punctuation so an otherwise-parseable
     # line is not blocked by a stray full-stop/comma. Deliberately end-anchored
     # and limited to these marks so it never changes inner delimiters or amounts.
-    updated = re.sub(r"[、。，]+$", "", value).strip()
+    updated = re.sub(r"[、。，,]+$", "", value).strip()
     if updated != value:
         notes.append("stripped trailing punctuation")
     value = updated
