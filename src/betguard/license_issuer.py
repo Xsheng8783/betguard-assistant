@@ -148,6 +148,12 @@ def issue_from_request(request_code: str, days: int, plan: str) -> str:
     return prefix_map.get(plan, "BGXE-") + "-".join(chunks)
 
 
+def issue_unbound(days: int, plan: str) -> str:
+    """Issue an unbound activation code (no device binding). Returns BG7U-... or BG30U-..."""
+    from betguard.license import _issue_unbound
+    return _issue_unbound(days, plan)
+
+
 # ── CLI ──
 
 def main():
@@ -159,10 +165,14 @@ def main():
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    issue_cmd = sub.add_parser("issue", help="Issue Ed25519-signed activation code from request code")
-    issue_cmd.add_argument("--request-code", required=True, help="Client license request code (BRQ-...)")
-    issue_cmd.add_argument("--days", type=int, required=True, help="Days until expiration")
+    issue_cmd = sub.add_parser("issue", help="Issue device-bound code from request code")
+    issue_cmd.add_argument("--request-code", required=True)
+    issue_cmd.add_argument("--days", type=int, required=True)
     issue_cmd.add_argument("--plan", required=True, choices=["trial_7d", "trial_30d"])
+
+    unbound_cmd = sub.add_parser("issue-unbound", help="Issue unbound code (no BRQ needed)")
+    unbound_cmd.add_argument("--days", type=int, required=True)
+    unbound_cmd.add_argument("--plan", required=True, choices=["trial_7d", "trial_30d"])
 
     gen_cmd = sub.add_parser("generate-key", help="Generate a new Ed25519 keypair")
 
@@ -170,8 +180,13 @@ def main():
 
     if args.command == "issue":
         try:
-            code = issue_from_request(args.request_code, args.days, args.plan)
-            print(code)
+            print(issue_from_request(args.request_code, args.days, args.plan))
+        except Exception as e:
+            print(f"錯誤：{e}", file=sys.stderr)
+            sys.exit(1)
+    elif args.command == "issue-unbound":
+        try:
+            print(issue_unbound(args.days, args.plan))
         except Exception as e:
             print(f"錯誤：{e}", file=sys.stderr)
             sys.exit(1)

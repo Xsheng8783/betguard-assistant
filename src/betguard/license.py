@@ -221,6 +221,35 @@ def _legacy_verify(code: str, current_hash: str) -> dict | None:
 
 # ── Ed25519 activation codes ──
 
+def _issue_unbound(days: int, plan: str) -> str:
+    """Generate an unbound Ed25519 activation code (no device binding)."""
+    license_id = os.urandom(4)
+    plan_byte = _PLAN_BYTES[plan]
+    issued = datetime.now(timezone.utc)
+    expires = issued + timedelta(days=days)
+    issued_day = (issued.date() - _EPOCH).days
+    expires_day = (expires.date() - _EPOCH).days
+    dev_prefix = b'\x00\x00\x00\x00'  # unbound marker
+    payload = struct.pack(">4sBHH4s", license_id, plan_byte, issued_day, expires_day, dev_prefix)
+
+    private_key_b64 = os.environ.get("BETGUARD_LICENSE_PRIVATE_KEY", "")
+    if not private_key_b64:
+        raise ValueError("BETGUARD_LICENSE_PRIVATE_KEY not set")
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        key = Ed25519PrivateKey.from_private_bytes(base64.b64decode(private_key_b64))
+        signature = key.sign(payload)
+    except ImportError:
+        import nacl.bindings
+        pk = base64.b64decode(private_key_b64)
+        signature = nacl.bindings.crypto_sign_detached(payload, pk + _get_public_key_bytes())
+
+    encoded = _b32_encode(payload + signature)
+    chunks = [encoded[i:i + 4] for i in range(0, len(encoded), 4)]
+    prefix_map = {"trial_7d": "BG7U-", "trial_30d": "BG30U-"}
+    return prefix_map.get(plan, "BGXU-") + "-".join(chunks)
+
+
 def _issue_ed25519(device_hash: str, days: int, plan: str, license_id: bytes | None = None) -> str:
     if license_id is None:
         license_id = os.urandom(4)
@@ -263,6 +292,7 @@ def _verify_ed25519(raw: bytes, current_device_hash: str) -> dict | None:
         return None
     plan = _PLAN_REVERSE[plan_byte]
     license_id_hex = license_id.hex().upper()
+    is_unbound = dev_prefix == b'\x00\x00\x00\x00'
 
     try:
         if not _ed25519_verify(_get_public_key_bytes(), payload, signature):
@@ -270,7 +300,7 @@ def _verify_ed25519(raw: bytes, current_device_hash: str) -> dict | None:
     except ImportError as e:
         return {"ok": False, "error": f"無法驗證簽章：{e}"}
 
-    if current_device_hash[:8] != dev_prefix.hex():
+    if not is_unbound and current_device_hash[:8] != dev_prefix.hex():
         return {"ok": False, "error": "此啟用碼不屬於本裝置"}
 
     issued = datetime.combine(_EPOCH + timedelta(days=issued_day), datetime.min.time(),
@@ -355,7 +385,8 @@ def verify_activation_code(code: str, device_id_display: str | None = None) -> d
     """Verify activation code. Production: BG7E/BG30E only."""
     code = code.strip()
     current_hash = _device_id_hash()
-    is_ed25519 = code.upper().startswith("BG7E-") or code.upper().startswith("BG30E-")
+    is_ed25519 = (code.upper().startswith("BG7E-") or code.upper().startswith("BG30E-")
+                   or code.upper().startswith("BG7U-") or code.upper().startswith("BG30U-"))
     cleaned = code.upper()
     if cleaned.startswith("BG") and "-" in cleaned[:6]:
         cleaned = cleaned[cleaned.index("-") + 1:]
@@ -402,7 +433,9 @@ def load_license() -> dict | None:
                 struct.unpack(">4sBHH4s", payload)
             if plan_byte not in _PLAN_REVERSE:
                 return None
-            if _device_id_hash()[:8] != dev_prefix.hex():
+            dev_prefix_hex = dev_prefix.hex()
+            is_unbound = dev_prefix == b'\x00\x00\x00\x00'
+            if not is_unbound and _device_id_hash()[:8] != dev_prefix_hex:
                 return None
             plan = _PLAN_REVERSE[plan_byte]
             issued = datetime.combine(_EPOCH + timedelta(days=issued_day), datetime.min.time(),
