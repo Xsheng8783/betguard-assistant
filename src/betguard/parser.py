@@ -58,7 +58,7 @@ PER_STAR_AMOUNT_PATTERN = re.compile(
     rf"\s*(?P<value>\d+(?:\.\d+)?)(?P<kind>{AMOUNT_KIND_PATTERN})"
 )
 COLUMN_SPLIT_PATTERN = re.compile(rf"\s*(?:/|{TOUCH_WORD}|{MULTIPLY_SIGN}|[xX])\s*")
-TAIL_SHORTHAND_SPLIT_PATTERN = re.compile(rf"[{COMMA_WORD}{FULL_COMMA},\s]+")
+TAIL_SHORTHAND_SPLIT_PATTERN = re.compile(rf"[{COMMA_WORD}{FULL_COMMA},\s\-]+")
 
 
 class ParseError(ValueError):
@@ -705,6 +705,8 @@ def _parse_column_line(value: str, *, game_name: str) -> ParsedBet | None:
         working, stars, amount = _peel_star_amount_suffix(value)
     if amount is None:
         working, amount = _peel_tail_amount(working)
+    if amount is None:
+        working, stars, amount = _peel_column_tail_star_amount(value)
 
     if not stars:
         working, stars = _peel_star_suffix(working, allow_numeric=amount is not None)
@@ -774,23 +776,28 @@ def _parse_flat_slash_dunhao_column_group(text: str) -> list[int] | None:
 
 def _parse_tail_shorthand(text: str) -> list[list[int]] | None:
     value = text.strip()
-    if not value.startswith(TAIL_WORD):
-        return None
 
-    body = value[len(TAIL_WORD) :].strip()
-    if not body:
-        return None
+    # Format: 尾2-9, 尾2,9, etc.
+    if value.startswith(TAIL_WORD):
+        body = value[len(TAIL_WORD):].strip()
+        if body:
+            parts = [part for part in TAIL_SHORTHAND_SPLIT_PATTERN.split(body) if part]
+            if len(parts) >= 2:
+                columns: list[list[int]] = []
+                for part in parts:
+                    if not re.fullmatch(r"\d", part):
+                        raise ParseError("tail must be between 0 and 9")
+                    columns.append(expand_tail(int(part)))
+                return columns
 
-    parts = [part for part in TAIL_SHORTHAND_SPLIT_PATTERN.split(body) if part]
-    if len(parts) < 2:
-        return None
+    # Format: 2尾碰9尾, 2尾-9尾
+    tail_match = re.fullmatch(
+        rf"(\d){TAIL_WORD}\s*(?:碰|[-,\s])\s*(\d){TAIL_WORD}", value
+    )
+    if tail_match:
+        return [expand_tail(int(tail_match.group(1))), expand_tail(int(tail_match.group(2)))]
 
-    columns: list[list[int]] = []
-    for part in parts:
-        if not re.fullmatch(r"\d", part):
-            raise ParseError("tail must be between 0 and 9")
-        columns.append(expand_tail(int(part)))
-    return columns
+    return None
 
 
 def _parse_column_numbers(text: str) -> list[int]:
@@ -816,7 +823,12 @@ def _parse_column_numbers(text: str) -> list[int]:
             raise ParseError("unsupported or unclear column format")
         token = match.group(0)
         if len(token) > 2:
-            raise ParseError("unsupported or unclear column format")
+            if len(token) % 2 != 0:
+                raise ParseError("unsupported or unclear column format")
+            for k in range(0, len(token), 2):
+                numbers.append(int(token[k:k+2]))
+            index += len(token)
+            continue
         numbers.append(int(token))
         index += len(token)
 
@@ -1023,6 +1035,21 @@ def _peel_tail_amount(text: str) -> tuple[str, BetAmount | None]:
 
     amount = _amount_from_parts(value, kind, source="bare")
     return text[: bare_match.start()].strip(), amount
+
+
+def _peel_column_tail_star_amount(text: str) -> tuple[str, list[int], BetAmount | None]:
+    """Peel star+amount from column tail, e.g., 2尾碰9尾二50 → (2尾碰9尾, [2], BetAmount(50))."""
+    match = re.fullmatch(
+        rf"(?P<prefix>.+{TAIL_WORD}.+)"
+        rf"(?P<star>二|三|四|兩|[234])"
+        rf"\s*(?P<value>\d+(?:\.\d+)?)(?P<kind>{AMOUNT_KIND_PATTERN})?",
+        text,
+    )
+    if match:
+        stars = _stars_from_token(match.group("star"))
+        amount = _amount_from_parts(match.group("value"), match.group("kind"), source="star")
+        return match.group("prefix").strip(), stars, amount
+    return text, [], None
 
 
 def _looks_like_slash_amount(value: str, kind: str | None) -> bool:

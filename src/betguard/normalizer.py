@@ -28,11 +28,11 @@ _STRIP_PREFIXES_RE = re.compile(
 )
 # Game hint prefixes
 _GAME_HINT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"^天天樂[：:]?\s*"), "tiantianle"),
-    (re.compile(r"^天天[：:]\s*"), "tiantianle"),
-    (re.compile(r"^六合彩[：:]?\s*"), "liuhecai"),
-    (re.compile(r"^六合[：:]\s*"), "liuhecai"),
-    (re.compile(r"^大樂透[：:]?\s*"), "daletou"),
+    (re.compile(r"^天天樂[：:。．]?\s*"), "tiantianle"),
+    (re.compile(r"^天天[：:。．]\s*"), "tiantianle"),
+    (re.compile(r"^六合彩[：:。．]?\s*"), "liuhecai"),
+    (re.compile(r"^六合[：:。．]\s*"), "liuhecai"),
+    (re.compile(r"^大樂透[：:。．]?\s*"), "daletou"),
 ]
 
 _GAME_HINT_LABELS: dict[str, str] = {
