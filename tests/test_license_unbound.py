@@ -11,13 +11,13 @@ import pytest
 from betguard.license import (
     _LICENSE_FILE,
     _device_id_hash,
-    _issue_unbound,
     activate_license,
     is_license_active,
     license_status,
     load_license,
     verify_activation_code,
 )
+from betguard.license_issuer import issue_unbound
 
 
 @pytest.fixture
@@ -30,7 +30,7 @@ def temp_license():
 
 class TestUnboundActivation:
     def test_bg7u_activates(self, temp_license):
-        code = _issue_unbound(7, "trial_7d")
+        code = issue_unbound(7, "trial_7d")
         assert code.startswith("BG7U-")
         r = activate_license(code)
         assert r["ok"] is True
@@ -38,14 +38,14 @@ class TestUnboundActivation:
         assert r["plan"] == "trial_7d"
 
     def test_bg30u_activates(self, temp_license):
-        code = _issue_unbound(30, "trial_30d")
+        code = issue_unbound(30, "trial_30d")
         assert code.startswith("BG30U-")
         r = activate_license(code)
         assert r["ok"] is True
         assert r["plan"] == "trial_30d"
 
     def test_unbound_repeat_no_extend(self, temp_license):
-        code = _issue_unbound(7, "trial_7d")
+        code = issue_unbound(7, "trial_7d")
         r1 = activate_license(code)
         r2 = activate_license(code)
         assert r2["activated"] is False
@@ -53,13 +53,13 @@ class TestUnboundActivation:
         assert r2["expires_at"] == r1["expires_at"]
 
     def test_unbound_expired_rejected(self, temp_license):
-        code = _issue_unbound(-1, "trial_7d")
+        code = issue_unbound(-1, "trial_7d")
         r = activate_license(code)
         assert r["ok"] is False
         assert "已過期" in r.get("error", "")
 
     def test_unbound_tampered_payload_fails(self, temp_license):
-        code = _issue_unbound(7, "trial_7d")
+        code = issue_unbound(7, "trial_7d")
         # Tamper with a character in the middle (not padding bits at end)
         mid = len(code) // 2
         tampered = code[:mid] + ("X" if code[mid] != "X" else "Y") + code[mid+1:]
@@ -67,7 +67,7 @@ class TestUnboundActivation:
         assert r["ok"] is False
 
     def test_unbound_license_json_no_full_code(self, temp_license):
-        code = _issue_unbound(7, "trial_7d")
+        code = issue_unbound(7, "trial_7d")
         activate_license(code)
         with open(temp_license, "r") as f:
             data = json.load(f)
@@ -75,7 +75,7 @@ class TestUnboundActivation:
         assert "activation_code" not in data
 
     def test_unbound_works_on_any_device(self, temp_license):
-        code = _issue_unbound(7, "trial_7d")
+        code = issue_unbound(7, "trial_7d")
         r = activate_license(code)
         assert r["ok"] is True
 
@@ -94,6 +94,24 @@ class TestUnboundActivation:
         r = activate_license(code)
         assert r["ok"] is False
         assert "不屬於" in r.get("error", "")
+
+
+    def test_unbound_env_key_priority(self, monkeypatch):
+        """env key is used even when key file exists."""
+        import base64 as _b64
+        monkeypatch.setenv("BETGUARD_LICENSE_PRIVATE_KEY",
+                           "mrFXDQsGxQrGHf5fk+CY3eC00IA/DQdZq/OanLru50I=")
+        # Should not fail
+        code = issue_unbound(7, "trial_7d")
+        assert code.startswith("BG7U-")
+
+    def test_unbound_no_key_fails(self, monkeypatch):
+        """Both env and file missing → error."""
+        monkeypatch.delenv("BETGUARD_LICENSE_PRIVATE_KEY", raising=False)
+        # Patch key file path to a non-existent location
+        with patch("betguard.license_issuer._PRIVATE_KEY_PATH", "/nonexistent/key"):
+            with pytest.raises(FileNotFoundError):
+                issue_unbound(7, "trial_7d")
 
 
 class TestUnboundSafetyGates:

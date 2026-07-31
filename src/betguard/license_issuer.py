@@ -150,8 +150,24 @@ def issue_from_request(request_code: str, days: int, plan: str) -> str:
 
 def issue_unbound(days: int, plan: str) -> str:
     """Issue an unbound activation code (no device binding). Returns BG7U-... or BG30U-..."""
-    from betguard.license import _issue_unbound
-    return _issue_unbound(days, plan)
+    from betguard.license import _build_unbound_payload
+    payload = _build_unbound_payload(days, plan)
+
+    private_key = _load_private_key()
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        key = Ed25519PrivateKey.from_private_bytes(private_key)
+        signature = key.sign(payload)
+    except ImportError:
+        import nacl.bindings
+        from betguard.license import _get_public_key_bytes
+        pub = _get_public_key_bytes()
+        signature = nacl.bindings.crypto_sign_detached(payload, private_key + pub)
+
+    encoded = _b32_encode(payload + signature)
+    chunks = [encoded[i:i + 4] for i in range(0, len(encoded), 4)]
+    prefix_map = {"trial_7d": "BG7U-", "trial_30d": "BG30U-"}
+    return prefix_map.get(plan, "BGXU-") + "-".join(chunks)
 
 
 # ── CLI ──

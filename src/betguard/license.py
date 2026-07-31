@@ -221,33 +221,15 @@ def _legacy_verify(code: str, current_hash: str) -> dict | None:
 
 # ── Ed25519 activation codes ──
 
-def _issue_unbound(days: int, plan: str) -> str:
-    """Generate an unbound Ed25519 activation code (no device binding)."""
+def _build_unbound_payload(days: int, plan: str) -> bytes:
+    """Build the signed payload for an unbound code. Returns 13 bytes (no signing)."""
     license_id = os.urandom(4)
     plan_byte = _PLAN_BYTES[plan]
     issued = datetime.now(timezone.utc)
     expires = issued + timedelta(days=days)
     issued_day = (issued.date() - _EPOCH).days
     expires_day = (expires.date() - _EPOCH).days
-    dev_prefix = b'\x00\x00\x00\x00'  # unbound marker
-    payload = struct.pack(">4sBHH4s", license_id, plan_byte, issued_day, expires_day, dev_prefix)
-
-    private_key_b64 = os.environ.get("BETGUARD_LICENSE_PRIVATE_KEY", "")
-    if not private_key_b64:
-        raise ValueError("BETGUARD_LICENSE_PRIVATE_KEY not set")
-    try:
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-        key = Ed25519PrivateKey.from_private_bytes(base64.b64decode(private_key_b64))
-        signature = key.sign(payload)
-    except ImportError:
-        import nacl.bindings
-        pk = base64.b64decode(private_key_b64)
-        signature = nacl.bindings.crypto_sign_detached(payload, pk + _get_public_key_bytes())
-
-    encoded = _b32_encode(payload + signature)
-    chunks = [encoded[i:i + 4] for i in range(0, len(encoded), 4)]
-    prefix_map = {"trial_7d": "BG7U-", "trial_30d": "BG30U-"}
-    return prefix_map.get(plan, "BGXU-") + "-".join(chunks)
+    return struct.pack(">4sBHH4s", license_id, plan_byte, issued_day, expires_day, b'\x00\x00\x00\x00')
 
 
 def _issue_ed25519(device_hash: str, days: int, plan: str, license_id: bytes | None = None) -> str:
