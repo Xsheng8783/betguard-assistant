@@ -305,35 +305,48 @@ def _render_doc(title: str, body: str) -> str:
 
 
 def _render_license_status_badge() -> str:
-    """Inline license status snippet for the dashboard."""
+    """Inline license status snippet for the dashboard.
+
+    Prominent entry block — inactive / expired / active states all link to
+    /license so the activation entry is never hidden in the footer.
+    """
     try:
         from betguard.license import license_status
         status = license_status()
     except Exception:
-        return '<div class="notice danger"><strong>授權狀態：</strong>無法讀取授權資料</div>'
+        return '<div class="notice danger"><strong>授權狀態：</strong>無法讀取授權資料｜<a href="/license">前往授權頁</a></div>'
 
     s = status["status"]
     device_id = status.get("device_id", "")
     expires = status.get("expires_at", "")
     plan = status.get("plan", "")
 
+    plan_label = {"trial_7d": "7 天方案", "trial_30d": "30 天方案"}.get(plan, plan)
+
     if s == "active":
-        return f"""<div class="notice success" style="margin-bottom:12px">
-<strong>🔑 授權狀態：有效</strong>｜方案：{plan}｜到期日：{expires[:10]}｜設備碼：<code>{device_id}</code>｜
-<a href="/license">管理授權</a>
+        return f"""<div class="license-entry license-active" style="border:1px solid #2e7d32;background:#f0f9f0;border-radius:6px;padding:12px 16px;margin-bottom:12px">
+<strong>🔑 授權有效</strong>｜方案：{plan_label}｜到期日：{expires[:10]}｜設備碼：<code>{device_id}</code><br>
+<a href="/license" style="display:inline-block;margin-top:8px;padding:8px 20px;background:#2563eb;color:#fff;border-radius:4px;text-decoration:none">查看授權資訊</a>
 </div>"""
     if s == "expired":
-        return f"""<div class="notice danger" style="margin-bottom:12px">
-<strong>⚠️ 授權已到期</strong>｜方案：{plan}｜到期日：{expires[:10]}｜設備碼：<code>{device_id}</code>｜
-<a href="/license">輸入啟用碼續用</a>
+        return f"""<div class="license-entry license-expired" style="border:1px solid #c33;background:#fff5f5;border-radius:6px;padding:12px 16px;margin-bottom:12px">
+<strong>⚠️ 授權已到期</strong>｜方案：{plan_label}｜到期日：{expires[:10]}｜設備碼：<code>{device_id}</code><br>
+<a href="/license" style="display:inline-block;margin-top:8px;padding:8px 20px;background:#dc2626;color:#fff;border-radius:4px;text-decoration:none">立即續期</a>
 </div>"""
-    return f"""<div class="notice warning" style="margin-bottom:12px">
-<strong>🔒 尚未啟用</strong>｜設備碼：<code>{device_id}</code>｜
-<a href="/license">輸入啟用碼</a>
+    return f"""<div class="license-entry license-inactive" style="border:1px solid #b45309;background:#fff8ef;border-radius:6px;padding:12px 16px;margin-bottom:12px">
+<strong>🔒 尚未啟用</strong>｜設備碼：<code>{device_id}</code><br>
+<a href="/license" style="display:inline-block;margin-top:8px;padding:8px 20px;background:#2563eb;color:#fff;border-radius:4px;text-decoration:none">輸入啟用碼</a>
 </div>"""
 
 
 def _render_license_page() -> str:
+    """Render the license activation page.
+
+    - Single shared input for BG7- / BG30- codes.
+    - Loads /license/status on page load.
+    - Shows activation result inline (no alert-only errors).
+    - Never writes the activation code to console or log.
+    """
     from betguard.license import license_status
     status = license_status()
     status_text = {"active": "授權有效 ✅", "inactive": "尚未啟用", "expired": "授權已到期 ⚠️"}.get(
@@ -349,28 +362,72 @@ def _render_license_page() -> str:
     active_line = '<p style="color:green">✅ 當前可使用輔助填入功能</p>' if is_active else ''
     expired_line = '<p style="color:red">⚠️ 授權已到期，輔助填入功能已停用。請輸入新的啟用碼續用。</p>' if status["status"] == "expired" else ''
 
-    body = f"""<h2>{status_text}</h2>
+    body = f"""<h2>Betguard 牌單助手授權啟用</h2>
 <p><strong>設備碼：</strong><code style="font-size:1.2em">{device_id}</code></p>
+<div id="license-current">
 {plan_line}
 {expires_line}
 {active_line}
 {expired_line}
+</div>
 
 <hr>
 <h3>輸入啟用碼</h3>
+<p style="color:#555">支援 BG7（7 天方案）與 BG30（30 天方案），同一輸入框皆可輸入。</p>
 <div>
-  <input type="text" id="activation-code" placeholder="BG7-XXXX-XXXX-XXXX-XXXX" style="width:100%;max-width:400px;font-family:monospace;font-size:1em;padding:8px">
+  <input type="text" id="activation-code" placeholder="請輸入 BG7 或 BG30 啟用碼" autocomplete="off" spellcheck="false" style="width:100%;max-width:480px;font-family:monospace;font-size:1.1em;padding:10px">
   <br><br>
-  <button onclick="activateLicense()" style="padding:8px 20px;font-size:1em">啟用</button>
+  <button id="activate-btn" onclick="activateLicense()" style="padding:10px 28px;font-size:1.05em">啟用 Betguard</button>
   <span id="activate-msg" style="margin-left:12px"></span>
 </div>
+<div id="activate-result" style="margin-top:16px"></div>
 
 <script>
+const codeInput = document.getElementById('activation-code');
+const activateBtn = document.getElementById('activate-btn');
+const msg = document.getElementById('activate-msg');
+
+// Enter 送出
+codeInput.addEventListener('keydown', (e) => {{
+  if (e.key === 'Enter') {{
+    e.preventDefault();
+    activateLicense();
+  }}
+}});
+
+// 載入時檢查目前授權狀態（已啟用仍顯示續期欄位）
+(async function loadStatus() {{
+  try {{
+    const res = await fetch('/license/status');
+    const data = await res.json();
+    if (data.ok && data.status === 'active') {{
+      const result = document.getElementById('activate-result');
+      const planLabel = data.plan === 'trial_7d' ? '7 天方案' : (data.plan === 'trial_30d' ? '30 天方案' : data.plan);
+      let daysLeft = '';
+      if (data.expires_at) {{
+        const diff = new Date(data.expires_at) - new Date();
+        const d = Math.max(0, Math.ceil(diff / 86400000));
+        daysLeft = `<p>剩餘天數：<strong>${{d}}</strong> 天</p>`;
+      }}
+      result.innerHTML = `<div style="border:1px solid #2e7d32;background:#f0f9f0;padding:12px 16px;border-radius:6px">
+        <p style="color:green;font-size:1.1em;margin:0 0 6px"><strong>授權有效</strong></p>
+        <p style="margin:2px 0">方案：<strong>${{planLabel}}</strong></p>
+        <p style="margin:2px 0">到期日期：${{data.expires_at ? data.expires_at.slice(0,10) : ''}}</p>
+        ${{daysLeft}}
+        <p style="margin:2px 0">設備碼：<code>${{data.device_code || ''}}</code></p>
+        <p style="margin:8px 0 0"><a href="/" style="display:inline-block;padding:8px 20px;background:#2563eb;color:#fff;border-radius:4px;text-decoration:none">進入 Betguard 首頁</a></p>
+      </div>`;
+    }}
+  }} catch (_) {{}}
+}})();
+
 async function activateLicense() {{
-  const code = document.getElementById('activation-code').value.trim();
-  const msg = document.getElementById('activate-msg');
+  const code = codeInput.value.trim();
   if (!code) {{ msg.textContent = '請輸入啟用碼'; msg.style.color = 'red'; return; }}
+  if (activateBtn.disabled) return;  // 避免重複送出
+  activateBtn.disabled = true;
   msg.textContent = '驗證中…';
+  msg.style.color = '#555';
   try {{
     const res = await fetch('/license/activate', {{
       method: 'POST',
@@ -379,22 +436,45 @@ async function activateLicense() {{
     }});
     const data = await res.json();
     if (data.ok) {{
-      msg.textContent = '啟用成功！到期日：' + data.expires_at.slice(0,10);
+      const planLabel = data.plan === 'trial_7d' ? '7 天方案' : (data.plan === 'trial_30d' ? '30 天方案' : data.plan);
+      let daysLeft = '';
+      if (data.expires_at) {{
+        const diff = new Date(data.expires_at) - new Date();
+        const d = Math.max(0, Math.ceil(diff / 86400000));
+        daysLeft = `<p>剩餘天數：<strong>${{d}}</strong> 天</p>`;
+      }}
+      msg.textContent = '啟用成功';
       msg.style.color = 'green';
-      setTimeout(() => location.reload(), 1500);
+      const result = document.getElementById('activate-result');
+      result.innerHTML = `<div style="border:1px solid #2e7d32;background:#f0f9f0;padding:12px 16px;border-radius:6px">
+        <p style="color:green;font-size:1.1em;margin:0 0 6px"><strong>啟用成功</strong></p>
+        <p style="margin:2px 0">目前方案：<strong>${{planLabel}}</strong></p>
+        <p style="margin:2px 0">到期日期：${{data.expires_at ? data.expires_at.slice(0,10) : ''}}</p>
+        ${{daysLeft}}
+        <p style="margin:8px 0 0"><a href="/" style="display:inline-block;padding:8px 20px;background:#2563eb;color:#fff;border-radius:4px;text-decoration:none">進入 Betguard 首頁</a></p>
+      </div>`;
+      setTimeout(() => {{ window.location.href = '/'; }}, 1000);
     }} else {{
-      msg.textContent = data.error || '啟用失敗';
-      msg.style.color = 'red';
+      msg.textContent = '';
+      const result = document.getElementById('activate-result');
+      result.innerHTML = `<div style="border:1px solid #c33;background:#fff5f5;padding:12px 16px;border-radius:6px">
+        <p style="color:#c33;margin:0"><strong>啟用失敗：</strong>${{data.error || '未知錯誤'}}</p>
+      </div>`;
     }}
   }} catch(e) {{
-    msg.textContent = '網路錯誤，請稍後再試';
-    msg.style.color = 'red';
+    msg.textContent = '';
+    const result = document.getElementById('activate-result');
+    result.innerHTML = `<div style="border:1px solid #c33;background:#fff5f5;padding:12px 16px;border-radius:6px">
+      <p style="color:#c33;margin:0"><strong>啟用失敗：</strong>伺服器連線失敗，請確認 Betguard 牌單助手正在執行。</p>
+    </div>`;
+  }} finally {{
+    activateBtn.disabled = false;
   }}
 }}
 </script>
 """
 
-    return _render_doc("授權管理", body)
+    return _HTML_HEAD.format(title="Betguard 牌單助手授權啟用") + body + _HTML_FOOTER
 
 def _render_history(
     *,

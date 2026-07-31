@@ -21,6 +21,22 @@ import webbrowser
 PORT = 8765
 HOST = "127.0.0.1"
 APP_URL = f"http://{HOST}:{PORT}/"
+LICENSE_URL = f"http://{HOST}:{PORT}/license"
+
+
+def _resolve_start_url() -> str:
+    """Pick the URL to open based on license status.
+
+    - inactive / expired / unreadable  -> /license
+    - active                          -> /
+    Never lets an unlicensed state reach the real fill flow.
+    """
+    try:
+        from betguard.license import license_status
+        status = license_status()
+    except Exception:
+        return LICENSE_URL
+    return APP_URL if status.get("status") == "active" else LICENSE_URL
 
 
 def _is_frozen() -> bool:
@@ -132,7 +148,10 @@ def main() -> None:
 
         if _is_server_running():
             _safe_print("Betguard 牌單助手 已在執行中，開啟瀏覽器...")
-            webbrowser.open(APP_URL)
+            try:
+                webbrowser.open(_resolve_start_url())
+            except Exception:
+                _log_error("webbrowser.open failed (server already running)")
             return
 
         _safe_print("啟動 Betguard 牌單助手...")
@@ -145,7 +164,10 @@ def main() -> None:
 
         for _ in range(20):
             if _is_server_running():
-                webbrowser.open(APP_URL)
+                try:
+                    webbrowser.open(_resolve_start_url())
+                except Exception:
+                    _log_error("webbrowser.open failed")
                 _safe_print("Betguard 牌單助手 已啟動")
                 return
             time.sleep(0.5)

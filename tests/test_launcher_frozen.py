@@ -69,6 +69,58 @@ class TestFrozenServerCommand:
         assert called == [], "_run_server should NOT be called without --serve"
 
 
+class TestLicenseStartUrl:
+    """_resolve_start_url picks /license vs / based on license status."""
+
+    def _patch_status(self, monkeypatch, status: str):
+        import betguard.license as _lic
+        monkeypatch.setattr(
+            _lic, "license_status",
+            lambda: {"status": status, "device_id": "BG-XXXX-XXXX-XXXX"},
+        )
+
+    def test_inactive_opens_license_page(self, monkeypatch) -> None:
+        self._patch_status(monkeypatch, "inactive")
+        assert launcher._resolve_start_url() == launcher.LICENSE_URL
+
+    def test_expired_opens_license_page(self, monkeypatch) -> None:
+        self._patch_status(monkeypatch, "expired")
+        assert launcher._resolve_start_url() == launcher.LICENSE_URL
+
+    def test_active_opens_homepage(self, monkeypatch) -> None:
+        self._patch_status(monkeypatch, "active")
+        assert launcher._resolve_start_url() == launcher.APP_URL
+
+    def test_unreadable_status_opens_license_page(self, monkeypatch) -> None:
+        import betguard.license as _lic
+        def boom():
+            raise RuntimeError("cannot read license")
+        monkeypatch.setattr(_lic, "license_status", boom)
+        assert launcher._resolve_start_url() == launcher.LICENSE_URL
+
+    def test_browser_open_failure_does_not_crash(self, monkeypatch) -> None:
+        """webbrowser.open raising must not crash the launcher (frozen GUI)."""
+        self._patch_status(monkeypatch, "inactive")
+        printed = []
+        def boom(url):
+            raise RuntimeError("browser failed")
+        monkeypatch.setattr(launcher.webbrowser, "open", boom)
+        monkeypatch.setattr(launcher, "_is_server_running", lambda: True)
+        monkeypatch.setattr(launcher, "_setup_bundled_chromium", lambda: None)
+        monkeypatch.setattr(launcher, "_safe_print", lambda msg: printed.append(msg))
+        monkeypatch.setattr(launcher.sys, "argv", ["BetguardAssistant.exe"])
+        launcher.main()  # must not raise
+        assert printed, "launcher should have printed something and returned"
+
+    def test_frozen_mode_never_calls_input(self) -> None:
+        """Frozen GUI launcher must never call input() / rely on stdin."""
+        src = Path(launcher.__file__).read_text(encoding="utf-8")
+        import re as _re
+        # No bare input( calls in the launcher source
+        assert _re.search(r"(?<!\.)input\s*\(", src) is None, "launcher must not call input()"
+        assert "sys.stdin" not in src, "launcher must not depend on sys.stdin"
+
+
 class TestNoDuplicateServer:
     """Verify no duplicate server starts when port is occupied."""
 
