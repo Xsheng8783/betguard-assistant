@@ -1,14 +1,14 @@
-; Inno Setup script for Betguard Assistant v0.5.34-beta
+; Inno Setup script for Betguard Assistant v0.5.36-beta
 
 #define MyAppName "Betguard 牌單助手"
-#define MyAppVersion "0.5.35-beta"
+#define MyAppVersion "0.5.36-beta"
 #define MyAppPublisher "Betguard"
 #define MyAppURL "http://127.0.0.1:8765"
 #define MyAppExeName "BetguardAssistant.exe"
 
 [Setup]
 AppId={{BETGUARD-ASSISTANT-001}
-SetupIconFile=installer\Betguard.ico
+SetupIconFile=Betguard.ico
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}

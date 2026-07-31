@@ -43,6 +43,7 @@ a = Analysis(
         "betguard.models",
         "betguard.user_data",
         "betguard.license",
+        "betguard.build_info",
         "playwright",
         "playwright.sync_api",
     ],
@@ -67,7 +68,7 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
-             icon='installer/Betguard.ico',
+             icon=os.path.join(ROOT, 'installer', 'Betguard.ico'),
 )
 
 coll = COLLECT(

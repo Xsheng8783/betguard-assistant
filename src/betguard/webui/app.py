@@ -339,6 +339,38 @@ def _render_license_status_badge() -> str:
 </div>"""
 
 
+def _render_version_page() -> str:
+    """Render build version information page.
+
+    Reads build_info.py (VERSION / COMMIT / BRANCH / BUILT_AT) which is
+    filled at packaging time. Falls back to git describe in dev mode.
+    """
+    version = "unknown"
+    commit = ""
+    branch = ""
+    built_at = ""
+    try:
+        from betguard import build_info
+        version = getattr(build_info, "VERSION", version)
+        commit = getattr(build_info, "COMMIT", "")
+        branch = getattr(build_info, "BRANCH", "")
+        built_at = getattr(build_info, "BUILT_AT", "")
+    except Exception:
+        pass
+    if version == "unknown" or not commit:
+        version = _project_version()
+        commit = _git_short_head()
+
+    body = f"""<h2>版本資訊</h2>
+<p><strong>版本：</strong><code>{version}</code></p>
+<p><strong>Commit：</strong><code>{commit}</code></p>
+<p><strong>分支：</strong><code>{branch}</code></p>
+<p><strong>建置時間：</strong><code>{built_at}</code></p>
+<p><a href="/">返回首頁</a></p>
+"""
+    return _HTML_HEAD.format(title="版本資訊") + body + _HTML_FOOTER
+
+
 def _render_license_page() -> str:
     """Render the license activation page.
 
@@ -1087,6 +1119,11 @@ def build_workbench_handler(
             # GET /license — license page
             if path == "/license":
                 self._handle_license_page()
+                return
+
+            # GET /version — build version information
+            if path == "/version":
+                self._send_html(_render_version_page())
                 return
 
             # GET /license/status — JSON

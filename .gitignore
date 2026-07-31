@@ -39,5 +39,7 @@ amount_summary.txt
 # Local workbench artifacts (created by `python -m betguard.webui.app`)
 runs/
 dist/
+build/
+release/
 
 /Scripts/

@@ -135,6 +135,19 @@ class TestLicenseVisibleEntry:
             assert 'href="/"' in html
             assert "BG7" in html and "BG30" in html
 
+    def test_version_page_returns_200(self):
+        """GET /version returns 200 with version info."""
+        handler = build_workbench_handler(project_version="test", git_commit="test")
+        with _running_server(handler) as port:
+            conn = HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("GET", "/version")
+            resp = conn.getresponse()
+            assert resp.status == 200
+            html = resp.read().decode()
+            conn.close()
+            assert "版本" in html
+            assert "Commit" in html
+
     def test_license_page_title(self):
         handler = build_workbench_handler(project_version="test", git_commit="test")
         with _running_server(handler) as port:
