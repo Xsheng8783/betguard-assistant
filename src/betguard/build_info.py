@@ -1,6 +1,6 @@
 """Build info — auto-generated during packaging."""
 
 VERSION = "v0.5.38-beta"
-COMMIT = "234803b"
+COMMIT = "97f74e1"
 BRANCH = "feature/secure-remote-license-issuer"
-BUILT_AT = "2026-07-31T20:57:57Z"
+BUILT_AT = "2026-07-31T20:59:05Z"
