@@ -130,10 +130,10 @@ class TestLicenseVisibleEntry:
             assert "設備碼" in html
             assert "BG-" in html
             assert "activation-code" in html
-            assert "請輸入 BG7 或 BG30 啟用碼" in html
+            assert "請輸入 BG7E / BG30E 或 BG7 / BG30 啟用碼" in html
             assert "啟用 Betguard" in html
             assert 'href="/"' in html
-            assert "BG7" in html and "BG30" in html
+            assert "BG7E" in html or "BG7" in html
 
     def test_version_page_returns_200(self):
         """GET /version returns 200 with version info."""
@@ -168,7 +168,7 @@ class TestLicenseVisibleEntry:
             html = resp.read().decode()
             conn.close()
             assert html.count('id="activation-code"') == 1
-            assert "請輸入 BG7 或 BG30 啟用碼" in html
+            assert "請輸入 BG7E / BG30E 或 BG7 / BG30 啟用碼" in html
 
     def test_license_page_error_messages_in_page(self):
         """Error messages are rendered in-page (not alert-only)."""

@@ -311,7 +311,7 @@ def _render_license_status_badge() -> str:
     /license so the activation entry is never hidden in the footer.
     """
     try:
-        from betguard.license import license_status
+        from betguard.license import license_status, get_request_code
         status = license_status()
     except Exception:
         return '<div class="notice danger"><strong>授權狀態：</strong>無法讀取授權資料｜<a href="/license">前往授權頁</a></div>'
@@ -379,7 +379,7 @@ def _render_license_page() -> str:
     - Shows activation result inline (no alert-only errors).
     - Never writes the activation code to console or log.
     """
-    from betguard.license import license_status
+    from betguard.license import license_status, get_request_code
     status = license_status()
     status_text = {"active": "授權有效 ✅", "inactive": "尚未啟用", "expired": "授權已到期 ⚠️"}.get(
         status["status"], "未知"
@@ -389,6 +389,8 @@ def _render_license_page() -> str:
     device_id = status.get("device_id", "")
     is_active = status["status"] == "active"
 
+    request_code = get_request_code()
+
     plan_line = f'<p><strong>方案：</strong>{plan}</p>' if plan else ''
     expires_line = f"<p><strong>到期日：</strong>{expires[:10]}</p>" if expires else ''
     active_line = '<p style="color:green">✅ 當前可使用輔助填入功能</p>' if is_active else ''
@@ -396,6 +398,15 @@ def _render_license_page() -> str:
 
     body = f"""<h2>Betguard 牌單助手授權啟用</h2>
 <p><strong>設備碼：</strong><code style="font-size:1.2em">{device_id}</code></p>
+
+<h3>📋 授權申請碼（傳給管理員以取得啟用碼）</h3>
+<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+  <input type="text" id="request-code" value="{request_code}" readonly
+   style="font-family:monospace;font-size:0.95em;padding:8px;width:100%;max-width:520px;background:#f5f5f5;border:1px solid #ccc">
+  <button onclick="copyRequestCode()" style="padding:8px 16px;white-space:nowrap">📋 複製</button>
+</div>
+<span id="copy-msg" style="color:green;display:none;margin-left:8px">已複製</span>
+
 <div id="license-current">
 {plan_line}
 {expires_line}
@@ -405,9 +416,9 @@ def _render_license_page() -> str:
 
 <hr>
 <h3>輸入啟用碼</h3>
-<p style="color:#555">支援 BG7（7 天方案）與 BG30（30 天方案），同一輸入框皆可輸入。</p>
+<p style="color:#555">支援 BG7E / BG30E（Ed25519 安全碼）及 BG7 / BG30（舊版相容碼），同一輸入框皆可輸入。</p>
 <div>
-  <input type="text" id="activation-code" placeholder="請輸入 BG7 或 BG30 啟用碼" autocomplete="off" spellcheck="false" style="width:100%;max-width:480px;font-family:monospace;font-size:1.1em;padding:10px">
+  <input type="text" id="activation-code" placeholder="請輸入 BG7E / BG30E 或 BG7 / BG30 啟用碼" autocomplete="off" spellcheck="false" style="width:100%;max-width:480px;font-family:monospace;font-size:1.1em;padding:10px">
   <br><br>
   <button id="activate-btn" onclick="activateLicense()" style="padding:10px 28px;font-size:1.05em">啟用 Betguard</button>
   <span id="activate-msg" style="margin-left:12px"></span>
@@ -418,6 +429,15 @@ def _render_license_page() -> str:
 const codeInput = document.getElementById('activation-code');
 const activateBtn = document.getElementById('activate-btn');
 const msg = document.getElementById('activate-msg');
+
+function copyRequestCode() {{
+  const el = document.getElementById('request-code');
+  el.select();
+  document.execCommand('copy');
+  const msgEl = document.getElementById('copy-msg');
+  msgEl.style.display = 'inline';
+  setTimeout(() => {{ msgEl.style.display = 'none'; }}, 2000);
+}}
 
 // Enter 送出
 codeInput.addEventListener('keydown', (e) => {{
@@ -2194,7 +2214,7 @@ window.assistPanelFill = assistPanelFill;
             })
 
         def _handle_license_status(self) -> None:
-            from betguard.license import license_status
+            from betguard.license import license_status, get_request_code
             status = license_status()
             self._send_json({
                 "ok": True,
