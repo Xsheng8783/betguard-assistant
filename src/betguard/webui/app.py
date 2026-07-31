@@ -169,9 +169,11 @@ def _render_dashboard(version: str, git_commit: str) -> str:
   <strong>git commit:</strong> <code>{git_commit}</code>
 </p>
 """
+    license_html = _render_license_status_badge()
     body = f"""
 <h1>Betguard Assistant 今日工作台</h1>
 {version_html}
+{license_html}
 {safety_html}
 {links_html}
 """
@@ -181,6 +183,8 @@ def _render_dashboard(version: str, git_commit: str) -> str:
 def _render_empty_dashboard() -> str:
     """Render the clean dashboard homepage with zero items (no auto-load of old reviews)."""
     from betguard.webfill.review_console import render_review_console_html
+
+    license_html = _render_license_status_badge()
 
     empty_queue: dict[str, Any] = {
         "status": "IDLE",
@@ -195,7 +199,11 @@ def _render_empty_dashboard() -> str:
         "approved_fill_queue": [],
         "human_required_each_item": True,
     }
-    return render_review_console_html(empty_queue, queue_path=None)
+    console_html = render_review_console_html(empty_queue, queue_path=None)
+    # Inject license badge after <body> tag (which may have attributes)
+    import re
+    console_html = re.sub(r'(<body[^>]*>)', r'\1\n' + license_html, console_html, count=1)
+    return console_html
 
 
 def _render_workbench_form(error: str | None = None) -> str:
@@ -295,6 +303,98 @@ def _render_doc(title: str, body: str) -> str:
 # rendering a clean empty state and tolerating malformed JSONL lines.
 # ---------------------------------------------------------------------------
 
+
+def _render_license_status_badge() -> str:
+    """Inline license status snippet for the dashboard."""
+    try:
+        from betguard.license import license_status
+        status = license_status()
+    except Exception:
+        return '<div class="notice danger"><strong>授權狀態：</strong>無法讀取授權資料</div>'
+
+    s = status["status"]
+    device_id = status.get("device_id", "")
+    expires = status.get("expires_at", "")
+    plan = status.get("plan", "")
+
+    if s == "active":
+        return f"""<div class="notice success" style="margin-bottom:12px">
+<strong>🔑 授權狀態：有效</strong>｜方案：{plan}｜到期日：{expires[:10]}｜設備碼：<code>{device_id}</code>｜
+<a href="/license">管理授權</a>
+</div>"""
+    if s == "expired":
+        return f"""<div class="notice danger" style="margin-bottom:12px">
+<strong>⚠️ 授權已到期</strong>｜方案：{plan}｜到期日：{expires[:10]}｜設備碼：<code>{device_id}</code>｜
+<a href="/license">輸入啟用碼續用</a>
+</div>"""
+    return f"""<div class="notice warning" style="margin-bottom:12px">
+<strong>🔒 尚未啟用</strong>｜設備碼：<code>{device_id}</code>｜
+<a href="/license">輸入啟用碼</a>
+</div>"""
+
+
+def _render_license_page() -> str:
+    from betguard.license import license_status
+    status = license_status()
+    status_text = {"active": "授權有效 ✅", "inactive": "尚未啟用", "expired": "授權已到期 ⚠️"}.get(
+        status["status"], "未知"
+    )
+    expires = status.get("expires_at", "")
+    plan = status.get("plan", "")
+    device_id = status.get("device_id", "")
+    is_active = status["status"] == "active"
+
+    plan_line = f'<p><strong>方案：</strong>{plan}</p>' if plan else ''
+    expires_line = f"<p><strong>到期日：</strong>{expires[:10]}</p>" if expires else ''
+    active_line = '<p style="color:green">✅ 當前可使用輔助填入功能</p>' if is_active else ''
+    expired_line = '<p style="color:red">⚠️ 授權已到期，輔助填入功能已停用。請輸入新的啟用碼續用。</p>' if status["status"] == "expired" else ''
+
+    body = f"""<h2>{status_text}</h2>
+<p><strong>設備碼：</strong><code style="font-size:1.2em">{device_id}</code></p>
+{plan_line}
+{expires_line}
+{active_line}
+{expired_line}
+
+<hr>
+<h3>輸入啟用碼</h3>
+<div>
+  <input type="text" id="activation-code" placeholder="BG7-XXXX-XXXX-XXXX-XXXX" style="width:100%;max-width:400px;font-family:monospace;font-size:1em;padding:8px">
+  <br><br>
+  <button onclick="activateLicense()" style="padding:8px 20px;font-size:1em">啟用</button>
+  <span id="activate-msg" style="margin-left:12px"></span>
+</div>
+
+<script>
+async function activateLicense() {{
+  const code = document.getElementById('activation-code').value.trim();
+  const msg = document.getElementById('activate-msg');
+  if (!code) {{ msg.textContent = '請輸入啟用碼'; msg.style.color = 'red'; return; }}
+  msg.textContent = '驗證中…';
+  try {{
+    const res = await fetch('/license/activate', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ activation_code: code }})
+    }});
+    const data = await res.json();
+    if (data.ok) {{
+      msg.textContent = '啟用成功！到期日：' + data.expires_at.slice(0,10);
+      msg.style.color = 'green';
+      setTimeout(() => location.reload(), 1500);
+    }} else {{
+      msg.textContent = data.error || '啟用失敗';
+      msg.style.color = 'red';
+    }}
+  }} catch(e) {{
+    msg.textContent = '網路錯誤，請稍後再試';
+    msg.style.color = 'red';
+  }}
+}}
+</script>
+"""
+
+    return _render_doc("授權管理", body)
 
 def _render_history(
     *,
@@ -903,6 +1003,17 @@ def build_workbench_handler(
             if path == "/assist-panel/state":
                 self._handle_assist_panel_state()
                 return
+
+            # GET /license — license page
+            if path == "/license":
+                self._handle_license_page()
+                return
+
+            # GET /license/status — JSON
+            if path == "/license/status":
+                self._handle_license_status()
+                return
+
             self._send_text("not found", status=404)
 
         def do_POST(self) -> None:  # noqa: N802 -- stdlib name
@@ -953,6 +1064,21 @@ def build_workbench_handler(
             # POST /assist-panel/create-batch — create queue from pasted text, return JSON
             if path == "/assist-panel/create-batch":
                 self._handle_assist_panel_create_batch()
+                return
+
+            # GET /license — license status page
+            if path == "/license":
+                self._handle_license_page()
+                return
+
+            # POST /license/activate — activate license code
+            if path == "/license/activate":
+                self._handle_license_activate()
+                return
+
+            # GET /license/status — JSON status
+            if path == "/license/status":
+                self._handle_license_status()
                 return
 
             # POST /assist-fill — validate candidate and return preview data (read-only)
@@ -1070,6 +1196,21 @@ def build_workbench_handler(
             Supports both queue-based candidates (queue_path + item_index) and
             manually corrected candidates (manual_candidate_id).
             """
+            # License gate
+            import os
+            from betguard.license import is_license_active
+            skip_license = os.environ.get("BETGUARD_SKIP_LICENSE") == "1"
+            if not skip_license and not is_license_active():
+                self._send_json({
+                    "ok": False,
+                    "blocked": True,
+                    "error": "授權已到期，請續用後再使用輔助填入",
+                    "auto_submit": False,
+                    "auto_confirm": False,
+                    "danger_buttons_clicked": [],
+                })
+                return
+
             try:
                 self._assist_fill_start_inner()
             except Exception as exc:
@@ -1902,6 +2043,49 @@ window.assistPanelFill = assistPanelFill;
 </body>
 </html>"""
             self._send_html(html)
+
+        # ── License handlers ──
+
+        def _handle_license_page(self) -> None:
+            self._send_html(_render_license_page())
+
+        def _handle_license_activate(self) -> None:
+            import json as _json
+            from betguard.license import verify_activation_code, save_license, is_license_active, get_device_id
+            content_len = int(self.headers.get("Content-Length", 0) or 0)
+            raw = self.rfile.read(content_len) if content_len > 0 else b""
+            try:
+                body = _json.loads(raw)
+                code = (body.get("activation_code") or "").strip()
+            except Exception:
+                self._send_json({"ok": False, "error": "請求格式錯誤"})
+                return
+            if not code:
+                self._send_json({"ok": False, "error": "請輸入啟用碼"})
+                return
+            result = verify_activation_code(code)
+            if not result["ok"]:
+                self._send_json({"ok": False, "error": result["error"]})
+                return
+            payload = result["payload"]
+            save_license(payload)
+            self._send_json({
+                "ok": True,
+                "status": "active",
+                "expires_at": payload["expires_at"],
+                "plan": payload.get("plan", "unknown"),
+            })
+
+        def _handle_license_status(self) -> None:
+            from betguard.license import license_status
+            status = license_status()
+            self._send_json({
+                "ok": True,
+                "status": status["status"],
+                "device_code": status.get("device_id", ""),
+                "expires_at": status.get("expires_at", ""),
+                "plan": status.get("plan", ""),
+            })
 
         def _handle_assist_panel_create_batch(self) -> None:
             """Create a queue batch from pasted text and return JSON summary."""

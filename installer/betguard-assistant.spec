@@ -42,6 +42,7 @@ a = Analysis(
         "betguard.review",
         "betguard.models",
         "betguard.user_data",
+        "betguard.license",
         "playwright",
         "playwright.sync_api",
     ],

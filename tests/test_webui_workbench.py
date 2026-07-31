@@ -16,8 +16,9 @@ never imports betguard.webfill.real_site_assisted_fill.
 """
 from __future__ import annotations
 
-import json
 import os
+os.environ["BETGUARD_SKIP_LICENSE"] = "1"
+import json
 import socket
 import threading
 import time
@@ -26,6 +27,7 @@ import urllib.request
 from contextlib import contextmanager
 from http.client import HTTPConnection
 from pathlib import Path
+
 
 import pytest
 
