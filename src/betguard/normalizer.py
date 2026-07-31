@@ -26,6 +26,34 @@ _STRIP_PREFIXES_RE = re.compile(
     r"^(?:今彩\s*539[：:]\s*|539[：:]\s*|號碼[：:]\s*|主支[：:]\s*|牌[：:]\s*"
     r"|本期[：:]\s*|下注[：:]\s*|參考[：:]\s*|今彩\s*)?"
 )
+# Game hint prefixes
+_GAME_HINT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"^天天樂[：:]?\s*"), "tiantianle"),
+    (re.compile(r"^天天[：:]\s*"), "tiantianle"),
+    (re.compile(r"^六合彩[：:]?\s*"), "liuhecai"),
+    (re.compile(r"^六合[：:]\s*"), "liuhecai"),
+    (re.compile(r"^大樂透[：:]?\s*"), "daletou"),
+]
+
+_GAME_HINT_LABELS: dict[str, str] = {
+    "tiantianle": "天天樂",
+    "liuhecai": "六合彩",
+    "daletou": "大樂透",
+}
+
+
+def extract_game_hint(text: str) -> tuple[str, str]:
+    """Extract game hint from text prefix. Returns (hint_key, remaining_text)."""
+    for pattern, hint in _GAME_HINT_PATTERNS:
+        m = pattern.match(text)
+        if m:
+            return hint, text[m.end():]
+    return "", text
+
+
+def game_hint_label(hint: str) -> str:
+    """Return human-readable label for a game hint key."""
+    return _GAME_HINT_LABELS.get(hint, "")
 
 
 @dataclass(frozen=True)
@@ -42,8 +70,11 @@ def normalize_input(text: str) -> str:
 
 def normalize_for_parser(text: str) -> NormalizationResult:
     original = text
-    value = text.strip()
+    game_hint, remainder = extract_game_hint(text)
+    value = remainder.strip() if game_hint else text.strip()
     notes: list[str] = []
+    if game_hint:
+        notes.append(f"extracted game hint: {game_hint_label(game_hint)}")
 
     updated = value.replace(FULL_OPEN_PAREN, "(").replace(FULL_CLOSE_PAREN, ")")
     if updated != value:

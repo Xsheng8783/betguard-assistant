@@ -378,12 +378,21 @@ function assistPanelFillBtn(btn) {
     var isColumn = (betType === "column" || betType === "zhu_peng" || betType === "zhupeng");
     var reallyOk = isColumn ? (data.ok === true) : (data.ok === true && data.amounts_verified === true && !(data.missing_targets && data.missing_targets.length) && !(data.missing_amount_stars && data.missing_amount_stars.length));
     if (reallyOk && row) {
-      row.classList.add("assist-completed");
-      btn.textContent = "已填入";
-      btn.disabled = true;
+      // Replace single button with [重新填入] + [已下牌]
+      var buttonsHtml = '<button class="assist-fill-btn" onclick="assistRefillBtn(this)"'
+        + ' data-queue-path="' + queuePath + '"'
+        + ' data-item-index="' + itemIndex + '"'
+        + ' data-bet-type="' + betType + '"';
+      if (manualId) buttonsHtml += ' data-manual-id="' + manualId + '"';
+      buttonsHtml += ' style="background:#059669">重新填入</button>'
+        + ' <button class="btn-manual" onclick="markItemDone(this)"'
+        + ' data-queue-path="' + queuePath + '"'
+        + ' data-item-index="' + itemIndex + '"';
+      if (manualId) buttonsHtml += ' data-manual-id="' + manualId + '"';
+      buttonsHtml += '>已下牌</button>';
+      btn.outerHTML = buttonsHtml;
       setStatus("已輔助填入，請確認真站");
     } else {
-      if (row) row.classList.add("badge-fail");
       btn.disabled = false;
       btn.textContent = "輔助填入";
       var err = data.error || "";
@@ -395,11 +404,80 @@ function assistPanelFillBtn(btn) {
       }
       setStatus(err || "輔助填入失敗");
     }
-    updateCompletedCount();
   }).catch(function () {
     btn.disabled = false;
     btn.textContent = "輔助填入";
     setStatus("輔助填入失敗");
+  });
+}
+
+function assistRefillBtn(btn) {
+  var queuePath = btn.getAttribute("data-queue-path") || panelState.queuePath;
+  var itemIndex = parseInt(btn.getAttribute("data-item-index"), 10);
+  var betType = btn.getAttribute("data-bet-type") || "normal";
+  var manualId = btn.getAttribute("data-manual-id") || "";
+  btn.disabled = true;
+  btn.textContent = "處理中...";
+  var body;
+  if (manualId) {
+    body = JSON.stringify({ manual_candidate_id: manualId, bet_type: betType, refill: true });
+  } else {
+    body = JSON.stringify({ queue_path: queuePath, item_index: itemIndex, bet_type: betType, refill: true });
+  }
+  fetch("/assist-fill/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: body
+  }).then(function (r) { return r.json(); }).then(function (data) {
+    var isColumn = (betType === "column" || betType === "zhu_peng" || betType === "zhupeng");
+    var reallyOk = isColumn ? (data.ok === true) : (data.ok === true && data.amounts_verified === true && !(data.missing_targets && data.missing_targets.length) && !(data.missing_amount_stars && data.missing_amount_stars.length));
+    if (reallyOk) {
+      btn.disabled = false;
+      btn.textContent = "重新填入";
+      setStatus("重新填入完成，請確認真站");
+    } else {
+      btn.disabled = false;
+      btn.textContent = "重新填入";
+      var err = data.error || "";
+      setStatus(err || "重新填入失敗，可按鈕再試");
+    }
+  }).catch(function () {
+    btn.disabled = false;
+    btn.textContent = "重新填入";
+    setStatus("重新填入失敗");
+  });
+}
+
+function markItemDone(btn) {
+  var queuePath = btn.getAttribute("data-queue-path") || panelState.queuePath;
+  var itemIndex = parseInt(btn.getAttribute("data-item-index"), 10);
+  var manualId = btn.getAttribute("data-manual-id") || "";
+  var row = btn.parentElement;
+  btn.disabled = true;
+  btn.textContent = "處理中...";
+  var body;
+  if (manualId) {
+    body = JSON.stringify({ manual_candidate_id: manualId });
+  } else {
+    body = JSON.stringify({ queue_path: queuePath, item_index: itemIndex });
+  }
+  fetch("/assist-fill/mark-done", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: body
+  }).then(function (r) { return r.json(); }).then(function (data) {
+    if (data.ok) {
+      if (row) row.remove();
+      setStatus("已標記下牌完成");
+    } else {
+      btn.disabled = false;
+      btn.textContent = "已下牌";
+      setStatus(data.error || "操作失敗");
+    }
+  }).catch(function () {
+    btn.disabled = false;
+    btn.textContent = "已下牌";
+    setStatus("操作失敗");
   });
 }
 </script>

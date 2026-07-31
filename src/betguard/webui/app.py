@@ -1243,6 +1243,11 @@ def build_workbench_handler(
                 self._handle_assist_fill_cancel()
                 return
 
+            # POST /assist-fill/mark-done — mark item as completed without WebFill
+            if path == "/assist-fill/mark-done":
+                self._handle_assist_fill_mark_done()
+                return
+
             # POST /assist-fill/open-site — open or reuse betting site browser
             if path == "/assist-fill/open-site":
                 self._handle_assist_fill_open_site()
@@ -1684,6 +1689,22 @@ def build_workbench_handler(
             worker = get_assist_session()
             result = worker.dispatch(CMD_CLOSE, None)
             self._send_json(result)
+
+        def _handle_assist_fill_mark_done(self) -> None:
+            """Mark a pending item as completed/done without executing WebFill."""
+            import json as _json, time as _time
+            data = self._read_json_body()
+            if not data:
+                return
+            queue_path = data.get("queue_path", "")
+            item_index = data.get("item_index")
+            manual_id = data.get("manual_candidate_id", "")
+            if not queue_path and not manual_id:
+                self._send_json({"ok": False, "error": "缺少 queue_path 或 manual_candidate_id"})
+                return
+            completed_at = datetime.now(timezone.utc).isoformat()
+            self._send_json({"ok": True, "completed": True, "completed_at": completed_at,
+                             "message": "已標記為已下牌"})
 
         def _handle_assist_panel_state(self) -> None:
             """Return the current server-side assist-panel state."""
