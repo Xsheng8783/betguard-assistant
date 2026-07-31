@@ -121,12 +121,15 @@ def issue_from_request(request_code: str, days: int, plan: str) -> str:
         raise ValueError("無效的授權申請碼")
 
     device_hash, ts = parsed
-
+    license_id = os.urandom(4)
     plan_byte = _PLAN_BYTES[plan]
-    expires = datetime.now(timezone.utc) + timedelta(days=days)
-    epoch_day = (expires.date() - _EPOCH).days
+    issued = datetime.now(timezone.utc)
+    expires = issued + timedelta(days=days)
+    issued_day = (issued.date() - _EPOCH).days
+    expires_day = (expires.date() - _EPOCH).days
     dev_prefix = bytes.fromhex(device_hash)[:4]
-    payload = struct.pack(">BH4s", plan_byte, epoch_day, dev_prefix)
+
+    payload = struct.pack(">4sBHH4s", license_id, plan_byte, issued_day, expires_day, dev_prefix)
 
     private_key = _load_private_key()
     try:
@@ -135,8 +138,6 @@ def issue_from_request(request_code: str, days: int, plan: str) -> str:
         signature = key.sign(payload)
     except ImportError:
         import nacl.bindings
-        # nacl expects 64-byte seed (private + public)
-        # Reconstruct from known public key via license module
         from betguard.license import _get_public_key_bytes
         pub = _get_public_key_bytes()
         signature = nacl.bindings.crypto_sign_detached(payload, private_key + pub)

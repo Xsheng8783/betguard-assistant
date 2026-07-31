@@ -5,6 +5,14 @@ v1: legacy HMAC hex codes (deprecated, kept for migration).
 v2: compact HMAC codes (BG7-XXXX-..., BG30-XXXX-...).
 v3: Ed25519-signed codes (BG7E-..., BG30E-...) with remote issuance support.
 
+v3 payload (13 bytes):
+  license_id(4) | plan_byte(1) | issued_epoch_day(2) | expires_epoch_day(2) | dev_prefix(4)
+  + Ed25519 signature (64 bytes) = 77 bytes total
+
+Every activation code has a fixed expires_at set at issuance time.
+Duplicate detection via license_id; expired codes permanently rejected.
+Renewal only allows extending (never shortening) the current license.
+
 Client EXE contains only the public key; private key is admin-only.
 
 Storage: get_data_dir()/license.json
@@ -23,8 +31,6 @@ from datetime import date, datetime, timedelta, timezone
 from betguard.user_data import get_data_dir
 
 # ── Ed25519 public key (embedded in client EXE) ──
-# Private key: stored ONLY on admin machine (betguard/license_issuer.py)
-# Generate with: python -c "from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey; import base64; k=Ed25519PrivateKey.generate(); print('private:', base64.b64encode(k.private_bytes_raw()).decode()); print('public:', base64.b64encode(k.public_key().public_bytes_raw()).decode())"
 _LICENSE_PUBLIC_KEY_B64 = os.environ.get(
     "BETGUARD_LICENSE_PUBLIC_KEY",
     "lknAGLQUvCb3y23zRPVaw7TeL9XRdiCaj4oADSjuzD0=",
@@ -42,11 +48,9 @@ _PLAN_REVERSE = {0x07: "trial_7d", 0x1E: "trial_30d"}
 _B32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _B32_DECODE = {c: i for i, c in enumerate(_B32)}
 
-
 # ── crypto helpers ──
 
 def _get_public_key_bytes() -> bytes:
-    """Return raw Ed25519 public key (32 bytes)."""
     key = os.environ.get("BETGUARD_LICENSE_PUBLIC_KEY", _LICENSE_PUBLIC_KEY_B64)
     try:
         return base64.b64decode(key)
@@ -81,17 +85,12 @@ def _b32_decode(s: str) -> bytes:
     return bytes(result)
 
 
-# ── Ed25519 helpers (pure Python, no cryptography dep in client) ──
-
 def _ed25519_verify(public_key: bytes, message: bytes, signature: bytes) -> bool:
-    """Verify Ed25519 signature using hashlib + pure Python implementation."""
     try:
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-        key = Ed25519PublicKey.from_public_bytes(public_key)
-        key.verify(signature, message)
+        Ed25519PublicKey.from_public_bytes(public_key).verify(signature, message)
         return True
     except ImportError:
-        # Fallback: use nacl if available
         try:
             import nacl.bindings
             return nacl.bindings.crypto_sign_verify_detached(signature, message, public_key)
@@ -102,14 +101,12 @@ def _ed25519_verify(public_key: bytes, message: bytes, signature: bytes) -> bool
 def _machine_id() -> str:
     try:
         import winreg
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
-                            r"SOFTWARE\Microsoft\Cryptography") as k:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography") as k:
             return winreg.QueryValueEx(k, "MachineGuid")[0]
     except Exception:
         pass
     import platform
-    raw = platform.node() + str(uuid.getnode())
-    return hashlib.sha256(raw.encode()).hexdigest()
+    return hashlib.sha256((platform.node() + str(uuid.getnode())).encode()).hexdigest()
 
 
 def get_device_id() -> str:
@@ -121,15 +118,18 @@ def _device_id_hash() -> str:
     return hashlib.sha256(_machine_id().encode()).hexdigest()
 
 
+def _normalize_code(code: str) -> str:
+    """Normalize activation code for hashing: trim, uppercase, strip dashes."""
+    return code.strip().upper().replace("-", "")
+
+
+def _activation_code_hash(code: str) -> str:
+    return hashlib.sha256(_normalize_code(code).encode()).hexdigest()
+
+
 # ── License request code (client → admin) ──
 
 def get_request_code() -> str:
-    """
-    Generate a license request code that the customer sends to the admin.
-    Format: BRQ-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX
-    Contains: device_hash(32 bytes hex) + timestamp(4 bytes BE)
-    Checksummed with CRC16-like HMAC for integrity.
-    """
     device_hash = _device_id_hash()
     ts = int(datetime.now(timezone.utc).timestamp()) & 0xFFFFFFFF
     payload = bytes.fromhex(device_hash) + struct.pack(">I", ts)
@@ -139,23 +139,20 @@ def get_request_code() -> str:
 
 
 def _parse_request_code(code: str) -> tuple[str, int] | None:
-    """Parse a license request code. Returns (device_hash_hex, timestamp) or None."""
     try:
         cleaned = code.strip().upper()
         if cleaned.startswith("BRQ-"):
             cleaned = cleaned[4:]
         cleaned = cleaned.replace("-", "")
         raw = _b32_decode(cleaned)
-        if len(raw) != 36:  # 32 bytes hash + 4 bytes timestamp
+        if len(raw) != 36:
             return None
-        device_hash = raw[:32].hex()
-        ts = struct.unpack(">I", raw[32:36])[0]
-        return device_hash, ts
+        return raw[:32].hex(), struct.unpack(">I", raw[32:36])[0]
     except Exception:
         return None
 
 
-# ── v2 HMAC compact codes (kept for backward compat) ──
+# ── v1/v2 HMAC helpers (kept for backward compat) ──
 
 def _sign(payload: dict) -> str:
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
@@ -215,22 +212,22 @@ def _verify_compact(raw: bytes, current_device_hash: str) -> dict | None:
     }}
 
 
-# ── v3 Ed25519-signed compact codes ──
+# ── v3 Ed25519-signed codes ──
+# Payload format: license_id(4) | plan(1) | issued_day(2) | expires_day(2) | dev_prefix(4) = 13 bytes
 
-def _issue_ed25519(device_hash: str, days: int, plan: str) -> str:
-    """
-    Generate an Ed25519-signed activation code.
-    Must be called with access to the private key (admin-side only).
-    """
+def _issue_ed25519(device_hash: str, days: int, plan: str, license_id: bytes | None = None) -> str:
+    if license_id is None:
+        license_id = os.urandom(4)
     plan_byte = _PLAN_BYTES[plan]
-    expires = datetime.now(timezone.utc) + timedelta(days=days)
-    epoch_day = (expires.date() - _EPOCH).days
+    issued = datetime.now(timezone.utc)
+    expires = issued + timedelta(days=days)
+    issued_day = (issued.date() - _EPOCH).days
+    expires_day = (expires.date() - _EPOCH).days
     dev_prefix = bytes.fromhex(device_hash)[:4]
-    payload = struct.pack(">BH4s", plan_byte, epoch_day, dev_prefix)
 
-    # Sign with Ed25519 (requires private key)
-    import os as _os
-    private_key_b64 = _os.environ.get("BETGUARD_LICENSE_PRIVATE_KEY", "")
+    payload = struct.pack(">4sBHH4s", license_id, plan_byte, issued_day, expires_day, dev_prefix)
+
+    private_key_b64 = os.environ.get("BETGUARD_LICENSE_PRIVATE_KEY", "")
     if not private_key_b64:
         raise ValueError("BETGUARD_LICENSE_PRIVATE_KEY not set — Ed25519 signing requires private key")
     try:
@@ -249,20 +246,21 @@ def _issue_ed25519(device_hash: str, days: int, plan: str) -> str:
 
 
 def _verify_ed25519(raw: bytes, current_device_hash: str) -> dict | None:
-    """Try to verify an Ed25519-signed (v3) activation code."""
-    # v3: payload(7) + Ed25519 sig(64) = 71 bytes
-    if len(raw) != 71:
+    """Verify Ed25519-signed (v3) activation code. Returns result dict or None if not v3."""
+    # v3: payload(13) + Ed25519 sig(64) = 77 bytes
+    if len(raw) != 77:
         return None
-    payload, signature = raw[:7], raw[7:]
+    payload, signature = raw[:13], raw[13:]
     try:
-        plan_byte, epoch_day, dev_prefix = struct.unpack(">BH4s", payload)
+        license_id, plan_byte, issued_day, expires_day, dev_prefix = \
+            struct.unpack(">4sBHH4s", payload)
     except struct.error:
         return None
     if plan_byte not in _PLAN_REVERSE:
         return None
     plan = _PLAN_REVERSE[plan_byte]
+    license_id_hex = license_id.hex().upper()
 
-    # Verify Ed25519 signature
     try:
         pubkey = _get_public_key_bytes()
         if not _ed25519_verify(pubkey, payload, signature):
@@ -272,27 +270,177 @@ def _verify_ed25519(raw: bytes, current_device_hash: str) -> dict | None:
 
     if current_device_hash[:8] != dev_prefix.hex():
         return {"ok": False, "error": "此啟用碼不屬於本裝置"}
-    expires_date = _EPOCH + timedelta(days=epoch_day)
+
+    issued_date = _EPOCH + timedelta(days=issued_day)
+    issued = datetime(issued_date.year, issued_date.month, issued_date.day, tzinfo=timezone.utc)
+    expires_date = _EPOCH + timedelta(days=expires_day)
     expires = datetime(expires_date.year, expires_date.month, expires_date.day,
                        hour=23, minute=59, second=59, tzinfo=timezone.utc)
+
     if datetime.now(timezone.utc) > expires:
-        return {"ok": False, "error": "啟用碼已過期"}
-    return {"ok": True, "payload": {
+        return {"ok": False, "error": "啟用碼已過期", "expired": True, "license_id": license_id_hex}
+
+    return {
+        "ok": True,
+        "license_id": license_id_hex,
         "device_id_hash": current_device_hash,
         "expires_at": expires.isoformat(),
         "plan": plan,
-        "issued_at": datetime.now(timezone.utc).isoformat(),
-    }}
+        "issued_at": issued.isoformat(),
+    }
+
+
+# ── License storage with duplicate/renewal logic ──
+
+def _load_current_license() -> dict | None:
+    """Load current license from disk, without signature re-verification."""
+    try:
+        if not os.path.exists(_LICENSE_FILE):
+            return None
+        with open(_LICENSE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _save_license_data(data: dict) -> None:
+    """Save license data to disk with HMAC signature."""
+    os.makedirs(os.path.dirname(_LICENSE_FILE), exist_ok=True)
+    sig_payload = {
+        "license_id": data.get("license_id", ""),
+        "device_id_hash": data["device_id_hash"],
+        "expires_at": data["expires_at"],
+        "plan": data["plan"],
+        "issued_at": data["issued_at"],
+    }
+    signature = _sign(sig_payload)
+    out = {**data, "signature": signature}
+    # Remove full activation code if present (safety)
+    out.pop("activation_code", None)
+    with open(_LICENSE_FILE, "w", encoding="utf-8") as f:
+        json.dump(out, f, ensure_ascii=False, indent=2)
+
+
+def activate_license(code: str) -> dict:
+    """
+    Activate a license code. Handles duplicate detection, expiration, and renewal.
+    Returns a dict with ok, activated, already_active, updated, renewed, etc.
+    """
+    code = code.strip()
+    result = verify_activation_code(code)
+    if not result.get("ok"):
+        return {
+            "ok": False,
+            "error": result.get("error", "啟用碼無效"),
+            "activated": False,
+            "already_active": False,
+            "updated": False,
+        }
+
+    # Extract fields — v3 puts them at top level, v2/v1 wrap in "payload"
+    if "payload" in result:
+        p = result["payload"]
+        license_id = p.get("license_id", "")
+        plan = p.get("plan", "")
+        issued_at = p.get("issued_at", "")
+        expires_at = p.get("expires_at", "")
+        device_hash = p.get("device_id_hash", _device_id_hash())
+    else:
+        license_id = result.get("license_id", "")
+        plan = result.get("plan", "")
+        issued_at = result.get("issued_at", "")
+        expires_at = result.get("expires_at", "")
+        device_hash = result.get("device_id_hash", _device_id_hash())
+
+    code_hash = _activation_code_hash(code)
+    activated_at = datetime.now(timezone.utc).isoformat()
+
+    current = _load_current_license()
+
+    # ── Check if already active with same license_id ──
+    if license_id and current and current.get("license_id") == license_id:
+        return _already_active_response(current, plan, issued_at, expires_at, license_id)
+
+    # ── Check if already active with same code hash ──
+    if current and current.get("activation_code_hash") == code_hash:
+        return _already_active_response(current, plan, issued_at, expires_at, license_id)
+
+    # ── If current license exists, check renewal rules ──
+    if current:
+        try:
+            cur_expires = datetime.fromisoformat(current["expires_at"])
+            new_expires_dt = datetime.fromisoformat(expires_at)
+        except Exception:
+            cur_expires = None
+            new_expires_dt = None
+
+        if cur_expires and new_expires_dt:
+            if new_expires_dt > cur_expires:
+                pass  # allow renewal
+            else:
+                reason = ("目前已有期限更長的授權" if new_expires_dt < cur_expires
+                          else "目前已有相同期限的授權")
+                return {
+                    "ok": True,
+                    "activated": False,
+                    "already_active": True,
+                    "updated": False,
+                    "renewed": False,
+                    "plan": current.get("plan", ""),
+                    "issued_at": current.get("issued_at", ""),
+                    "activated_at": current.get("activated_at", ""),
+                    "expires_at": current.get("expires_at", ""),
+                    "previous_expires_at": current.get("expires_at", ""),
+                    "license_id": current.get("license_id", ""),
+                    "message": reason,
+                }
+
+    # ── Activate (new or renewal) ──
+    data = {
+        "license_id": license_id,
+        "activation_code_hash": code_hash,
+        "device_id_hash": device_hash,
+        "plan": plan,
+        "issued_at": issued_at,
+        "expires_at": expires_at,
+        "activated_at": activated_at,
+    }
+    _save_license_data(data)
+
+    return {
+        "ok": True,
+        "activated": True,
+        "already_active": False,
+        "updated": True,
+        "renewed": current is not None,
+        "previous_expires_at": current.get("expires_at", "") if current else "",
+        "plan": plan,
+        "issued_at": issued_at,
+        "activated_at": activated_at,
+        "expires_at": expires_at,
+        "license_id": license_id,
+    }
+
+
+def _already_active_response(current: dict, plan: str, issued_at: str, expires_at: str, license_id: str) -> dict:
+    return {
+        "ok": True,
+        "activated": False,
+        "already_active": True,
+        "updated": False,
+        "renewed": False,
+        "plan": current.get("plan", plan),
+        "issued_at": current.get("issued_at", issued_at),
+        "activated_at": current.get("activated_at", ""),
+        "expires_at": current.get("expires_at", expires_at),
+        "license_id": current.get("license_id", license_id),
+    }
 
 
 # ── Public API ──
 
 def issue_license_code(device_hash_or_display: str, days: int, plan: str) -> str:
-    """
-    Generate a compact activation code (v2 HMAC).
-    ⚠️ DEPRECATED for remote issuance — use betguard.license_issuer for Ed25519 codes.
-    Kept for local admin testing only.
-    """
+    """Generate v2 HMAC code (deprecated, local only)."""
     display_clean = device_hash_or_display.upper().replace("BG-", "").replace("-", "")
     if len(display_clean) <= 16:
         device_hash = _device_id_hash()
@@ -304,23 +452,15 @@ def issue_license_code(device_hash_or_display: str, days: int, plan: str) -> str
 
 
 def verify_activation_code(code: str, device_id_display: str | None = None) -> dict:
-    """
-    Verify an activation code (v3 Ed25519, v2 compact HMAC, or v1 legacy hex).
-    Returns {"ok": False, "error": "..."} or {"ok": True, "payload": {...}}.
-    """
+    """Verify activation code (v3 Ed25519, v2 HMAC, v1 hex)."""
     code = code.strip()
     current_hash = _device_id_hash()
-
     cleaned = code.upper()
-    # Strip prefix: BG7E-, BG30E-, BG7-, BG30-, BG3-
     if cleaned.startswith("BG") and "-" in cleaned[:6]:
         cleaned = cleaned[cleaned.index("-") + 1:]
-
-    # Determine format from prefix
     is_ed25519 = code.upper().startswith("BG7E-") or code.upper().startswith("BG30E-")
     cleaned_no_dash = cleaned.replace("-", "")
 
-    # ── Try v3 Ed25519 format ──
     if is_ed25519 or len(code) > 50:
         try:
             raw = _b32_decode(cleaned_no_dash)
@@ -331,7 +471,6 @@ def verify_activation_code(code: str, device_id_display: str | None = None) -> d
             if is_ed25519:
                 return {"ok": False, "error": "啟用碼格式無效"}
 
-    # ── Try v2 compact HMAC format ──
     try:
         raw = _b32_decode(cleaned_no_dash)
         result = _verify_compact(raw, current_hash)
@@ -340,7 +479,6 @@ def verify_activation_code(code: str, device_id_display: str | None = None) -> d
     except Exception:
         pass
 
-    # ── Try v1 legacy hex format ──
     try:
         raw = bytes.fromhex(cleaned_no_dash)
         payload_str = raw[:-32].decode("utf-8")
@@ -366,36 +504,25 @@ def verify_activation_code(code: str, device_id_display: str | None = None) -> d
 
 
 def _device_id_matches_display(device_hash: str, display: str) -> bool:
-    expected = device_hash[:16].upper()
-    display_clean = display.upper().replace("BG-", "").replace("-", "")
-    return display_clean == expected
+    return display.upper().replace("BG-", "").replace("-", "") == device_hash[:16].upper()
 
 
 def load_license() -> dict | None:
-    try:
-        if not os.path.exists(_LICENSE_FILE):
-            return None
-        with open(_LICENSE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not _verify_signature(
-            {"device_id_hash": data["device_id_hash"],
-             "expires_at": data["expires_at"],
-             "plan": data["plan"],
-             "issued_at": data["issued_at"]},
-            data["signature"],
-        ):
-            return None
-        return data
-    except Exception:
+    data = _load_current_license()
+    if not data:
         return None
+    sig_payload = {
+        "license_id": data.get("license_id", ""),
+        "device_id_hash": data["device_id_hash"],
+        "expires_at": data["expires_at"],
+        "plan": data["plan"],
+        "issued_at": data["issued_at"],
+    }
+    return data if _verify_signature(sig_payload, data.get("signature", "")) else None
 
 
 def save_license(payload: dict) -> None:
-    os.makedirs(os.path.dirname(_LICENSE_FILE), exist_ok=True)
-    signature = _sign(payload)
-    data = {**payload, "signature": signature}
-    with open(_LICENSE_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    _save_license_data(payload)
 
 
 def is_license_active() -> bool:
@@ -403,8 +530,7 @@ def is_license_active() -> bool:
     if not lic:
         return False
     try:
-        expires = datetime.fromisoformat(lic["expires_at"])
-        return datetime.now(timezone.utc) < expires.astimezone(timezone.utc)
+        return datetime.now(timezone.utc) < datetime.fromisoformat(lic["expires_at"]).astimezone(timezone.utc)
     except Exception:
         return False
 
@@ -426,23 +552,18 @@ def license_status() -> dict:
     except Exception:
         return {"status": "expired", "device_id": get_device_id()}
 
-# ══════════════════════════════════════════
-# CLI (local testing only — v2 HMAC codes)
-# ══════════════════════════════════════════
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(prog="python -m betguard.license",
-                                     description="Betguard license CLI (v2 HMAC, local only)")
+    parser = argparse.ArgumentParser(prog="python -m betguard.license")
     sub = parser.add_subparsers(dest="command", required=True)
     issue_cmd = sub.add_parser("issue", help="Generate v2 HMAC code (same machine only)")
     issue_cmd.add_argument("--device", required=True)
     issue_cmd.add_argument("--days", type=int, required=True)
     issue_cmd.add_argument("--plan", required=True, choices=["trial_7d", "trial_30d"])
-    req_cmd = sub.add_parser("request-code", help="Generate a license request code for admin")
+    sub.add_parser("request-code", help="Generate a license request code for admin")
 
     args = parser.parse_args()
-
     if args.command == "issue":
         device_input = args.device.strip()
         display_clean = device_input.upper().replace("BG-", "").replace("-", "")
@@ -451,7 +572,6 @@ def main():
             device_hash = _device_id_hash()
             if device_hash[:12].upper() != display_clean:
                 print(f"錯誤：設備碼 {device_input} 不屬於本機", file=sys.stderr)
-                print(f"本機設備碼：{get_device_id()}", file=sys.stderr)
                 sys.exit(1)
         else:
             device_hash = display_clean.lower()

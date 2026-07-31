@@ -199,9 +199,9 @@ class TestLicenseVisibleEntry:
                 })
                 assert status == 200
                 assert body["ok"] is True
-                assert body["status"] == "active"
+                assert body.get("activated") is True
                 assert body["plan"] == "trial_7d"
-                assert body.get("expires_at")
+                assert body["expires_at"]
                 st = license_status()
                 assert st["status"] == "active"
                 assert st["plan"] == "trial_7d"
@@ -225,9 +225,9 @@ class TestLicenseVisibleEntry:
                 })
                 assert status == 200
                 assert body["ok"] is True
-                assert body["status"] == "active"
+                assert body.get("activated") is True
                 assert body["plan"] == "trial_30d"
-                assert body.get("expires_at")
+                assert body["expires_at"]
                 st = license_status()
                 assert st["status"] == "active"
                 assert st["plan"] == "trial_30d"

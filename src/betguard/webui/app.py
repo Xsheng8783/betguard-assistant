@@ -2188,7 +2188,7 @@ window.assistPanelFill = assistPanelFill;
 
         def _handle_license_activate(self) -> None:
             import json as _json
-            from betguard.license import verify_activation_code, save_license, is_license_active, get_device_id
+            from betguard.license import activate_license
             content_len = int(self.headers.get("Content-Length", 0) or 0)
             raw = self.rfile.read(content_len) if content_len > 0 else b""
             try:
@@ -2200,18 +2200,8 @@ window.assistPanelFill = assistPanelFill;
             if not code:
                 self._send_json({"ok": False, "error": "請輸入啟用碼"})
                 return
-            result = verify_activation_code(code)
-            if not result["ok"]:
-                self._send_json({"ok": False, "error": result["error"]})
-                return
-            payload = result["payload"]
-            save_license(payload)
-            self._send_json({
-                "ok": True,
-                "status": "active",
-                "expires_at": payload["expires_at"],
-                "plan": payload.get("plan", "unknown"),
-            })
+            result = activate_license(code)
+            self._send_json(result)
 
         def _handle_license_status(self) -> None:
             from betguard.license import license_status, get_request_code
