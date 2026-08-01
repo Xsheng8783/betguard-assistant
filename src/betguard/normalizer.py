@@ -119,6 +119,12 @@ def normalize_for_parser(text: str) -> NormalizationResult:
         notes.append("normalized star synonyms")
     value = updated
 
+    # Normalize dotted star patterns: 二.三.四星 → 二三四星
+    updated = _normalize_dotted_stars(value)
+    if updated != value:
+        notes.append("normalized dotted star patterns")
+    value = updated
+
     updated = _normalize_star_multiplier(value)
     if updated != value:
         notes.append("normalized star multiplier")
@@ -228,4 +234,19 @@ def _dedupe(values: list[str]) -> list[str]:
         if value not in seen:
             result.append(value)
             seen.add(value)
+    return result
+
+
+def _normalize_dotted_stars(text: str) -> str:
+    """Normalize dot-separated star patterns: 二.三.四星50元 → 二三四星50元."""
+    result = text
+    # Chinese dotted stars with 星 word
+    result = re.sub(r"二[。．.]三[。．.]四\s*星", "二三四星", result)
+    result = re.sub(r"二[。．.]三\s*星", "二三星", result)
+    result = re.sub(r"三[。．.]四\s*星", "三四星", result)
+    result = re.sub(r"兩[。．.]三\s*星", "兩三星", result)
+    # Numeric dotted stars with 星 word
+    result = re.sub(r"(?<!\d)2[。．.]3[。．.]4\s*星", "234星", result)
+    result = re.sub(r"(?<!\d)2[。．.]3\s*星", "23星", result)
+    result = re.sub(r"(?<!\d)3[。．.]4\s*星", "34星", result)
     return result
