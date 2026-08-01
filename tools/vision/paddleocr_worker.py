@@ -3,15 +3,21 @@
 Protocol: betguard.vision.worker.v1
 This is the ONLY module that imports paddleocr.
 Run via: BETGUARD_OCR_PYTHON tools/vision/paddleocr_worker.py
+
+stdout isolation: before any Paddle imports, we dup the original stdout fd
+(protocol_fd). All Paddle/PaddleX/oneDNN native C-level writes to fd 1 are
+redirected to fd 2 via dup2. The final JSON response is written exclusively
+through protocol_fd via os.write(), ensuring stdout contains exactly one
+JSON object.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
 import time
-import traceback
 
 
 PROTOCOL_VERSION = "betguard.vision.worker.v1"
@@ -19,18 +25,16 @@ STDOUT_MAX = 5 * 1024 * 1024  # 5 MiB
 
 
 def _send_response(obj: dict) -> None:
-    """Write a single JSON object to stdout. Only one JSON per invocation."""
+    """Write a single JSON object via the saved protocol_fd."""
     raw = json.dumps(obj, ensure_ascii=False, default=str)
     if len(raw) > STDOUT_MAX:
-        # Truncate items to fit
         obj["items"] = obj.get("items", [])[:10]
         obj["warnings"] = obj.get("warnings", []) + ["OCR_OUTPUT_TOO_LARGE"]
         raw = json.dumps(obj, ensure_ascii=False, default=str)
         if len(raw) > STDOUT_MAX:
             raw = json.dumps({"ok": False, "error": {"code": "OCR_OUTPUT_TOO_LARGE", "message": "輸出過大"}}, ensure_ascii=False)
-    sys.stdout.buffer.write(raw.encode("utf-8"))
-    sys.stdout.buffer.write(b"\n")
-    sys.stdout.flush()
+    data = raw.encode("utf-8") + b"\n"
+    os.write(_protocol_fd, data)
 
 
 def _error(code: str, message: str, request_id: str = "", retryable: bool = False) -> dict:
@@ -43,7 +47,6 @@ def _error(code: str, message: str, request_id: str = "", retryable: bool = Fals
 
 
 def _validate_request(req: dict) -> str:
-    """Validate request. Returns error message or empty string."""
     if req.get("protocol_version") != PROTOCOL_VERSION:
         return f"protocol_version mismatch: expected {PROTOCOL_VERSION}"
     if not req.get("request_id"):
@@ -54,7 +57,7 @@ def _validate_request(req: dict) -> str:
     if "://" in image_path:
         return "image_path must be local file, not URL"
     if not os.path.exists(image_path):
-        return f"image_path does not exist"
+        return "image_path does not exist"
     if not os.path.isfile(image_path):
         return "image_path must be a regular file"
     if os.path.islink(image_path):
@@ -65,11 +68,6 @@ def _validate_request(req: dict) -> str:
 
 
 def _extract_ocr_items(raw_result: list) -> list[dict]:
-    """Extract items from PaddleOCR 3.7 predict() result.
-
-    PaddleOCR 3.7 returns list of dicts. Each dict has 'res' key with:
-      rec_texts, rec_scores, rec_polys, rec_boxes
-    """
     items = []
     for res in raw_result:
         if not isinstance(res, dict):
@@ -86,18 +84,11 @@ def _extract_ocr_items(raw_result: list) -> list[dict]:
         boxes = boxes if len(boxes) == n else [[] for _ in range(n)]
 
         for i in range(n):
-            item: dict = {
-                "text": str(texts[i]),
-                "score": _to_float(scores[i]),
-                "polygon": [],
-                "box": [],
-            }
-            # Convert polys
+            item: dict = {"text": str(texts[i]), "score": _to_float(scores[i]), "polygon": [], "box": []}
             poly = polys[i]
             if hasattr(poly, "tolist"):
                 poly = poly.tolist()
             if isinstance(poly, (list, tuple)):
-                # Ensure list of [x,y] pairs
                 flat = []
                 for v in poly:
                     if hasattr(v, "tolist"):
@@ -106,33 +97,72 @@ def _extract_ocr_items(raw_result: list) -> list[dict]:
                         flat.append([_to_float(x) for x in v])
                     else:
                         flat.append(_to_float(v))
-                # Check if flat list of coords → regroup into pairs
                 if flat and not isinstance(flat[0], list):
-                    flat = [[flat[j], flat[j+1]] for j in range(0, len(flat) - 1, 2)]
+                    flat = [[flat[j], flat[j + 1]] for j in range(0, len(flat) - 1, 2)]
                 item["polygon"] = flat
-
-            # Convert boxes
             b = boxes[i]
             if hasattr(b, "tolist"):
                 b = b.tolist()
             if isinstance(b, (list, tuple)):
                 item["box"] = [_to_float(v) for v in b]
-
             items.append(item)
     return items
 
 
 def _to_float(v) -> float:
-    """Safely convert numpy scalar or other type to float."""
     if hasattr(v, "item"):
         return float(v.item())
     return float(v)
 
 
+# ── OS-level fd redirect context manager ─────────────────────────────────────
+
+
+@contextlib.contextmanager
+def _redirect_fd1_to_fd2():
+    """Redirect OS file descriptor 1 (stdout) to fd 2 (stderr).
+
+    This catches C/C++ native writes (Paddle/oneDNN) that bypass Python's
+    sys.stdout. Use *before* any Paddle imports/init/predict.
+    """
+    sys.stdout.flush()
+    sys.stderr.flush()
+    saved = os.dup(1)
+    try:
+        os.dup2(2, 1)
+        # Also redirect Python-level stdout for extra safety
+        with contextlib.redirect_stdout(sys.stderr):
+            yield
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.dup2(saved, 1)
+        os.close(saved)
+
+
+# ── Protocol fd (must be set BEFORE any Paddle code runs) ────────────────────
+
+
+_protocol_fd: int = -1
+
+
+def _setup_protocol_fd() -> None:
+    """Duplicate the original stdout fd for protocol output.
+
+    Must be called after stdin is read but before any Paddle imports.
+    """
+    global _protocol_fd
+    _protocol_fd = os.dup(sys.stdout.fileno())
+    os.set_inheritable(_protocol_fd, False)
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+
 def main() -> None:
     request_id = ""
     try:
-        raw_input = sys.stdin.buffer.read(1024 * 1024)  # max 1 MiB input
+        raw_input = sys.stdin.buffer.read(1024 * 1024)
         if not raw_input:
             _send_response(_error("OCR_REQUEST_INVALID", "empty stdin"))
             return
@@ -145,57 +175,59 @@ def main() -> None:
             _send_response(_error("OCR_REQUEST_INVALID", err, request_id))
             return
 
+        # ── Save protocol fd BEFORE any fd redirect ──
+        _setup_protocol_fd()
+
         image_path = req["image_path"]
         options = req.get("options", {})
 
         t0 = time.perf_counter()
 
-        # Import PaddleOCR (may trigger model download on first run)
-        try:
-            from paddleocr import PaddleOCR
-        except ImportError as e:
-            _send_response(_error("OCR_ENGINE_UNAVAILABLE", "PaddleOCR not installed in worker environment", request_id))
-            return
+        # ── OS-level fd 1→2 redirect for all Paddle code ──
+        with _redirect_fd1_to_fd2():
+            try:
+                from paddleocr import PaddleOCR
+            except ImportError:
+                _send_response(_error("OCR_ENGINE_UNAVAILABLE", "PaddleOCR not installed in worker environment", request_id))
+                return
 
-        try:
-            ocr = PaddleOCR(
-                device=options.get("device", "cpu"),
-                text_detection_model_name=options.get("text_detection_model_name", "PP-OCRv5_mobile_det"),
-                text_recognition_model_name=options.get("text_recognition_model_name", "PP-OCRv5_mobile_rec"),
-                use_doc_orientation_classify=options.get("use_doc_orientation_classify", False),
-                use_doc_unwarping=options.get("use_doc_unwarping", False),
-                use_textline_orientation=options.get("use_textline_orientation", False),
-                enable_hpi=False,
-                enable_mkldnn=options.get("enable_mkldnn", True),
-                cpu_threads=options.get("cpu_threads", 4),
-            )
-        except Exception as e:
-            _send_response(_error("OCR_MODEL_INIT_FAILED", "Failed to initialize PaddleOCR", request_id))
-            return
+            try:
+                ocr = PaddleOCR(
+                    device=options.get("device", "cpu"),
+                    text_detection_model_name=options.get("text_detection_model_name", "PP-OCRv5_mobile_det"),
+                    text_recognition_model_name=options.get("text_recognition_model_name", "PP-OCRv5_mobile_rec"),
+                    use_doc_orientation_classify=options.get("use_doc_orientation_classify", False),
+                    use_doc_unwarping=options.get("use_doc_unwarping", False),
+                    use_textline_orientation=options.get("use_textline_orientation", False),
+                    enable_hpi=False,
+                    enable_mkldnn=options.get("enable_mkldnn", True),
+                    cpu_threads=options.get("cpu_threads", 4),
+                )
+            except Exception:
+                _send_response(_error("OCR_MODEL_INIT_FAILED", "Failed to initialize PaddleOCR", request_id))
+                return
 
-        # Run OCR
-        try:
-            result = ocr.predict(image_path)
-        except Exception as e:
-            _send_response(_error("OCR_INFERENCE_FAILED", "OCR inference failed", request_id))
-            return
+            try:
+                result = ocr.predict(image_path)
+            except Exception:
+                _send_response(_error("OCR_INFERENCE_FAILED", "OCR inference failed", request_id))
+                return
 
+            # Version checks
+            try:
+                import paddle
+                paddle_ver = paddle.__version__
+            except Exception:
+                paddle_ver = "unknown"
+            try:
+                import paddleocr as _pocr
+                ocr_ver = _pocr.__version__
+            except Exception:
+                ocr_ver = "unknown"
+
+        # ── fd 1 restored, now build & send response via protocol_fd ──
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
-
-        # Extract items
         items = _extract_ocr_items(result)
-
-        # Get versions
-        try:
-            import paddle
-            paddle_ver = paddle.__version__
-        except Exception:
-            paddle_ver = "unknown"
-        try:
-            import paddleocr
-            ocr_ver = paddleocr.__version__
-        except Exception:
-            ocr_ver = "unknown"
 
         _send_response({
             "ok": True,
@@ -218,6 +250,13 @@ def main() -> None:
         _send_response(_error("OCR_REQUEST_INVALID", "invalid JSON", request_id))
     except Exception:
         _send_response(_error("OCR_PROCESS_FAILED", "unexpected worker error", request_id))
+    finally:
+        # Close protocol fd
+        if _protocol_fd >= 0:
+            try:
+                os.close(_protocol_fd)
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":

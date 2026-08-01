@@ -87,15 +87,20 @@ def _run_worker(request_json: str, timeout: int = DEFAULT_TIMEOUT) -> WorkerResp
     python_exe = _ocr_python()
     worker = str(_worker_path())
 
+    # Build env with UTF-8 enforcement for Windows
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8:backslashreplace"
+
     try:
         proc = subprocess.run(
             [python_exe, worker],
-            input=request_json,
-            capture_output=True,
-            text=True,
+            input=request_json.encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             timeout=timeout,
             shell=False,
-            encoding="utf-8",
+            env=env,
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError("OCR_PROCESS_TIMEOUT")
@@ -104,16 +109,27 @@ def _run_worker(request_json: str, timeout: int = DEFAULT_TIMEOUT) -> WorkerResp
     except Exception:
         raise RuntimeError("OCR_PROCESS_FAILED")
 
+    stdout_bytes = proc.stdout or b""
+    stderr_bytes = proc.stderr or b""
+
+    # Size checks on raw bytes
+    if len(stdout_bytes) > MAX_STDOUT:
+        raise RuntimeError("OCR_OUTPUT_TOO_LARGE")
+    if len(stderr_bytes) > MAX_STDERR:
+        stderr_bytes = stderr_bytes[:MAX_STDERR]
+
+    # Decode stderr with replace for diagnostics (never exposed)
+    _stderr_text = stderr_bytes.decode("utf-8", errors="replace")[:500]
+
     # Check exit code
     if proc.returncode != 0:
-        stderr_snippet = (proc.stderr or "")[:200].replace("\n", " ")
         raise RuntimeError("OCR_PROCESS_FAILED")
 
-    stdout = proc.stdout or ""
-
-    # Size check
-    if len(stdout) > MAX_STDOUT:
-        raise RuntimeError("OCR_OUTPUT_TOO_LARGE")
+    # Decode stdout strictly — must be valid UTF-8 JSON
+    try:
+        stdout = stdout_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        raise RuntimeError("OCR_OUTPUT_INVALID")
 
     # Parse JSON
     try:
@@ -314,6 +330,12 @@ def _build_failed_result(
         provider=ProviderMetadata(id=PROVIDER_ID, mode="real"),
         source_image=SourceImage(
             image_id=image_meta.image_id if image_meta else "",
+            sha256=image_meta.sha256 if image_meta else "",
+            mime_type=image_meta.mime_type if image_meta else "",
+            original_filename=image_meta.original_filename if image_meta else "",
+            width=image_meta.width if image_meta else 0,
+            height=image_meta.height if image_meta else 0,
+            byte_size=image_meta.byte_size if image_meta else 0,
         ),
         provider_error=ProviderError(
             code=err_code,
