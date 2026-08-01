@@ -1024,6 +1024,16 @@ def _peel_tail_amount(text: str) -> tuple[str, BetAmount | None]:
             amount = _amount_from_parts(x_match.group("value"), UNIT_WORD, source="x")
         return prefix, amount
 
+    # Also match × as amount separator (multiply sign)
+    mul_match = re.search(rf"×(?P<value>\d+(?:\.\d+)?)\s*$", text)
+    if mul_match:
+        prefix = text[:mul_match.start()].strip()
+        num_count = _count_prefix_numbers(prefix)
+        has_column_sep = bool(re.search(r"[/×\u78b0]", prefix))
+        if num_count >= 3 and not has_column_sep:
+            amount = _amount_from_parts(mul_match.group("value"), None, source="bare_money")
+            return prefix, amount
+
     match = TAIL_OPERATOR_AMOUNT_PATTERN.search(text)
     if match:
         op = match.group("op")
