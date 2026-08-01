@@ -563,6 +563,56 @@ sys.stdout.buffer.write(b'not json')
             assert "PYTHONUTF8" in content
             assert "PYTHONIOENCODING" in content
 
+    def test_request_sends_mkldnn_false(self, monkeypatch):
+        """Provider must explicitly send enable_mkldnn=False in request options."""
+        fake_python = sys.executable
+        monkeypatch.setenv("BETGUARD_OCR_PYTHON", fake_python)
+
+        import tempfile
+        worker = tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False, encoding="utf-8")
+        worker.write(r"""
+import json, sys
+raw = sys.stdin.buffer.read(1048576)
+req = json.loads(raw.decode("utf-8"))
+# Echo the mkldnn option back
+opt = req.get("options", {})
+resp = {
+    "ok": True, "protocol_version": "betguard.vision.worker.v1",
+    "request_id": req.get("request_id", ""),
+    "engine": {"name": "test"},
+    "elapsed_ms": 1.0,
+    "items": [{"text": "mkldnn=" + str(opt.get("enable_mkldnn", "missing")),
+              "score": 1.0, "polygon": [[0,0],[1,0],[1,1]]}],
+    "warnings": [],
+}
+sys.stdout.buffer.write(json.dumps(resp, ensure_ascii=False).encode("utf-8") + b"\n")
+""")
+        worker.close()
+        worker_path = Path(worker.name)
+        monkeypatch.setattr(
+            "betguard.vision.providers.paddleocr_subprocess._worker_path",
+            lambda: worker_path,
+        )
+
+        png = _make_png()
+        meta = validate_and_store(png, "image/png")
+        save_metadata(meta)
+        try:
+            result = recognize_with_metadata(meta)
+            assert result.status.value == "completed"
+            assert "False" in result.lines[0].text
+        finally:
+            delete_image(meta.image_id)
+            worker_path.unlink(missing_ok=True)
+
+    def test_worker_default_is_false(self):
+        """Worker source must default enable_mkldnn to False."""
+        worker_path = Path(__file__).parents[1] / "tools" / "vision" / "paddleocr_worker.py"
+        if worker_path.is_file():
+            content = worker_path.read_text(encoding="utf-8")
+            assert 'options.get("enable_mkldnn", False)' in content \
+                or "options.get('enable_mkldnn', False)" in content
+
 
 class TestOSLevelFdIsolation:
     """OS-level fd redirect must prevent native C/C++ writes from polluting stdout."""

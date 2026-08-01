@@ -200,7 +200,7 @@ def main() -> None:
                     use_doc_unwarping=options.get("use_doc_unwarping", False),
                     use_textline_orientation=options.get("use_textline_orientation", False),
                     enable_hpi=False,
-                    enable_mkldnn=options.get("enable_mkldnn", True),
+                    enable_mkldnn=options.get("enable_mkldnn", False),
                     cpu_threads=options.get("cpu_threads", 4),
                 )
             except Exception:
