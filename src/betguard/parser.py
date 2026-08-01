@@ -937,6 +937,9 @@ def _valid_star_amount_suffix(match: re.Match[str]) -> bool:
         return False
     if token.isdigit() and len(star) == 1 and sep == "" and before.isspace() and len(match.group("value")) >= 2:
         return False
+    # Reject suffix where amount is 0 (e.g., "234 40" mis-parsed as star=4 amount=0)
+    if match.group("value") == "0":
+        return False
     if before == "" and token[0].isdigit():
         return False
     return True
