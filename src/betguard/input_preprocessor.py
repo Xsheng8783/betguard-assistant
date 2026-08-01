@@ -133,10 +133,6 @@ def preprocess_batch_input(text_or_lines: str | Iterable[str], *, game: str = "5
 
         if "removed LINE time/sender prefix" in notes:
             hk_context = False
-        if cleaned.startswith("港") or cleaned.lower().startswith("hk"):
-            hk_context = True
-        elif hk_context and re.match(r"\d{1,2}[.\-/\s]", cleaned):
-            notes.append("game prefix requires manual review")
 
         entry = {
             "line_no": line_no,
@@ -606,7 +602,6 @@ def _normalize_compact_columns(value: str) -> str:
 
 def _normalize_dash_variants(value: str) -> str:
     value = value.replace("\u2013", "-").replace("\u2014", "-")
-    value = value.replace("\uff1a", "/").replace("：", "/")
     value = re.sub(r"(?<=\d)\s+nh[aAâÂ]n\s+(?=\d)", "×", value)
     value = re.sub(r"\s+nh[aAâÂ]n\s*(\d)", "×\1", value)
     return value
@@ -1235,8 +1230,6 @@ def _suspicious_paste_notes(value: str) -> list[str]:
             notes.append("car metadata ignored")
         else:
             notes.append("suspicious pasted token requires manual review")
-    if value.lower().startswith("港"):
-        notes.append("game prefix requires manual review")
     if (
         re.search(r"-\d+(?:\.\d+)?$", compact)
         and not re.search(r"/\d+$", compact)
