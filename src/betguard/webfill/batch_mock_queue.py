@@ -524,6 +524,12 @@ def _apply_preprocessing_warnings(result: dict[str, Any], candidate: dict[str, A
     if result.get("type") == "column" and result.get("stars") and result.get("money"):
         return result
 
+    # Normal bets that parsed successfully with stars, money, and numbers
+    # should not be demoted by preprocessor review labels.
+    if (result.get("status") == "ok" and result.get("stars") and result.get("money")
+            and (result.get("numbers") or result.get("columns"))):
+        return result
+
     updated = dict(result)
     warnings = list(updated.get("warnings", []))
     for note in notes:
