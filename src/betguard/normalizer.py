@@ -147,18 +147,6 @@ def normalize_for_parser(text: str) -> NormalizationResult:
         notes.append("stripped trailing punctuation")
     value = updated
 
-    # Normalize fullwidth hyphen-minus to ASCII hyphen
-    updated = value.replace("\uff0d", "-")
-    if updated != value:
-        notes.append("normalized fullwidth hyphen")
-    value = updated
-
-    # Normalize × to X before amounts at line end (avoids column-splitter false positive)
-    updated = re.sub(r"×(?=\s*\d+(?:\.\d+)?\s*(?:支|元|塊)?\s*$)", "X", value)
-    if updated != value:
-        notes.append("normalized multiply sign to X amount separator")
-    value = updated
-
     return NormalizationResult(
         original_text=original,
         normalized_text=value,
