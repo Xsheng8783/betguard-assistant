@@ -1151,6 +1151,17 @@ def build_workbench_handler(
                 self._handle_license_status()
                 return
 
+            # --- Vision API v1 ---
+            if path == "/api/vision/v1/providers":
+                self._handle_vision_providers()
+                return
+            if path.startswith("/api/vision/v1/images/"):
+                image_id = path[len("/api/vision/v1/images/"):]
+                if image_id and "/" not in image_id:
+                    self._handle_vision_preview(image_id)
+                    return
+            # --- end Vision API ---
+
             self._send_text("not found", status=404)
 
         def do_POST(self) -> None:  # noqa: N802 -- stdlib name
@@ -1267,6 +1278,20 @@ def build_workbench_handler(
             if path == "/api/window-pin":
                 self._handle_window_pin()
                 return
+
+            # --- Vision API v1 ---
+            if path == "/api/vision/v1/images":
+                self._handle_vision_upload()
+                return
+            if path.startswith("/api/vision/v1/images/"):
+                image_id = path[len("/api/vision/v1/images/"):]
+                if image_id and "/" not in image_id:
+                    self._handle_vision_delete(image_id)
+                    return
+            if path == "/api/vision/v1/jobs":
+                self._handle_vision_job()
+                return
+            # --- end Vision API ---
 
             self._send_text("not found", status=404)
 
@@ -1731,9 +1756,48 @@ def build_workbench_handler(
             self._send_json({"ok": True, "received": len(valid_candidates)})
 
         def _handle_assist_panel(self) -> None:
-            """Return the slim assist panel HTML."""
+            """Return the slim assist panel HTML with vision section."""
             from betguard.webui.assist_panel_html import ASSIST_PANEL_HTML
-            self._send_html(ASSIST_PANEL_HTML)
+            from betguard.webui.assist_panel_vision_html import render_vision_ui_section
+
+            # Inject vision UI section + mode toggle into assist panel
+            html = ASSIST_PANEL_HTML
+            # Add mode toggle buttons after h2
+            mode_toggle = """
+<div style="margin-bottom:8px;display:flex;gap:6px">
+  <button id="mode-text-btn" style="font-size:13px;padding:4px 10px;min-height:unset;background:#2563eb;color:#fff" onclick="switchMode('text')">文字輸入</button>
+  <button id="mode-vision-btn" style="font-size:13px;padding:4px 10px;min-height:unset;background:#94a3b8;color:#fff" onclick="switchMode('vision')">圖片辨識（測試）</button>
+</div>
+"""
+            html = html.replace('<textarea id="batch-text"', mode_toggle + '<textarea id="batch-text"')
+            # Add vision section before the closing </body>
+            vision_html = render_vision_ui_section()
+            html = html.replace('</body>', f"""
+<script>
+function switchMode(mode) {{
+  var textBtn = document.getElementById("mode-text-btn");
+  var visionBtn = document.getElementById("mode-vision-btn");
+  var textArea = document.getElementById("batch-text");
+  var createBtn = document.getElementById("createBatchBtn");
+  var visionSection = document.getElementById("vision-section");
+  if (mode === "vision") {{
+    textBtn.style.background = "#94a3b8";
+    visionBtn.style.background = "#2563eb";
+    textArea.style.display = "none";
+    createBtn.style.display = "none";
+    visionSection.style.display = "block";
+  }} else {{
+    textBtn.style.background = "#2563eb";
+    visionBtn.style.background = "#94a3b8";
+    textArea.style.display = "";
+    createBtn.style.display = "";
+    visionSection.style.display = "none";
+  }}
+}}
+</script>
+{vision_html}
+</body>""")
+            self._send_html(html)
             return
             _old_html = """
 <html lang="zh-Hant">
@@ -2455,6 +2519,81 @@ window.assistPanelFill = assistPanelFill;
             from betguard.webui.window_pin import set_always_on_top
             result = set_always_on_top(enable)
             self._send_json(result)
+
+        # ----------------------------------------------------------------
+        # Vision API v1 handlers
+        # ----------------------------------------------------------------
+
+        def _handle_vision_providers(self) -> None:
+            from betguard.vision.service import list_providers
+            result = list_providers()
+            self._send_json(result)
+
+        def _handle_vision_upload(self) -> None:
+            length_str = self.headers.get("Content-Length", "")
+            if not length_str:
+                self._send_json({"ok": False, "error": {"code": "IMAGE_EMPTY", "message": "無圖片內容"}})
+                return
+            try:
+                length = int(length_str)
+            except ValueError:
+                self._send_json({"ok": False, "error": {"code": "IMAGE_EMPTY", "message": "Content-Length 格式錯誤"}})
+                return
+            if length < 0:
+                self._send_json({"ok": False, "error": {"code": "IMAGE_EMPTY", "message": "Content-Length 不可為負數"}})
+                return
+            if length > 10 * 1024 * 1024 + 1024:
+                self._send_json({"ok": False, "error": {"code": "IMAGE_TOO_LARGE", "message": "圖片過大（上限 10 MiB）"}})
+                return
+            if length <= 0:
+                self._send_json({"ok": False, "error": {"code": "IMAGE_EMPTY", "message": "圖片為空"}})
+                return
+
+            content_type = self.headers.get("Content-Type", "")
+            filename_raw = self.headers.get("X-Filename", "")
+            from urllib.parse import unquote
+            filename = unquote(filename_raw) if filename_raw else ""
+
+            data = self.rfile.read(length)
+            from betguard.vision.service import upload_image
+            result = upload_image(data, content_type, filename)
+            self._send_json(result, status=200 if result["ok"] else 400)
+
+        def _handle_vision_preview(self, image_id: str) -> None:
+            from betguard.vision.service import get_image_preview
+            img_data, mime_type, error = get_image_preview(image_id)
+            if error:
+                self._send_json(error, status=404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", mime_type or "application/octet-stream")
+            self.send_header("Content-Length", str(len(img_data)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            try:
+                self.wfile.write(img_data)  # type: ignore[arg-type]
+            except (ConnectionAbortedError, BrokenPipeError, OSError):
+                pass
+
+        def _handle_vision_delete(self, image_id: str) -> None:
+            from betguard.vision.service import delete_image_api
+            result = delete_image_api(image_id)
+            self._send_json(result, status=200 if result["ok"] else 404)
+
+        def _handle_vision_job(self) -> None:
+            data = self._read_json_body()
+            if data is None:
+                self._send_json({"ok": False, "error": {"code": "INVALID_JSON", "message": "JSON 格式無效"}})
+                return
+            image_id = data.get("image_id", "")
+            provider_id = data.get("provider_id", "fake")
+            fixture = data.get("fixture", "bet_slip")
+            from betguard.vision.service import run_job
+            result = run_job(image_id, provider_id, fixture)
+            self._send_json(result, status=200 if result["ok"] else 400)
+
+        # ----------------------------------------------------------------
 
     return WorkbenchHandler
 

@@ -31,6 +31,14 @@ from betguard.vision.providers.fake import (
     multi_line_fixture,
     no_confidence_fixture,
 )
+from betguard.vision.image_intake import (
+    ImageMetadata,
+    delete_image,
+    detect_mime_type,
+    get_metadata,
+    read_image_data,
+    validate_and_store,
+)
 
 __all__ = [
     # Contracts
@@ -57,4 +65,11 @@ __all__ = [
     "bet_slip_fixture",
     "multi_line_fixture",
     "no_confidence_fixture",
+    # Image intake
+    "ImageMetadata",
+    "validate_and_store",
+    "detect_mime_type",
+    "delete_image",
+    "get_metadata",
+    "read_image_data",
 ]
