@@ -6,12 +6,18 @@ Bundles Playwright Chromium (excluding headless_shell to avoid MAX_PATH).
 import os
 import glob as _glob
 
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
+
 ROOT = os.path.abspath(".")
 block_cipher = None
 
 # Bundled Chromium — exclude headless_shell (deep paths cause MAX_PATH errors)
 _pw = os.path.join(ROOT, "build", "playwright-browsers")
 _datas = [(os.path.join(ROOT, "src", "betguard"), "betguard")]
+
+# OCR: bundle RapidOCR ONNX models + onnxruntime native libs
+_datas += collect_data_files("rapidocr_onnxruntime", includes=["**/*.onnx", "**/*.yaml", "**/*.yml"])
+_binaries = collect_dynamic_libs("onnxruntime")
 
 # Manually add only the directories we need
 for _entry in sorted(os.listdir(_pw)):
@@ -24,10 +30,11 @@ for _entry in sorted(os.listdir(_pw)):
 a = Analysis(
     [os.path.join(ROOT, "src", "betguard", "launcher.py")],
     pathex=[os.path.join(ROOT, "src")],
-    binaries=[],
+    binaries=_binaries,
     datas=_datas,
     hiddenimports=[
         "betguard.webui.app",
+        "betguard.ocr",
         "betguard.parser",
         "betguard.validator",
         "betguard.webfill.web_assist_session",
