@@ -68,7 +68,7 @@ def _b32_encode(data: bytes) -> str:
     return ''.join(result)
 
 
-def _b32_decode(s: str) -> bytes:
+def _b32_decode(s: str, canonical: bool = True) -> bytes:
     s = s.upper().replace('-', '')
     bits, bit_count, result = 0, 0, bytearray()
     for ch in s:
@@ -79,7 +79,23 @@ def _b32_decode(s: str) -> bytes:
         while bit_count >= 8:
             bit_count -= 8
             result.append((bits >> bit_count) & 0xFF)
+    # Validate remaining padding bits are all zero
+    if canonical and bit_count > 0:
+        padding_mask = (1 << bit_count) - 1
+        if (bits & padding_mask) != 0:
+            raise ValueError("Non-canonical base32 encoding")
     return bytes(result)
+
+
+def _b32_is_canonical(s: str) -> bool:
+    """Check if base32 string is in canonical form (round-trip clean)."""
+    try:
+        decoded = _b32_decode(s)
+        re_encoded = _b32_encode(decoded)
+        normalized = s.upper().replace('-', '')
+        return re_encoded == normalized
+    except ValueError:
+        return False
 
 
 def _ed25519_verify(public_key: bytes, message: bytes, signature: bytes) -> bool:
@@ -173,7 +189,7 @@ def _legacy_verify(code: str, current_hash: str) -> dict | None:
         # Try v2 compact HMAC
         secret = _legacy_secret()
         if secret:
-            raw = _b32_decode(cleaned)
+            raw = _b32_decode(cleaned, canonical=False)
             if len(raw) == 13:
                 payload, sig = raw[:7], raw[7:]
                 try:
@@ -377,7 +393,13 @@ def verify_activation_code(code: str, device_id_display: str | None = None) -> d
     # Ed25519 (always accepted)
     try:
         if is_ed25519 or len(code) > 50:
-            raw = _b32_decode(cleaned)
+            # Body length + canonical check only for Ed25519-prefixed short codes
+            if is_ed25519:
+                if len(cleaned) != 124:
+                    return {"ok": False, "error": "啟用碼格式無效"}
+                if not _b32_is_canonical(cleaned):
+                    return {"ok": False, "error": "啟用碼格式無效"}
+            raw = _b32_decode(cleaned, canonical=is_ed25519)
             r = _verify_ed25519(raw, current_hash)
             if r is not None:
                 return r
