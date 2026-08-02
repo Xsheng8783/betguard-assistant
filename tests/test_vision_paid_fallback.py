@@ -75,8 +75,8 @@ def test_build_pending_human_confirmation_surfaces_closed_set_validation():
     assert pc["safety"]["auto_confirm"] is False
 
 
-def test_clean_line_not_flagged_for_confirmation():
-    """A fully clean line does not get needs_human_confirmation."""
+def test_clean_line_still_requires_human_confirmation():
+    """Policy: even a fully clean line requires human confirmation."""
     from betguard.vision.paid_fallback import build_pending_human_confirmation
     result = _result("r2", "18 26 ×1")
     result.preprocessing = {
@@ -88,13 +88,13 @@ def test_clean_line_not_flagged_for_confirmation():
             "multiplier_text": "×1",
             "uncertain": False,
             "uncertain_reason": None,
-            "needs_human_confirmation": False,
+            "needs_human_confirmation": True,
             "validation_issues": [],
             "token_validations": [],
         }],
     }
     pc = build_pending_human_confirmation(result, quality_passed=True, selected_source="paid_vision")
-    assert pc["lines"][0]["needs_human_confirmation"] is False
+    assert pc["lines"][0]["needs_human_confirmation"] is True
     assert pc["lines"][0]["validation_issues"] == []
 
 

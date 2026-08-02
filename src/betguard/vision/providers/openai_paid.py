@@ -30,8 +30,8 @@ from ..contracts import (
     RecognitionStatus,
     SourceImage,
 )
+from ..closed_set import SCOPES
 from ..errors import ErrorCode, ProviderError
-
 
 PROVIDER_ID = "openai-vision-paid"
 API_KEY_ENV = "OPENAI_API_KEY"
@@ -43,10 +43,11 @@ RESPONSES_URL = "https://api.openai.com/v1/responses"
 IMAGE_DETAIL_ENV = "BETGUARD_VISION_IMAGE_DETAIL"
 ALLOWED_IMAGE_DETAILS = frozenset({"low", "high", "auto"})
 
-# Deliberately narrow alphabet for this OCR profile. The slip contains ONLY
-# digits, Chinese 二/三/四, the fixed × token, and whitespace. Explanations
-# belong in uncertain_reason; raw_text and alternatives are transcription-only.
-BET_SLIP_TEXT_PATTERN = r"^[0-9?二三四× 　]*$"
+# Deliberately narrow alphabet for this OCR profile (Closed Set V2). The slip
+# contains only digits, Chinese 二/三/四/各, the fixed × token, the number-set
+# separators . ( ), the shared-multiplier marker =, and whitespace. English
+# letters and other punctuation never appear.
+BET_SLIP_TEXT_PATTERN = r"^[0-9?二三四各×.=() 　]*$"
 _BET_SLIP_TEXT_RE = re.compile(BET_SLIP_TEXT_PATTERN)
 _NUMBER_GROUP_TOKEN_RE = re.compile(r"^[0-9?]{1,2}$")
 
@@ -77,6 +78,7 @@ REQUIRED_LINE_KEYS = {
     "uncertain",
     "uncertain_reason",
 }
+OPTIONAL_LINE_KEYS = {"scope"}
 
 
 OpenAIResponseClient = Callable[[dict[str, Any], str, int], dict[str, Any]]
@@ -177,6 +179,10 @@ def build_output_schema() -> dict[str, Any]:
                             "type": "string",
                             "enum": sorted(LAYOUT_HINTS),
                         },
+                        "scope": {
+                            "type": "string",
+                            "enum": sorted(SCOPES),
+                        },
                         "number_groups": {
                             "type": "array",
                             "items": {
@@ -227,10 +233,11 @@ def build_prompt(document_mode: str = "auto") -> str:
         f"Human-supplied document mode: {mode}. {mode_instruction} "
         "Transcribe the handwritten betting entries and preserve their visual grouping. "
         "This is a CLOSED-ALPHABET transcription task. The only characters that can "
-        "appear are: digits 0-9, Chinese 二/三/四, the fixed multiplier/separator "
-        "symbol ×, spaces, and the question mark ? for unreadable content. "
+        "appear are: digits 0-9, Chinese 二/三/四/各, the fixed multiplier/separator "
+        "symbol ×, the number-set separators . ( ), the shared-multiplier marker =, "
+        "spaces, and the question mark ? for unreadable content. "
         "There are NO English letters, NO English words, NO other Chinese characters, "
-        "and NO general punctuation on these slips. Never write x, X, or * — use × "
+        "and NO other punctuation on these slips. Never write x, X, or * — use × "
         "only. Never invent an English letter to describe a glyph. "
         "Ignore printed logos, hotel text, paper headings, red or blue grid lines, "
         "background objects, and entries that are clearly crossed out. "
@@ -254,12 +261,17 @@ def build_prompt(document_mode: str = "auto") -> str:
         "star or multiplier expression in multiplier_text, or null when absent. raw_text "
         "must be a single-line closed-alphabet transcription of the complete cell; separate "
         "visible number groups with spaces and append the visible star or multiplier once. "
-        "Interpret layout notation conservatively using these transcription rules: a final "
-        "×1, ×2, or ×10 is a multiplier, while × marks between number clusters "
-        "are number or column separators. Chinese 二, 三, 四 immediately before a multiplier "
-        "are star markers, not numbers. A circled or parenthesized vertical number list "
-        "followed by 三×10 is one entry, for example visible 11, 18, 20 plus 三×10 becomes "
-        "raw_text '11 18 20 三×10'. A multi-column arrangement "
+        "Multipliers may be integers or decimals (×1, ×2, ×10, ×0.2, ×0.3, ×0.5); keep the "
+        "decimal point inside the multiplier. A parenthesized dot-separated number list is "
+        "one number set, e.g. (12.18.20.23) means the four numbers 12, 18, 20, 23 with the "
+        "following star/multiplier text applying to the whole set. "
+        "A shared multiplier marked with 各, such as 各=三×0.3, applies to each clearly "
+        "associated number row in that same visual section; emit it as its own line with "
+        "scope=all_groups_in_region. Do not apply a shared annotation across "
+        "a border, heading, blank gap, or unrelated section. When the region a shared "
+        "multiplier controls cannot be determined, set scope=unresolved_region and "
+        "uncertain=true. "
+        "A multi-column arrangement "
         "connected visually by × marks and followed by one shared star/multiplier is one "
         "column_like entry with one inner list per visible column. "
         "Formatting examples describe notation only, not guaranteed image content: visible "
@@ -267,10 +279,11 @@ def build_prompt(document_mode: str = "auto") -> str:
         "'05 18 ×1', number_groups [['05', '18']], multiplier_text '×1'. A visible four-number "
         "row '14 16 23 28' with trailing '二三×1' should be emitted as "
         "raw_text '14 16 23 28 二三×1', number_groups [['14', '16', '23', '28']], and "
-        "multiplier_text '二三×1'. Never treat the × between two number clusters as the "
+        "multiplier_text '二三×1'. A parenthesized set with two multipliers such as "
+        "'(12.18.20.23) 三×0.5 四×3' should be emitted as raw_text '(12.18.20.23) 三×0.5 四×3', "
+        "number_groups [['12', '18', '20', '23']], multiplier_text '三×0.5 四×3'. "
+        "Never treat the × between two number clusters as the "
         "final multiplier when another trailing × expression is visible. "
-        "Multipliers are integers only (×1, ×2, ×10); there is no decimal multiplier, "
-        "no decimal point, and no shared-annotation character on these slips. "
         "Preserve visible leading zeroes and separators. "
         "Do not calculate, validate, reinterpret, or complete a bet. "
         "You are REQUIRED to refuse instead of guessing. Never infer a number that is not "
@@ -470,7 +483,8 @@ def validate_model_output(data: Any) -> dict[str, Any]:
         if not isinstance(line, dict):
             raise ValueError(f"line {index} must be an object")
         keys = set(line)
-        extra = keys - REQUIRED_LINE_KEYS
+        allowed = REQUIRED_LINE_KEYS | OPTIONAL_LINE_KEYS
+        extra = keys - allowed
         missing = REQUIRED_LINE_KEYS - keys
         if extra:
             raise ValueError(f"line {index} has unsupported fields: {sorted(extra)}")
@@ -490,6 +504,8 @@ def validate_model_output(data: Any) -> dict[str, Any]:
         seen_entry_ids.add(line["entry_id"])
         if line["layout_hint"] not in LAYOUT_HINTS:
             raise ValueError(f"line {index} layout_hint is unsupported")
+        if "scope" in line and line["scope"] not in SCOPES:
+            raise ValueError(f"line {index} scope is unsupported")
         groups = line["number_groups"]
         if not isinstance(groups, list) or not all(isinstance(group, list) for group in groups):
             raise ValueError(f"line {index} number_groups must be a list of lists")
@@ -598,6 +614,8 @@ def _result_from_model_output(
             raw_text=line.get("raw_text", ""),
             layout_hint=line.get("layout_hint", "unknown"),
             uncertain=line["uncertain"],
+            scope=line.get("scope"),
+            region_bound=False,  # no ROI binding in whole-image mode
         )
         if validation["needs_human_confirmation"]:
             all_warnings.append(
@@ -609,6 +627,7 @@ def _result_from_model_output(
         structured["needs_human_confirmation"] = validation["needs_human_confirmation"]
         structured["validation_issues"] = validation["issues"]
         structured["token_validations"] = validation["token_validations"]
+        structured["semantics"] = validation["semantics"]
         openai_lines.append(structured)
 
         lines.append(
@@ -619,8 +638,10 @@ def _result_from_model_output(
                 tokens=[],
                 confidence=Confidence(value=None, source="openai_paid"),
                 alternatives=alternatives,
-                warnings=(["uncertain"] if line["uncertain"] else [])
-                + (["needs_human_confirmation"] if validation["needs_human_confirmation"] else []),
+                # warnings carries ONLY the model's uncertain signal — never
+                # the policy-level needs_human_confirmation (that lives in
+                # openai_lines[].needs_human_confirmation and semantics).
+                warnings=["uncertain"] if line["uncertain"] else [],
             )
         )
 

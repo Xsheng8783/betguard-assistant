@@ -86,18 +86,21 @@ def test_prompt_is_restricted_to_bet_slip_alphabet_and_no_guessing():
     assert "exactly one output item" in prompt
     assert "Never split" in prompt
     assert "Never merge content across a visible cell border" in prompt
-    assert "11 18 20 三×10" in prompt
+    assert "(12.18.20.23) 三×0.5 四×3" in prompt
     assert "one inner list per visible column" in prompt
-    assert "× marks between number clusters" in prompt
+    assert "× marks between number clusters" in prompt or "connected visually by × marks" in prompt
     assert "05 18 ×1" in prompt
     assert "14 16 23 28 二三×1" in prompt
     assert "CLOSED-ALPHABET" in prompt
     assert "REQUIRED to refuse" in prompt or "Never guess" in prompt
-    # No decimal multipliers, no 各, no old lowercase-x examples
-    assert "0.5" not in prompt
-    assert "0.3" not in prompt
-    assert "0.2" not in prompt
-    assert "各" not in prompt
+    # V2: decimals + shared multiplier are legal and mentioned
+    assert "×0.5" in prompt
+    assert "×0.3" in prompt
+    assert "×0.2" in prompt
+    assert "各" in prompt
+    assert "scope=all_groups_in_region" in prompt
+    assert "scope=unresolved_region" in prompt
+    # no old lowercase-x examples
     assert "x0.5" not in prompt
     assert "x1" not in prompt
 
@@ -175,11 +178,11 @@ def test_validate_model_output_accepts_digits_and_supported_star_text():
     assert validate_model_output(data) == data
 
 
-def test_validate_model_output_rejects_decimal_multiplier():
+def test_validate_model_output_accepts_decimal_multiplier():
     data = _model_output()
     data["lines"][0]["raw_text"] = "05 08 10 二三四×0.5"
-    with pytest.raises(ValueError, match="unsupported OCR characters"):
-        validate_model_output(data)
+    data["lines"][0]["multiplier_text"] = "二三四×0.5"
+    assert validate_model_output(data) == data
 
 
 def test_validate_model_output_rejects_english_letters():
@@ -205,23 +208,52 @@ def test_validate_model_output_rejects_english_in_multiplier():
 
 def test_validate_model_output_rejects_other_chinese():
     data = _model_output()
-    data["lines"][0]["raw_text"] = "各二三×1"
+    data["lines"][0]["raw_text"] = "包二三×1"
     with pytest.raises(ValueError, match="unsupported OCR characters"):
         validate_model_output(data)
 
 
-def test_validate_model_output_rejects_decimal_point():
+def test_validate_model_output_accepts_ge_marker():
+    data = _model_output()
+    data["lines"][0]["raw_text"] = "各二三×1"
+    assert validate_model_output(data) == data
+
+
+def test_validate_model_output_accepts_decimal_point_in_multiplier():
     data = _model_output()
     data["lines"][0]["raw_text"] = "05.08 ×1"
+    data["lines"][0]["multiplier_text"] = "×1"
+    assert validate_model_output(data) == data
+
+
+def test_validate_model_output_rejects_comma():
+    data = _model_output()
+    data["lines"][0]["raw_text"] = "05,08 ×1"
     with pytest.raises(ValueError, match="unsupported OCR characters"):
         validate_model_output(data)
 
 
-def test_validate_model_output_rejects_decimal_multiplier_text():
+def test_validate_model_output_accepts_decimal_multiplier_text():
     data = _model_output()
     data["lines"][0]["multiplier_text"] = "×0.5"
-    with pytest.raises(ValueError, match="unsupported OCR characters"):
-        validate_model_output(data)
+    data["lines"][0]["raw_text"] = "05 08 ×0.5"
+    assert validate_model_output(data) == data
+
+
+def test_validate_model_output_accepts_shared_multiplier_and_parens():
+    data = _model_output()
+    data["lines"][0].update({
+        "raw_text": "(12.18.20.23) 三×0.5 四×3",
+        "multiplier_text": "三×0.5 四×3",
+        "number_groups": [["12", "18", "20", "23"]],
+        "scope": "current_group",
+    })
+    assert validate_model_output(data) == data
+    data["lines"][0]["raw_text"] = "各=三×0.3"
+    data["lines"][0]["number_groups"] = []
+    data["lines"][0]["multiplier_text"] = "三×0.3"
+    data["lines"][0]["scope"] = "all_groups_in_region"
+    assert validate_model_output(data) == data
 
 
 def test_validate_model_output_accepts_integer_multipliers():
@@ -360,7 +392,7 @@ def test_valid_response_to_recognition_result(tmp_path, monkeypatch):
     assert result.preprocessing["human_confirmation_required"] is True
     assert result.preprocessing["auto_submit"] is False
     assert result.preprocessing["openai_lines"][0]["raw_text"] == "18 26 ×1"
-    assert result.preprocessing["openai_lines"][0]["needs_human_confirmation"] is False
+    assert result.preprocessing["openai_lines"][0]["needs_human_confirmation"] is True
     assert result.preprocessing["openai_lines"][0]["validation_issues"] == []
     assert result.preprocessing["openai_lines"][0]["layout_hint"] == "normal_like"
     assert len(calls) == 1

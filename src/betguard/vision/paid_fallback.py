@@ -166,6 +166,7 @@ def build_pending_human_confirmation(
             ),
             "validation_issues": structured_by_id.get(line.line_id, {}).get("validation_issues", []),
             "token_validations": structured_by_id.get(line.line_id, {}).get("token_validations", []),
+            "semantics": structured_by_id.get(line.line_id, {}).get("semantics"),
             "human_confirmed": False,
         }
         for line in result.lines
