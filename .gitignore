@@ -39,5 +39,8 @@ amount_summary.txt
 # Local workbench artifacts (created by `python -m betguard.webui.app`)
 runs/
 dist/
+build/
+release/
 
 /Scripts/
+# license private keys\n*.betguard/license_key\nlicense_key\n~/.betguard/

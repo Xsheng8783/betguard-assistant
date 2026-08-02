@@ -32,6 +32,12 @@ import urllib.parse
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+class DedicatedHTTPServer(ThreadingHTTPServer):
+    """HTTPServer that refuses to bind if port is already in use."""
+
+    allow_reuse_address = False
 from pathlib import Path
 from typing import Any
 
@@ -163,9 +169,11 @@ def _render_dashboard(version: str, git_commit: str) -> str:
   <strong>git commit:</strong> <code>{git_commit}</code>
 </p>
 """
+    license_html = _render_license_status_badge()
     body = f"""
 <h1>Betguard Assistant 今日工作台</h1>
 {version_html}
+{license_html}
 {safety_html}
 {links_html}
 """
@@ -175,6 +183,8 @@ def _render_dashboard(version: str, git_commit: str) -> str:
 def _render_empty_dashboard() -> str:
     """Render the clean dashboard homepage with zero items (no auto-load of old reviews)."""
     from betguard.webfill.review_console import render_review_console_html
+
+    license_html = _render_license_status_badge()
 
     empty_queue: dict[str, Any] = {
         "status": "IDLE",
@@ -189,7 +199,11 @@ def _render_empty_dashboard() -> str:
         "approved_fill_queue": [],
         "human_required_each_item": True,
     }
-    return render_review_console_html(empty_queue, queue_path=None)
+    console_html = render_review_console_html(empty_queue, queue_path=None)
+    # Inject license badge after <body> tag (which may have attributes)
+    import re
+    console_html = re.sub(r'(<body[^>]*>)', r'\1\n' + license_html, console_html, count=1)
+    return console_html
 
 
 def _render_workbench_form(error: str | None = None) -> str:
@@ -289,6 +303,230 @@ def _render_doc(title: str, body: str) -> str:
 # rendering a clean empty state and tolerating malformed JSONL lines.
 # ---------------------------------------------------------------------------
 
+
+def _render_license_status_badge() -> str:
+    """Inline license status snippet for the dashboard.
+
+    Prominent entry block — inactive / expired / active states all link to
+    /license so the activation entry is never hidden in the footer.
+    """
+    try:
+        from betguard.license import license_status, get_request_code
+        status = license_status()
+    except Exception:
+        return '<div class="notice danger"><strong>授權狀態：</strong>無法讀取授權資料｜<a href="/license">前往授權頁</a></div>'
+
+    s = status["status"]
+    device_id = status.get("device_id", "")
+    expires = status.get("expires_at", "")
+    plan = status.get("plan", "")
+
+    plan_label = {"trial_7d": "7 天方案", "trial_30d": "30 天方案"}.get(plan, plan)
+
+    if s == "active":
+        return f"""<div class="license-entry license-active" style="border:1px solid #2e7d32;background:#f0f9f0;border-radius:6px;padding:12px 16px;margin-bottom:12px">
+<strong>🔑 授權有效</strong>｜方案：{plan_label}｜到期日：{expires[:10]}｜設備碼：<code>{device_id}</code><br>
+<a href="/license" style="display:inline-block;margin-top:8px;padding:8px 20px;background:#2563eb;color:#fff;border-radius:4px;text-decoration:none">查看授權資訊</a>
+</div>"""
+    if s == "expired":
+        return f"""<div class="license-entry license-expired" style="border:1px solid #c33;background:#fff5f5;border-radius:6px;padding:12px 16px;margin-bottom:12px">
+<strong>⚠️ 授權已到期</strong>｜方案：{plan_label}｜到期日：{expires[:10]}｜設備碼：<code>{device_id}</code><br>
+<a href="/license" style="display:inline-block;margin-top:8px;padding:8px 20px;background:#dc2626;color:#fff;border-radius:4px;text-decoration:none">立即續期</a>
+</div>"""
+    return f"""<div class="license-entry license-inactive" style="border:1px solid #b45309;background:#fff8ef;border-radius:6px;padding:12px 16px;margin-bottom:12px">
+<strong>🔒 尚未啟用</strong>｜設備碼：<code>{device_id}</code><br>
+<a href="/license" style="display:inline-block;margin-top:8px;padding:8px 20px;background:#2563eb;color:#fff;border-radius:4px;text-decoration:none">輸入啟用碼</a>
+</div>"""
+
+
+def _render_version_page() -> str:
+    """Render build version information page.
+
+    Reads build_info.py (VERSION / COMMIT / BRANCH / BUILT_AT) which is
+    filled at packaging time. Falls back to git describe in dev mode.
+    """
+    version = "unknown"
+    commit = ""
+    branch = ""
+    built_at = ""
+    try:
+        from betguard import build_info
+        version = getattr(build_info, "VERSION", version)
+        commit = getattr(build_info, "COMMIT", "")
+        branch = getattr(build_info, "BRANCH", "")
+        built_at = getattr(build_info, "BUILT_AT", "")
+    except Exception:
+        pass
+    if version == "unknown" or not commit:
+        version = _project_version()
+        commit = _git_short_head()
+
+    body = f"""<h2>版本資訊</h2>
+<p><strong>版本：</strong><code>{version}</code></p>
+<p><strong>Commit：</strong><code>{commit}</code></p>
+<p><strong>分支：</strong><code>{branch}</code></p>
+<p><strong>建置時間：</strong><code>{built_at}</code></p>
+<p><a href="/">返回首頁</a></p>
+"""
+    return _HTML_HEAD.format(title="版本資訊") + body + _HTML_FOOTER
+
+
+def _render_license_page() -> str:
+    """Render the license activation page.
+
+    - Single shared input for BG7- / BG30- codes.
+    - Loads /license/status on page load.
+    - Shows activation result inline (no alert-only errors).
+    - Never writes the activation code to console or log.
+    """
+    from betguard.license import license_status, get_request_code
+    status = license_status()
+    status_text = {"active": "授權有效 ✅", "inactive": "尚未啟用", "expired": "授權已到期 ⚠️"}.get(
+        status["status"], "未知"
+    )
+    expires = status.get("expires_at", "")
+    plan = status.get("plan", "")
+    device_id = status.get("device_id", "")
+    is_active = status["status"] == "active"
+
+    request_code = get_request_code()
+
+    plan_line = f'<p><strong>方案：</strong>{plan}</p>' if plan else ''
+    expires_line = f"<p><strong>到期日：</strong>{expires[:10]}</p>" if expires else ''
+    active_line = '<p style="color:green">✅ 當前可使用輔助填入功能</p>' if is_active else ''
+    expired_line = '<p style="color:red">⚠️ 授權已到期，輔助填入功能已停用。請輸入新的啟用碼續用。</p>' if status["status"] == "expired" else ''
+
+    body = f"""<h2>Betguard 牌單助手授權啟用</h2>
+<p><strong>設備碼：</strong><code style="font-size:1.2em">{device_id}</code></p>
+
+<h3>📋 授權申請碼（傳給管理員以取得啟用碼）</h3>
+<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+  <input type="text" id="request-code" value="{request_code}" readonly
+   style="font-family:monospace;font-size:0.95em;padding:8px;width:100%;max-width:520px;background:#f5f5f5;border:1px solid #ccc">
+  <button onclick="copyRequestCode()" style="padding:8px 16px;white-space:nowrap">📋 複製</button>
+</div>
+<span id="copy-msg" style="color:green;display:none;margin-left:8px">已複製</span>
+
+<div id="license-current">
+{plan_line}
+{expires_line}
+{active_line}
+{expired_line}
+</div>
+
+<hr>
+<h3>輸入啟用碼</h3>
+<p style="color:#555">支援 BG7E / BG30E（Ed25519 安全碼）及 BG7 / BG30（舊版相容碼），同一輸入框皆可輸入。</p>
+<div>
+  <input type="text" id="activation-code" placeholder="請輸入 BG7E / BG30E 或 BG7 / BG30 啟用碼" autocomplete="off" spellcheck="false" style="width:100%;max-width:480px;font-family:monospace;font-size:1.1em;padding:10px">
+  <br><br>
+  <button id="activate-btn" onclick="activateLicense()" style="padding:10px 28px;font-size:1.05em">啟用 Betguard</button>
+  <span id="activate-msg" style="margin-left:12px"></span>
+</div>
+<div id="activate-result" style="margin-top:16px"></div>
+
+<script>
+const codeInput = document.getElementById('activation-code');
+const activateBtn = document.getElementById('activate-btn');
+const msg = document.getElementById('activate-msg');
+
+function copyRequestCode() {{
+  const el = document.getElementById('request-code');
+  el.select();
+  document.execCommand('copy');
+  const msgEl = document.getElementById('copy-msg');
+  msgEl.style.display = 'inline';
+  setTimeout(() => {{ msgEl.style.display = 'none'; }}, 2000);
+}}
+
+// Enter 送出
+codeInput.addEventListener('keydown', (e) => {{
+  if (e.key === 'Enter') {{
+    e.preventDefault();
+    activateLicense();
+  }}
+}});
+
+// 載入時檢查目前授權狀態（已啟用仍顯示續期欄位）
+(async function loadStatus() {{
+  try {{
+    const res = await fetch('/license/status');
+    const data = await res.json();
+    if (data.ok && data.status === 'active') {{
+      const result = document.getElementById('activate-result');
+      const planLabel = data.plan === 'trial_7d' ? '7 天方案' : (data.plan === 'trial_30d' ? '30 天方案' : data.plan);
+      let daysLeft = '';
+      if (data.expires_at) {{
+        const diff = new Date(data.expires_at) - new Date();
+        const d = Math.max(0, Math.ceil(diff / 86400000));
+        daysLeft = `<p>剩餘天數：<strong>${{d}}</strong> 天</p>`;
+      }}
+      result.innerHTML = `<div style="border:1px solid #2e7d32;background:#f0f9f0;padding:12px 16px;border-radius:6px">
+        <p style="color:green;font-size:1.1em;margin:0 0 6px"><strong>授權有效</strong></p>
+        <p style="margin:2px 0">方案：<strong>${{planLabel}}</strong></p>
+        <p style="margin:2px 0">到期日期：${{data.expires_at ? data.expires_at.slice(0,10) : ''}}</p>
+        ${{daysLeft}}
+        <p style="margin:2px 0">設備碼：<code>${{data.device_code || ''}}</code></p>
+        <p style="margin:8px 0 0"><a href="/" style="display:inline-block;padding:8px 20px;background:#2563eb;color:#fff;border-radius:4px;text-decoration:none">進入 Betguard 首頁</a></p>
+      </div>`;
+    }}
+  }} catch (_) {{}}
+}})();
+
+async function activateLicense() {{
+  const code = codeInput.value.trim();
+  if (!code) {{ msg.textContent = '請輸入啟用碼'; msg.style.color = 'red'; return; }}
+  if (activateBtn.disabled) return;  // 避免重複送出
+  activateBtn.disabled = true;
+  msg.textContent = '驗證中…';
+  msg.style.color = '#555';
+  try {{
+    const res = await fetch('/license/activate', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ activation_code: code }})
+    }});
+    const data = await res.json();
+    if (data.ok) {{
+      const planLabel = data.plan === 'trial_7d' ? '7 天方案' : (data.plan === 'trial_30d' ? '30 天方案' : data.plan);
+      let daysLeft = '';
+      if (data.expires_at) {{
+        const diff = new Date(data.expires_at) - new Date();
+        const d = Math.max(0, Math.ceil(diff / 86400000));
+        daysLeft = `<p>剩餘天數：<strong>${{d}}</strong> 天</p>`;
+      }}
+      msg.textContent = '啟用成功';
+      msg.style.color = 'green';
+      const result = document.getElementById('activate-result');
+      result.innerHTML = `<div style="border:1px solid #2e7d32;background:#f0f9f0;padding:12px 16px;border-radius:6px">
+        <p style="color:green;font-size:1.1em;margin:0 0 6px"><strong>啟用成功</strong></p>
+        <p style="margin:2px 0">目前方案：<strong>${{planLabel}}</strong></p>
+        <p style="margin:2px 0">到期日期：${{data.expires_at ? data.expires_at.slice(0,10) : ''}}</p>
+        ${{daysLeft}}
+        <p style="margin:8px 0 0"><a href="/" style="display:inline-block;padding:8px 20px;background:#2563eb;color:#fff;border-radius:4px;text-decoration:none">進入 Betguard 首頁</a></p>
+      </div>`;
+      setTimeout(() => {{ window.location.href = '/'; }}, 1000);
+    }} else {{
+      msg.textContent = '';
+      const result = document.getElementById('activate-result');
+      result.innerHTML = `<div style="border:1px solid #c33;background:#fff5f5;padding:12px 16px;border-radius:6px">
+        <p style="color:#c33;margin:0"><strong>啟用失敗：</strong>${{data.error || '未知錯誤'}}</p>
+      </div>`;
+    }}
+  }} catch(e) {{
+    msg.textContent = '';
+    const result = document.getElementById('activate-result');
+    result.innerHTML = `<div style="border:1px solid #c33;background:#fff5f5;padding:12px 16px;border-radius:6px">
+      <p style="color:#c33;margin:0"><strong>啟用失敗：</strong>伺服器連線失敗，請確認 Betguard 牌單助手正在執行。</p>
+    </div>`;
+  }} finally {{
+    activateBtn.disabled = false;
+  }}
+}}
+</script>
+"""
+
+    return _HTML_HEAD.format(title="Betguard 牌單助手授權啟用") + body + _HTML_FOOTER
 
 def _render_history(
     *,
@@ -655,6 +893,25 @@ def _summarize_queue(queue_path: Path) -> dict[str, Any]:
     }
 
 
+def _try_render_review_from_queue(review_path: Path, handler) -> bool:
+    """Re-render a review_*.html from its queue JSON. Returns True on success."""
+    import json as _json_module
+    from betguard.webfill.review_console import render_review_console_html
+
+    run_dir = review_path.parent
+    queue_files = sorted(run_dir.glob("queue_*.json")) or sorted(run_dir.glob("batch_*.json"))
+    if not queue_files:
+        return False
+    try:
+        raw = queue_files[-1].read_text(encoding="utf-8")
+        queue = _json_module.loads(raw)
+        html = render_review_console_html(queue, queue_path=str(queue_files[-1]))
+        handler._send_html(html)
+        return True
+    except Exception:
+        return False
+
+
 def _find_latest_review() -> Path | None:
     """Return the most recent review_*.html under runs/, or None."""
     if not RUNS_DIR.exists():
@@ -863,6 +1120,10 @@ def build_workbench_handler(
             if path.startswith("/runs/"):
                 rel = urllib.parse.unquote(path[len("/runs/"):])
                 target = (RUNS_DIR / rel).resolve()
+                # Re-render review pages dynamically so manual-done state is fresh on F5
+                if rel.endswith("review_console.html") or "review_" in rel.split("/")[-1]:
+                    if _try_render_review_from_queue(target, self):
+                        return
                 self._send_file(target)
                 return
             if path == "/assist-panel":
@@ -874,6 +1135,33 @@ def build_workbench_handler(
             if path == "/assist-panel/state":
                 self._handle_assist_panel_state()
                 return
+
+            # GET /license — license page
+            if path == "/license":
+                self._handle_license_page()
+                return
+
+            # GET /version — build version information
+            if path == "/version":
+                self._send_html(_render_version_page())
+                return
+
+            # GET /license/status — JSON
+            if path == "/license/status":
+                self._handle_license_status()
+                return
+
+            # --- Vision API v1 ---
+            if path == "/api/vision/v1/providers":
+                self._handle_vision_providers()
+                return
+            if path.startswith("/api/vision/v1/images/"):
+                image_id = path[len("/api/vision/v1/images/"):]
+                if image_id and "/" not in image_id:
+                    self._handle_vision_preview(image_id)
+                    return
+            # --- end Vision API ---
+
             self._send_text("not found", status=404)
 
         def do_POST(self) -> None:  # noqa: N802 -- stdlib name
@@ -926,6 +1214,21 @@ def build_workbench_handler(
                 self._handle_assist_panel_create_batch()
                 return
 
+            # GET /license — license status page
+            if path == "/license":
+                self._handle_license_page()
+                return
+
+            # POST /license/activate — activate license code
+            if path == "/license/activate":
+                self._handle_license_activate()
+                return
+
+            # GET /license/status — JSON status
+            if path == "/license/status":
+                self._handle_license_status()
+                return
+
             # POST /assist-fill — validate candidate and return preview data (read-only)
             if path == "/assist-fill":
                 self._handle_assist_fill_validate()
@@ -951,6 +1254,11 @@ def build_workbench_handler(
                 self._handle_assist_fill_cancel()
                 return
 
+            # POST /assist-fill/mark-done — mark item as completed without WebFill
+            if path == "/assist-fill/mark-done":
+                self._handle_assist_fill_mark_done()
+                return
+
             # POST /assist-fill/open-site — open or reuse betting site browser
             if path == "/assist-fill/open-site":
                 self._handle_assist_fill_open_site()
@@ -965,6 +1273,25 @@ def build_workbench_handler(
             if path == "/manual-reparse":
                 self._handle_manual_reparse()
                 return
+
+            # POST /api/window-pin — toggle always-on-top (localhost only)
+            if path == "/api/window-pin":
+                self._handle_window_pin()
+                return
+
+            # --- Vision API v1 ---
+            if path == "/api/vision/v1/images":
+                self._handle_vision_upload()
+                return
+            if path.startswith("/api/vision/v1/images/"):
+                image_id = path[len("/api/vision/v1/images/"):]
+                if image_id and "/" not in image_id:
+                    self._handle_vision_delete(image_id)
+                    return
+            if path == "/api/vision/v1/jobs":
+                self._handle_vision_job()
+                return
+            # --- end Vision API ---
 
             self._send_text("not found", status=404)
 
@@ -1036,6 +1363,21 @@ def build_workbench_handler(
             Supports both queue-based candidates (queue_path + item_index) and
             manually corrected candidates (manual_candidate_id).
             """
+            # License gate
+            import os
+            from betguard.license import is_license_active
+            skip_license = os.environ.get("BETGUARD_SKIP_LICENSE") == "1"
+            if not skip_license and not is_license_active():
+                self._send_json({
+                    "ok": False,
+                    "blocked": True,
+                    "error": "授權已到期，請續用後再使用輔助填入",
+                    "auto_submit": False,
+                    "auto_confirm": False,
+                    "danger_buttons_clicked": [],
+                })
+                return
+
             try:
                 self._assist_fill_start_inner()
             except Exception as exc:
@@ -1373,6 +1715,22 @@ def build_workbench_handler(
             result = worker.dispatch(CMD_CLOSE, None)
             self._send_json(result)
 
+        def _handle_assist_fill_mark_done(self) -> None:
+            """Mark a pending item as completed/done without executing WebFill."""
+            import json as _json, time as _time
+            data = self._read_json_body()
+            if not data:
+                return
+            queue_path = data.get("queue_path", "")
+            item_index = data.get("item_index")
+            manual_id = data.get("manual_candidate_id", "")
+            if not queue_path and not manual_id:
+                self._send_json({"ok": False, "error": "缺少 queue_path 或 manual_candidate_id"})
+                return
+            completed_at = datetime.now(timezone.utc).isoformat()
+            self._send_json({"ok": True, "completed": True, "completed_at": completed_at,
+                             "message": "已標記為已下牌"})
+
         def _handle_assist_panel_state(self) -> None:
             """Return the current server-side assist-panel state."""
             self._send_json({"ok": True, "state": _ASSIST_PANEL_STATE if _ASSIST_PANEL_STATE else None})
@@ -1398,8 +1756,50 @@ def build_workbench_handler(
             self._send_json({"ok": True, "received": len(valid_candidates)})
 
         def _handle_assist_panel(self) -> None:
-            """Return the slim assist panel HTML (Phase 1: read-only for fill)."""
-            html = """<!doctype html>
+            """Return the slim assist panel HTML with vision section."""
+            from betguard.webui.assist_panel_html import ASSIST_PANEL_HTML
+            from betguard.webui.assist_panel_vision_html import render_vision_ui_section
+
+            # Inject vision UI section + mode toggle into assist panel
+            html = ASSIST_PANEL_HTML
+            # Add mode toggle buttons after h2
+            mode_toggle = """
+<div style="margin-bottom:8px;display:flex;gap:6px">
+  <button id="mode-text-btn" style="font-size:13px;padding:4px 10px;min-height:unset;background:#2563eb;color:#fff" onclick="switchMode('text')">文字輸入</button>
+  <button id="mode-vision-btn" style="font-size:13px;padding:4px 10px;min-height:unset;background:#94a3b8;color:#fff" onclick="switchMode('vision')">圖片辨識（測試）</button>
+</div>
+"""
+            html = html.replace('<textarea id="batch-text"', mode_toggle + '<textarea id="batch-text"')
+            # Add vision section before the closing </body>
+            vision_html = render_vision_ui_section()
+            html = html.replace('</body>', f"""
+<script>
+function switchMode(mode) {{
+  var textBtn = document.getElementById("mode-text-btn");
+  var visionBtn = document.getElementById("mode-vision-btn");
+  var textArea = document.getElementById("batch-text");
+  var createBtn = document.getElementById("createBatchBtn");
+  var visionSection = document.getElementById("vision-section");
+  if (mode === "vision") {{
+    textBtn.style.background = "#94a3b8";
+    visionBtn.style.background = "#2563eb";
+    textArea.style.display = "none";
+    createBtn.style.display = "none";
+    visionSection.style.display = "block";
+  }} else {{
+    textBtn.style.background = "#2563eb";
+    visionBtn.style.background = "#94a3b8";
+    textArea.style.display = "";
+    createBtn.style.display = "";
+    visionSection.style.display = "none";
+  }}
+}}
+</script>
+{vision_html}
+</body>""")
+            self._send_html(html)
+            return
+            _old_html = """
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8">
@@ -1422,8 +1822,11 @@ button{font-size:12px;padding:6px 14px;border-radius:6px;border:none;cursor:poin
 .item.muted{color:#94a3b8}
 .assist-fill-btn{background:#2563eb;color:#fff;margin-left:8px;font-size:10px;padding:2px 8px}
 .assist-fill-btn:disabled{background:#94a3b8;cursor:not-allowed}
-.fill-status{font-size:10px;color:#64748b;margin-left:4px}
-.muted-note{font-size:10px;color:#94a3b8;margin-left:8px}
+.muted{{color:#94a3b8;font-size:11px}}
+.muted-note{{font-size:10px;color:#94a3b8;margin-left:8px}}
+.item.assist-completed{{opacity:0.55;background:#f1f5f9}}
+.completed-bar{{display:flex;align-items:center;gap:8px;padding:4px 0;font-size:11px}}
+.completed-bar button:disabled{{opacity:0.4;cursor:not-allowed}}
 .status{font-size:11px;color:#64748b;margin-top:4px}
 .footer{font-size:10px;color:#94a3b8;text-align:center;margin-top:12px}
 </style>
@@ -1435,6 +1838,10 @@ button{font-size:12px;padding:6px 14px;border-radius:6px;border:none;cursor:poin
 <div class="status" id="status-msg"></div>
 <div class="section">
  <h2>可輔助填入 <span class="badge badge-valid" id="valid-count">0</span></h2>
+ <div class="completed-bar">
+   <span style="font-size:10px;color:#64748b">已輔助填入：<strong id="completed-count">0</strong> 筆</span>
+   <button id="clear-completed-btn" style="font-size:10px;padding:2px 8px;border:1px solid #e2e8f0;border-radius:4px;background:#fff;cursor:pointer" disabled onclick="clearCompleted()">清除已反灰</button>
+ </div>
  <div id="valid-items"></div>
 </div>
 <div class="section">
@@ -1654,6 +2061,19 @@ function emptyRow() {
   return d;
 }
 
+function updateCompletedCount() {
+  var cnt = document.querySelectorAll("#valid-items .item.assist-completed").length;
+  document.getElementById("completed-count").textContent = cnt;
+  var btn = document.getElementById("clear-completed-btn");
+  btn.disabled = (cnt === 0);
+}
+function clearCompleted() {
+  document.querySelectorAll("#valid-items .item.assist-completed").forEach(function (el) {
+    el.parentNode.removeChild(el);
+  });
+  updateCompletedCount();
+}
+
 function assistPanelFillBtn(btn) {
   var queuePath = btn.getAttribute("data-queue-path") || panelState.queuePath;
   var itemIndex = parseInt(btn.getAttribute("data-item-index"), 10);
@@ -1689,27 +2109,67 @@ function assistPanelFill(queuePath, itemIndex, betType, manualId, btn, statusEl)
       show("❌ 回應不是有效 JSON");
       return;
     }
-    if (data.ok) {
-      show("✅ 已輔助填入，請在真站人工確認後再送出");
-      if (btn) { btn.textContent = "已填入"; }
-      // Remove the item from the valid list after 2s
+    // Defensive: normal bets require full amount verification; column keeps existing contract
+    var betType = (btn ? btn.getAttribute("data-bet-type") : "") || "normal";
+    var isColumn = (betType === "column" || betType === "zhu_peng");
+    var reallyOk;
+    if (isColumn) {
+      // Column/zhu_peng: keep existing success contract (no amounts_verified required)
+      reallyOk = data.ok === true;
+    } else {
+      // Normal: require ok + amounts_verified + no missing targets/stars
+      reallyOk = data.ok === true
+        && data.amounts_verified !== false
+        && (!data.missing_targets || data.missing_targets.length === 0)
+        && (!data.missing_amount_stars || data.missing_amount_stars.length === 0)
+        && (!data.amount_mismatches || data.amount_mismatches.length === 0);
+    }
+    if (reallyOk) {
+      show("已輔助填入，請確認真站");
+      // Gray-out: add assist-completed class, show re-fill + remove buttons
       var row = btn.closest(".item");
       if (row) {
-        setTimeout(function () {
-          row.style.transition = "opacity 0.3s";
-          row.style.opacity = "0";
-          setTimeout(function () {
-            row.parentNode.removeChild(row);
-            // Update count
-            var vc = document.getElementById("valid-items");
-            var remaining = vc.querySelectorAll(".item:not([style*='opacity: 0'])").length;
-            document.getElementById("valid-count").textContent = remaining;
-          }, 300);
-        }, 2000);
+        row.classList.add("assist-completed");
+        // Replace fill button area with status + actions
+        var td = btn.parentElement;
+        btn.textContent = "✓ 已填";
+        btn.style.background = "#059669";
+        btn.onclick = function () { td.removeChild(btn); assistPanelFillBtn(setupNewFillBtn(row)); };
+        // Add re-fill button
+        var reBtn = document.createElement("button");
+        reBtn.className = "assist-fill-btn";
+        reBtn.textContent = "重填";
+        reBtn.style.cssText = "font-size:10px;padding:2px 6px;margin-left:4px;background:#f59e0b";
+        reBtn.onclick = function () {
+          row.classList.remove("assist-completed");
+          updateCompletedCount();
+          assistPanelFillBtn(btn);
+        };
+        td.appendChild(reBtn);
+        // Add remove button
+        var rmBtn = document.createElement("button");
+        rmBtn.textContent = "移除";
+        rmBtn.style.cssText = "font-size:10px;padding:2px 6px;margin-left:4px;background:#ef4444;color:#fff;border:none;border-radius:3px;cursor:pointer";
+        rmBtn.onclick = function () {
+          row.parentNode.removeChild(row);
+          updateCompletedCount();
+        };
+        td.appendChild(rmBtn);
+        updateCompletedCount();
       }
     } else {
       if (btn) { btn.disabled = false; }
       var err = data.error || "未知錯誤";
+      var extra = [];
+      if (data.missing_targets && data.missing_targets.length > 0)
+        extra.push("缺號: " + data.missing_targets.join(", "));
+      if (data.missing_amount_stars && data.missing_amount_stars.length > 0)
+        extra.push("缺星別: " + data.missing_amount_stars.join(", "));
+      if (data.amount_mismatches && data.amount_mismatches.length > 0)
+        extra.push("金額不符: " + data.amount_mismatches.map(function (m) { return m.star + "星預期" + m.expected + "/實際" + m.actual; }).join(", "));
+      if (data.amounts_verified === false) extra.push("金額驗證失敗");
+      if (extra.length > 0) err = err + " (" + extra.join("; ") + ")";
+      if (!data.ok) err = "❌ " + err;
       if (data.missing_targets && data.missing_targets.length) {
         err += " 缺號:" + data.missing_targets.join(",");
       }
@@ -1806,6 +2266,39 @@ window.assistPanelFill = assistPanelFill;
 </html>"""
             self._send_html(html)
 
+        # ── License handlers ──
+
+        def _handle_license_page(self) -> None:
+            self._send_html(_render_license_page())
+
+        def _handle_license_activate(self) -> None:
+            import json as _json
+            from betguard.license import activate_license
+            content_len = int(self.headers.get("Content-Length", 0) or 0)
+            raw = self.rfile.read(content_len) if content_len > 0 else b""
+            try:
+                body = _json.loads(raw)
+                code = (body.get("activation_code") or "").strip()
+            except Exception:
+                self._send_json({"ok": False, "error": "請求格式錯誤"})
+                return
+            if not code:
+                self._send_json({"ok": False, "error": "請輸入啟用碼"})
+                return
+            result = activate_license(code)
+            self._send_json(result)
+
+        def _handle_license_status(self) -> None:
+            from betguard.license import license_status, get_request_code
+            status = license_status()
+            self._send_json({
+                "ok": True,
+                "status": status["status"],
+                "device_code": status.get("device_id", ""),
+                "expires_at": status.get("expires_at", ""),
+                "plan": status.get("plan", ""),
+            })
+
         def _handle_assist_panel_create_batch(self) -> None:
             """Create a queue batch from pasted text and return JSON summary."""
             import json as _json_module
@@ -1820,7 +2313,7 @@ window.assistPanelFill = assistPanelFill;
 
             try:
                 from betguard.webfill.batch_mock_queue import build_batch_mock_queue
-                queue = build_batch_mock_queue(text.split("\n") if "\n" in text else text)
+                queue = build_batch_mock_queue(text.split("\n") if "\n" in text else text, game="六合")
             except Exception as exc:
                 self._send_json({"ok": False, "error": f"batch create error: {exc}"})
                 return
@@ -1923,9 +2416,19 @@ window.assistPanelFill = assistPanelFill;
                 self._send_json({"ok": False, "error": f"item #{item_index} not found in queue"})
                 return
             # Only allow marking if item is in valid/assistable state
+            # In mixed batches, valid items may have BLOCKED batch-level status.
+            # Check valid_candidates first — if the item appears there, it IS valid.
+            valid_candidates = queue.get("preprocessing", {}).get("valid_candidates", [])
+            is_valid = any(
+                vc.get("index") == item_index or vc.get("item_index") == item_index
+                for vc in valid_candidates
+            )
             status = matched.get("status", "")
-            if status in ("INVALID", "NEEDS_REVIEW", "WATCHLIST", "BLOCKED"):
+            if status in ("INVALID", "NEEDS_REVIEW", "WATCHLIST"):
                 self._send_json({"ok": False, "error": f"item #{item_index} is not assistable (status={status})"})
+                return
+            if status == "BLOCKED" and not is_valid:
+                self._send_json({"ok": False, "error": f"item #{item_index} is blocked and not a valid candidate"})
                 return
             matched["status"] = "MANUAL_DONE"
             matched["handled_by"] = "webui_manual_done_button"
@@ -1970,7 +2473,7 @@ window.assistPanelFill = assistPanelFill;
             if data is None:
                 return
             text = (data.get("text") or "").strip()
-            game = (data.get("game") or "auto").strip()
+            game = (data.get("game") or "六合").strip()
             if not text:
                 self._send_json({"ok": False, "error": "empty text"})
                 return
@@ -2001,6 +2504,96 @@ window.assistPanelFill = assistPanelFill;
                 result["manual_reparse"] = True
 
             self._send_json(result)
+
+        def _handle_window_pin(self) -> None:
+            """Toggle always-on-top for the assist panel window."""
+            # Security: localhost only
+            host = self.client_address[0] if self.client_address else ""
+            if host not in ("127.0.0.1", "::1", "localhost"):
+                self._send_json({"ok": False, "error": "forbidden"})
+                return
+            data = self._read_json_body()
+            if data is None:
+                return
+            enable = bool(data.get("enable", True))
+            from betguard.webui.window_pin import set_always_on_top
+            result = set_always_on_top(enable)
+            self._send_json(result)
+
+        # ----------------------------------------------------------------
+        # Vision API v1 handlers
+        # ----------------------------------------------------------------
+
+        def _handle_vision_providers(self) -> None:
+            from betguard.vision.service import list_providers
+            result = list_providers()
+            self._send_json(result)
+
+        def _handle_vision_upload(self) -> None:
+            length_str = self.headers.get("Content-Length", "")
+            if not length_str:
+                self._send_json({"ok": False, "error": {"code": "IMAGE_EMPTY", "message": "無圖片內容"}})
+                return
+            try:
+                length = int(length_str)
+            except ValueError:
+                self._send_json({"ok": False, "error": {"code": "IMAGE_EMPTY", "message": "Content-Length 格式錯誤"}})
+                return
+            if length < 0:
+                self._send_json({"ok": False, "error": {"code": "IMAGE_EMPTY", "message": "Content-Length 不可為負數"}})
+                return
+            if length > 10 * 1024 * 1024 + 1024:
+                self._send_json({"ok": False, "error": {"code": "IMAGE_TOO_LARGE", "message": "圖片過大（上限 10 MiB）"}})
+                return
+            if length <= 0:
+                self._send_json({"ok": False, "error": {"code": "IMAGE_EMPTY", "message": "圖片為空"}})
+                return
+
+            content_type = self.headers.get("Content-Type", "")
+            filename_raw = self.headers.get("X-Filename", "")
+            from urllib.parse import unquote
+            filename = unquote(filename_raw) if filename_raw else ""
+
+            data = self.rfile.read(length)
+            from betguard.vision.service import upload_image
+            result = upload_image(data, content_type, filename)
+            self._send_json(result, status=200 if result["ok"] else 400)
+
+        def _handle_vision_preview(self, image_id: str) -> None:
+            from betguard.vision.service import get_image_preview
+            img_data, mime_type, error = get_image_preview(image_id)
+            if error:
+                self._send_json(error, status=404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", mime_type or "application/octet-stream")
+            self.send_header("Content-Length", str(len(img_data)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            try:
+                self.wfile.write(img_data)  # type: ignore[arg-type]
+            except (ConnectionAbortedError, BrokenPipeError, OSError):
+                pass
+
+        def _handle_vision_delete(self, image_id: str) -> None:
+            from betguard.vision.service import delete_image_api
+            result = delete_image_api(image_id)
+            self._send_json(result, status=200 if result["ok"] else 404)
+
+        def _handle_vision_job(self) -> None:
+            data = self._read_json_body()
+            if data is None:
+                self._send_json({"ok": False, "error": {"code": "INVALID_JSON", "message": "JSON 格式無效"}})
+                return
+            image_id = data.get("image_id", "")
+            provider_id = data.get("provider_id", "fake")
+            fixture = data.get("fixture", "bet_slip")
+            from betguard.vision.service import run_job
+            result = run_job(image_id, provider_id, fixture)
+            self._send_json(result, status=200 if result["ok"] else 400)
+
+        # ----------------------------------------------------------------
 
     return WorkbenchHandler
 
@@ -2241,7 +2834,18 @@ def main(argv: list[str] | None = None) -> int:
     commit = _git_short_head()
     handler = build_workbench_handler(project_version=version, git_commit=commit)
 
-    server = ThreadingHTTPServer((args.host, args.port), handler)
+    try:
+        server = DedicatedHTTPServer((args.host, args.port), handler)
+    except OSError as exc:
+        if exc.winerror == 10048 or "address already in use" in str(exc).lower():
+            print(
+                "無法啟動：" + args.host + ":" + str(args.port) + " 已被占用。\n"
+                "請關閉舊的 Betguard 伺服器後重試。",
+                file=sys.stderr,
+            )
+        else:
+            print(f"無法啟動：{exc}", file=sys.stderr)
+        return 1
     print(
         f"Betguard workbench listening on http://{args.host}:{args.port}/  "
         f"(version={version}, commit={commit})",

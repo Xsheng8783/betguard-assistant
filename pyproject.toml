@@ -30,3 +30,6 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "e2e_local: End-to-end tests using Playwright (local only, no 真站)",
+]

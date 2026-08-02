@@ -376,7 +376,20 @@ class _AssistWorker(threading.Thread):
 
             # Verify selection — BLOCKED only if targets are actually missing
             selected = _count_selected_numbers(self._page, padded)
-            amounts_ok = any(a.get("executed") for a in self.filled_amounts)
+            # Strict amount verification via pure function (no Playwright needed)
+            from betguard.webfill.web_assisted_fill_executor import _verify_filled_amounts
+            expected_amounts: dict[int, int] = {}
+            for star_str, amt in self.amounts.items():
+                star_i = int(star_str)
+                amt_i = int(amt)
+                if amt_i > 0:
+                    expected_amounts[star_i] = amt_i
+            vf = _verify_filled_amounts(expected_amounts, self.filled_amounts)
+            amounts_verified = vf["amounts_verified"]
+            missing_amount_stars = vf["missing_amount_stars"]
+            amount_mismatches = vf["amount_mismatches"]
+            amounts_ok = amounts_verified
+
             # Use actual target presence, not raw count (site may double-count)
             selected_set = _get_selected_numbers(self._page)
             missing: list[str] = []
@@ -405,6 +418,10 @@ class _AssistWorker(threading.Thread):
                 "stars": self.stars,
                 "amounts": self.amounts,
                 "filled_amounts": self.filled_amounts,
+                "amounts_expected": expected_amounts,
+                "amounts_verified": amounts_verified,
+                "missing_amount_stars": missing_amount_stars,
+                "amount_mismatches": amount_mismatches,
                 "numbers_selected": selected,
                 "numbers_expected": len(padded),
                 "filled_targets": [n for n in padded if n not in missing],

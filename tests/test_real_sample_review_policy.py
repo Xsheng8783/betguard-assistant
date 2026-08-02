@@ -28,7 +28,7 @@ SUSPECT_MARK = "\u5acc"
 REVIEW_POLICY_CASES = [
     f"港23半{CAR}",
     "大24",
-    "02-03-05-16-20-0.1",
+    # "02-03-05-16-20-0.1" -- now VALID via trailing decimal unit normalizer,
     "港06-13-23-22/50",
     "11.37.1000",
     "15.29.1000",
@@ -40,7 +40,7 @@ REVIEW_POLICY_CASES = [
     ARM,
     "各10",
     "寫",
-    "改",
+    # "改" -- now VALID via confirm-correction stripping,
 ]
 
 

@@ -1,34 +1,36 @@
 @echo off
-setlocal enabledelayedexpansion
-
-REM Portable: use BAT location as project root
+setlocal
 cd /d "%~dp0"
 set "PYTHONPATH=%~dp0src"
 
-for /f "tokens=*" %%i in ('git describe --tags --always 2^>nul') do set "GIT_TAG=%%i"
-if "%GIT_TAG%"=="" set "GIT_TAG=(unknown)"
+set "GIT_TAG=(unknown)"
+for /f "delims=" %%i in ('git describe --tags --always 2^>nul') do set "GIT_TAG=%%i"
 
 echo ========================================
 echo   Betguard Assistant
-echo   Local Review ^& Assist Mode
+echo   Local Review and Assist Mode
 echo   %GIT_TAG%
 echo ========================================
 echo.
 
-REM Check if server is already running on port 8765
-netstat -ano 2>nul | findstr ":8765" | findstr "LISTENING" >nul
-if %errorlevel% equ 0 (
-    echo [OK] Server already running on port 8765
-    start http://127.0.0.1:8765
-    goto :done
-)
+set "OCCUPIED_PID="
+for /f "tokens=5" %%p in ('netstat -ano 2^>nul ^| findstr ":8765" ^| findstr "LISTENING"') do set "OCCUPIED_PID=%%p"
 
-echo [..] Starting server on port 8765 ...
-start "Betguard Server" cmd /c "cd /d %CD% && python -m betguard.webui.app"
+if defined OCCUPIED_PID goto port_in_use
+
+echo [START] Starting server on port 8765...
+start "Betguard Server" cmd /k "python -m betguard.webui.app"
 timeout /t 2 /nobreak >nul
-start http://127.0.0.1:8765
+start "" "http://127.0.0.1:8765/"
+echo [OK] Browser opened.
+exit /b 0
 
-echo [OK] Browser opened. Close server window when done.
-
-:done
-endlocal
+:port_in_use
+echo ========================================
+echo Port 8765 is already in use.
+echo Existing PID: %OCCUPIED_PID%
+echo Startup cancelled to avoid another version.
+echo Close the old Betguard or Python server.
+echo ========================================
+pause
+exit /b 1

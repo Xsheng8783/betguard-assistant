@@ -13,6 +13,57 @@ UNIT_WORD = "\u652f"
 FULL_OPEN_PAREN = "\uff08"
 FULL_CLOSE_PAREN = "\uff09"
 MULTIPLY_SIGN = "\u00d7"
+FULL_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
+FULL_COMMA = "\uff0c"
+FULL_PERIOD = "\uff0e"
+# Bracket pairs to normalize
+_BRACKET_PAIRS = [
+    ("\u3010", "["), ("\u3011", "]"),  # 【 】
+    ("\uff3b", "["), ("\uff3d", "]"),  # ［ ］
+]
+# Known prefix labels that can be safely stripped
+_STRIP_PREFIXES_RE = re.compile(
+    r"^(?:今彩\s*539[：:]\s*|539[：:]\s*|號碼[：:]\s*|主支[：:]\s*|牌[：:]\s*"
+    r"|本期[：:]\s*|下注[：:]\s*|參考[：:]\s*|今彩\s*)?"
+)
+# Game hint prefixes
+_GAME_HINT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    # 天天樂 family
+    (re.compile(r"^天天樂[：:。．]?\s*"), "tiantianle"),
+    (re.compile(r"^天天[：:。．]\s*"), "tiantianle"),
+    (re.compile(r"^天[：:。．]\s*(?=[0-9０-９])"), "tiantianle"),
+    # 六合彩 family
+    (re.compile(r"^六合彩[：:。．]?\s*"), "liuhecai"),
+    (re.compile(r"^六合[：:。．]\s*"), "liuhecai"),
+    (re.compile(r"^六和彩[：:。．]?\s*"), "liuhecai"),
+    (re.compile(r"^六和[：:。．]\s*"), "liuhecai"),
+    (re.compile(r"^香港[：:。．]\s*"), "liuhecai"),
+    (re.compile(r"^港[：:。．]\s*(?=[0-9０-９])"), "liuhecai"),
+    (re.compile(r"^HK[：:。．]\s*", re.IGNORECASE), "liuhecai"),
+    (re.compile(r"^KH[：:。．]\s*", re.IGNORECASE), "liuhecai"),
+    # 大樂透
+    (re.compile(r"^大樂透[：:。．]?\s*"), "daletou"),
+]
+
+_GAME_HINT_LABELS: dict[str, str] = {
+    "tiantianle": "天天樂",
+    "liuhecai": "六合彩",
+    "daletou": "大樂透",
+}
+
+
+def extract_game_hint(text: str) -> tuple[str, str]:
+    """Extract game hint from text prefix."""
+    for pattern, hint in _GAME_HINT_PATTERNS:
+        m = pattern.match(text)
+        if m:
+            return hint, text[m.end():]
+    return "", text
+
+
+def game_hint_label(hint: str) -> str:
+    """Return human-readable label for a game hint key."""
+    return _GAME_HINT_LABELS.get(hint, "")
 
 
 @dataclass(frozen=True)
@@ -29,12 +80,37 @@ def normalize_input(text: str) -> str:
 
 def normalize_for_parser(text: str) -> NormalizationResult:
     original = text
-    value = text.strip()
+    game_hint, remainder = extract_game_hint(text)
+    value = remainder.strip() if game_hint else text.strip()
     notes: list[str] = []
+    if game_hint:
+        notes.append(f"extracted game hint: {game_hint_label(game_hint)}")
 
     updated = value.replace(FULL_OPEN_PAREN, "(").replace(FULL_CLOSE_PAREN, ")")
     if updated != value:
         notes.append("normalized full-width parentheses")
+    value = updated
+
+    # Fullwidth digits
+    updated = value.translate(FULL_DIGITS)
+    if updated != value:
+        notes.append("normalized full-width digits")
+    value = updated
+
+    # Fullwidth comma and period
+    updated = value.replace(FULL_COMMA, ",").replace(FULL_PERIOD, ".")
+    if updated != value:
+        notes.append("normalized full-width punctuation")
+    value = updated
+
+    # Bracket normalization
+    for fw, hw in _BRACKET_PAIRS:
+        value = value.replace(fw, hw)
+
+    # Strip known prefixes
+    updated = _STRIP_PREFIXES_RE.sub("", value).strip()
+    if updated != value:
+        notes.append("stripped known prefix label")
     value = updated
 
     updated = _unwrap_star_parentheses(value)
@@ -47,6 +123,12 @@ def normalize_for_parser(text: str) -> NormalizationResult:
         notes.append("normalized star synonyms")
     value = updated
 
+    # Normalize dotted star patterns: 二.三.四星 → 二三四星
+    updated = _normalize_dotted_stars(value)
+    if updated != value:
+        notes.append("normalized dotted star patterns")
+    value = updated
+
     updated = _normalize_star_multiplier(value)
     if updated != value:
         notes.append("normalized star multiplier")
@@ -57,10 +139,10 @@ def normalize_for_parser(text: str) -> NormalizationResult:
         notes.append("normalized whitespace")
     value = updated
 
-    # Strip only trailing Chinese punctuation (，。、) so an otherwise-parseable
+    # Strip only trailing Chinese/ASCII punctuation so an otherwise-parseable
     # line is not blocked by a stray full-stop/comma. Deliberately end-anchored
     # and limited to these marks so it never changes inner delimiters or amounts.
-    updated = re.sub(r"[、。，]+$", "", value).strip()
+    updated = re.sub(r"[、。，,]+$", "", value).strip()
     if updated != value:
         notes.append("stripped trailing punctuation")
     value = updated
@@ -156,4 +238,19 @@ def _dedupe(values: list[str]) -> list[str]:
         if value not in seen:
             result.append(value)
             seen.add(value)
+    return result
+
+
+def _normalize_dotted_stars(text: str) -> str:
+    """Normalize dot-separated star patterns: 二.三.四星50元 → 二三四星50元."""
+    result = text
+    # Chinese dotted stars with 星 word
+    result = re.sub(r"二[。．.]三[。．.]四\s*星", "二三四星", result)
+    result = re.sub(r"二[。．.]三\s*星", "二三星", result)
+    result = re.sub(r"三[。．.]四\s*星", "三四星", result)
+    result = re.sub(r"兩[。．.]三\s*星", "兩三星", result)
+    # Numeric dotted stars with 星 word
+    result = re.sub(r"(?<!\d)2[。．.]3[。．.]4\s*星", "234星", result)
+    result = re.sub(r"(?<!\d)2[。．.]3\s*星", "23星", result)
+    result = re.sub(r"(?<!\d)3[。．.]4\s*星", "34星", result)
     return result

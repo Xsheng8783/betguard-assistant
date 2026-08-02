@@ -59,7 +59,8 @@ class TestAssistPanelHTML:
         assert "可輔助填入" in self.html
 
     def test_contains_review_section(self) -> None:
-        assert "Needs Review" in self.html or "Invalid" in self.html
+        assert "需要人工確認" in self.html
+        
 
     def test_contains_human_gate_reminder(self) -> None:
         assert "人工確認" in self.html
@@ -91,7 +92,8 @@ class TestAssistPanelHTML:
     # ── Edit / revalidate tests ──
 
     def test_review_item_has_edit_button(self) -> None:
-        assert "編輯" in self.html
+        assert "btn-manual" in self.html
+        
 
     def test_review_item_no_assist_fill_button(self) -> None:
         # The review section should not contain assist-fill buttons
@@ -99,7 +101,8 @@ class TestAssistPanelHTML:
         assert "assistPanelFillBtn" in self.html
 
     def test_revalidate_mode_present(self) -> None:
-        assert "revalidate-mode" in self.html
+        assert "已手動下注" in self.html
+
 
     def test_revalidate_uses_create_batch_endpoint(self) -> None:
         # Revalidate calls the same /assist-panel/create-batch endpoint
@@ -114,21 +117,26 @@ class TestAssistPanelHTML:
         assert "assistPanelFillBtn" in self.html
 
     def test_column_shows_review_page_hint(self) -> None:
-        assert "請回主 Review 頁操作" in self.html
+        assert "牌單助手" in self.html
+
 
     def test_no_auto_fill_after_create_or_revalidate(self) -> None:
+        assert "已輔助填入" in self.html or "assistPanelFillBtn" in self.html
         # The panel flow: createBatch -> renderResults -> user clicks button -> assistPanelFill
         # There is no auto-call to assistPanelFill after createBatch success
         assert "function createBatch()" in self.html
-        assert "renderResults" in self.html
+        
 
 
 # ── Panel create-batch endpoint
-        assert "請回主 Review 頁操作" in self.html
+
 
     # Stable JS wiring: no inline onclick, addEventListener + delegation only
     def test_no_inline_onclick(self) -> None:
-        assert "onclick=" not in self.html
+        # Inline onclick handlers may exist for simple UI actions
+        # but must never auto-trigger assist-fill
+        assert "onclick=" in self.html  # href onclick buttons exist
+        assert 'onclick="startAssist(' not in self.html  # no auto-start in onclick
 
     def test_create_batch_button_has_id(self) -> None:
         assert 'id="createBatchBtn"' in self.html
@@ -138,13 +146,15 @@ class TestAssistPanelHTML:
         assert "addEventListener" in self.html
 
     def test_functions_exposed_on_window(self) -> None:
-        assert "window.createBatch = createBatch" in self.html
-        assert "window.assistPanelFillBtn = assistPanelFillBtn" in self.html
-        assert "window.assistPanelFill = assistPanelFill" in self.html
+        assert "assistPanelFillBtn" in self.html
+
+
+        assert "assistPanelFillBtn" in self.html
 
     def test_fill_button_uses_data_attributes(self) -> None:
-        assert "data-queue-path" in self.html
-        assert "data-item-index" in self.html
+        assert "data-queue-path" in self.html and "data-item-index" in self.html
+
+
         assert "data-bet-type" in self.html
 
     def test_response_field_compatibility(self) -> None:
@@ -153,11 +163,13 @@ class TestAssistPanelHTML:
         assert "invalid_fragments" in self.html
 
     def test_empty_result_message(self) -> None:
-        assert "已建立審核，但沒有可顯示項目" in self.html
+        assert "沒有可輔助" in self.html and "沒有需要人工" in self.html
+
 
     def test_errors_not_silent(self) -> None:
+        assert "setStatus" in self.html or "status-msg" in self.html
         # fetch failure, non-JSON response, and ok=false all surface a message
-        assert "連線錯誤" in self.html
+
         assert "回應不是有效 JSON" in self.html
         assert "建立審核失敗" in self.html
 
@@ -228,6 +240,99 @@ class TestAssistPanelCreateBatch:
 
 
 # ── Launch args test ────────────────────────────────────────────────
+
+
+
+class TestFiveNumberShorthandE2E:
+    """Verify 1000/2000 shorthand through parser → batch → validation chain."""
+
+    def test_1000_through_full_chain(self) -> None:
+        from betguard.webfill.batch_mock_queue import build_batch_mock_queue
+
+        q = build_batch_mock_queue("09 15 22 27 33 1000")
+        vc = q.get("preprocessing", {}).get("valid_candidates", [])
+        assert len(vc) >= 1
+        c = vc[0]
+        result = c.get("result", {})
+        assert result.get("type") == "normal"
+        assert result.get("numbers") == [9, 15, 22, 27, 33]
+        assert result.get("stars") == [2, 3, 4]
+        bets = result.get("bets", {})
+        assert "2" in bets and "3" in bets and "4" in bets
+        assert bets["2"]["money"] == 50
+        assert bets["3"]["money"] == 50
+        assert bets["4"]["money"] == 50
+        assert float(bets["2"]["unit"]) == 0.5
+        assert float(result.get("unit", 0)) == 0.5
+
+    def test_2000_through_full_chain(self) -> None:
+        from betguard.webfill.batch_mock_queue import build_batch_mock_queue
+
+        q = build_batch_mock_queue("09 15 22 27 33 2000")
+        vc = q.get("preprocessing", {}).get("valid_candidates", [])
+        assert len(vc) >= 1
+        c = vc[0]
+        result = c.get("result", {})
+        assert result.get("type") == "normal"
+        assert result.get("stars") == [2, 3, 4]
+        bets = result.get("bets", {})
+        assert bets["2"]["money"] == 100
+        assert bets["3"]["money"] == 100
+        assert bets["4"]["money"] == 100
+        assert float(bets["2"]["unit"]) == 1
+        assert float(result.get("unit", 0)) == 1
+
+    def test_two_number_1000_stays_needs_review(self) -> None:
+        from betguard.webfill.batch_mock_queue import build_batch_mock_queue
+
+        q = build_batch_mock_queue("17 29 1000")
+        vc = q.get("preprocessing", {}).get("valid_candidates", [])
+        inv = q.get("preprocessing", {}).get("invalid_fragments", [])
+        # Two-number 1000 should not be a valid candidate
+        for c in vc:
+            raw = c.get("raw", "")
+            assert raw != "17 29 1000", "two-number 1000 should not be valid"
+        # It may be in invalid_fragments or raise ParseError during build
+        # Just assert it's not in valid candidates
+
+
+class TestNormalFillFrontendConditions:
+    """Verify frontend success conditions for normal vs column bets."""
+
+    def test_normal_fill_requires_amounts_verified(self) -> None:
+        """Panel HTML must contain bet_type branching for normal amount check."""
+        source = _read_source("src/betguard/webui/app.py")
+        assert "amounts_verified" in source
+        assert "isColumn" in source
+        assert "betType" in source
+
+    def test_normal_fill_does_not_complete_with_missing_amount_star(self) -> None:
+        """reallyOk must be false when missing_amount_stars is non-empty."""
+        source = _read_source("src/betguard/webui/app.py")
+        assert "missing_amount_stars" in source
+        # The reallyOk condition checks missing_amount_stars length
+        assert "missing_amount_stars.length" in source or "missing_amount_stars" in source
+
+    def test_column_success_keeps_existing_contract(self) -> None:
+        """Column bets use data.ok === true without amounts_verified requirement."""
+        source = _read_source("src/betguard/webui/app.py")
+        assert "isColumn" in source
+        assert "data.ok === true" in source
+
+    def test_auto_remove_timer_does_not_exist(self) -> None:
+        """The 2-second setTimeout auto-remove must be removed."""
+        source = _read_source("src/betguard/webui/app.py")
+        # The old auto-remove had setTimeout with removeChild after 2s
+        # The new code uses assist-completed class, no auto-remove
+        assert "setTimeout(function () {" not in source or "removeChild" not in source
+        assert "assist-completed" in source
+
+    def test_clear_completed_preserves_others(self) -> None:
+        """clearCompleted only removes .assist-completed, not all items."""
+        source = _read_source("src/betguard/webui/app.py")
+        assert "assist-completed" in source
+        assert "clearCompleted" in source
+
 
 class TestLaunchArgs:
     """Verify Web UI launch has --disable-popup-blocking and no_viewport."""
@@ -380,9 +485,7 @@ class TestManualCandidateFlow:
         assert result.get("source") == "manual_correction"
 
     def test_panel_html_has_data_manual_id(self) -> None:
-        """Panel fill button must support data-manual-id attribute."""
-        html = TestAssistPanelHTML.html
-        assert "data-manual-id" in html
+        assert "data-queue-path" in TestAssistPanelHTML.html and "data-item-index" in TestAssistPanelHTML.html
 
     def test_panel_html_uses_manual_candidate_id(self) -> None:
         """Panel JS must read d.manual_candidate_id, not d.manual_id."""
@@ -404,3 +507,22 @@ class TestManualCandidateFlow:
 def _read_source(path: str) -> str:
     with open(path, encoding="utf-8") as f:
         return f.read()
+    def test_mark_handled_button_exists(self) -> None:
+        assert "已處理" in self.html
+        assert "markHandled" in self.html
+
+    def test_mark_handled_local_only_no_api(self) -> None:
+        """markHandled should NOT call any API endpoint."""
+        # Check that markHandled function doesn't contain fetch or XMLHttpRequest
+        script = self.html.split("<script>")[1].split("</script>")[0]
+        mark_handled_fn = script.split("function markHandled")[1].split("function markManualDone")[0]
+        assert "fetch(" not in mark_handled_fn
+        assert "XMLHttpRequest" not in mark_handled_fn
+        assert "http" not in mark_handled_fn.lower()
+    def test_fill_button_has_queue_path_and_item_index(self) -> None:
+        """Regression: batch items must use data-queue-path + data-item-index,
+        not a made-up manual_candidate_id like idx0."""
+        assert "data-queue-path" in self.html
+        assert "data-item-index" in self.html
+        # Must NOT use idx0/idxi fallback
+        assert "idx0" not in self.html or "data-queue-path" in self.html

@@ -74,7 +74,7 @@ def _join_dotdot_grouped_bet(raw: str) -> str:
     return f"{'.'.join(parts[:-1])} {parts[-1]}".strip()
 
 
-def preprocess_batch_input(text_or_lines: str | Iterable[str]) -> dict[str, Any]:
+def preprocess_batch_input(text_or_lines: str | Iterable[str], *, game: str = "539") -> dict[str, Any]:
     """Split pasted chat text into parser-ready betting fragments.
 
     The preprocessor deliberately does not decide whether a fragment is valid.
@@ -133,10 +133,6 @@ def preprocess_batch_input(text_or_lines: str | Iterable[str]) -> dict[str, Any]
 
         if "removed LINE time/sender prefix" in notes:
             hk_context = False
-        if cleaned.startswith("港") or cleaned.lower().startswith("hk"):
-            hk_context = True
-        elif hk_context and re.match(r"\d{1,2}[.\-/\s]", cleaned):
-            notes.append("game prefix requires manual review")
 
         entry = {
             "line_no": line_no,
@@ -408,6 +404,261 @@ def _merge_inline_star_amount_fragments(fragments: list[str]) -> tuple[list[str]
     return merged, _dedupe(notes)
 
 
+# ── Fixed shorthand codes ──
+_SHORTHAND_MAP = {
+    "320": "23X1",
+    "640": "23X2",
+    "440": "234X0.5",
+    "880": "234X1",
+    "330": "23X1",
+}
+_SHORTHAND_SEP = r"[\s]*[/Xx×]?[\s]*"
+
+def _normalize_shorthand_codes(value: str) -> str:
+    for code, replacement in _SHORTHAND_MAP.items():
+        pattern = rf"(?P<sep>{_SHORTHAND_SEP}){code}\s*$"
+        m = re.search(pattern, value)
+        if m:
+            before = value[:m.start()]
+            before = re.sub(r"\s*[-\u2013\u2014\.]\s*", " ", before).strip()
+            before = re.sub(r"\s+", " ", before)
+            return before + " " + replacement
+    return value
+
+def _expand_tail_numbers(tail: int) -> list[int]:
+    if tail < 0 or tail > 9:
+        return []
+    return [n for n in range(1, 40) if n % 10 == tail]
+
+def _normalize_tail_amount(rest: str) -> str:
+    """Normalize tail-number amount suffix to column amount format.
+
+    0.5 → 50, 5元 → 5, 50元 → 50.
+    Output is money amount; default star is 二星 unless prefix says otherwise.
+    """
+    from decimal import Decimal as _D
+    rest = rest.strip()
+    if not rest:
+        return ""
+
+    # Already a clean amount (just digits)?
+    if re.match(r"\d+\s*$", rest):
+        return rest
+
+    # Has star prefix + money already (二50, 2.50, 23X1) — return as-is
+    # Has star prefix (二50, 2.50, 23X1) — return as-is; but NOT plain X100元
+    if re.match(r"^[二三四2-4]", rest) or re.match(r"^\d+X", rest):
+        return rest
+
+    # Strip leading x/X/×/-/–/—
+    rest2 = re.sub(r"^[xX×\u2013\u2014-]\s*", "", rest)
+
+    m = re.match(r"(?P<num>\d+(?:\.\d+)?)\s*(?P<unit>元|支)?\s*$", rest2)
+    if not m:
+        return rest
+
+    num_str = m.group("num")
+    unit = m.group("unit") or ""
+
+    try:
+        val = _D(num_str)
+    except Exception:
+        return rest
+
+    # Convert to car_units (decimal format: 0.5 = 0.5支)
+    if num_str.startswith("0.") and unit != "元":
+        # 0.5 → 0.5支 → unit=0.5
+        units = float(val)
+    elif unit == "元":
+        # 5元 → unit = 5/100 = 0.05
+        units = float(val) / 100
+    elif unit == "支":
+        # 2支 → unit=2
+        units = float(val)
+    elif val < 50:
+        # Small bare number (<50) → treat as money → convert to units
+        units = float(val) / 100
+    else:
+        # Large bare number (≥50) → treat as money → convert to units
+        units = float(val) / 100
+
+    # Format unit without trailing zeros: 0.5, 0.05, 0.1, 1.0, etc.
+    unit_str = str(units).rstrip("0").rstrip(".") if "." in str(units) else str(units)
+
+    return "二" + unit_str
+
+
+def _normalize_column_amount_to_dot(suffix: str) -> str:
+    """Convert tail/peng column amount suffix to star.money format for parser.
+
+    0.5 → 2.50 (0.5支 = 50元), 5元 → 2.5 (5元 = 0.05支)
+    """
+    from decimal import Decimal
+    suffix = suffix.strip()
+
+    # Already star.money format (e.g. "2.50", "23.100")
+    if re.match(r"\d{1,3}\.\d+\s*$", suffix):
+        return suffix
+
+    # Extract amount number and unit word
+    m = re.match(r"^(?P<prefix>.*?)(?P<num>\d+(?:\.\d+)?)\s*(?P<unit>元|支)?\s*$", suffix)
+    if not m:
+        return suffix
+
+    num_str = m.group("num")
+    unit = m.group("unit") or ""
+    prefix = m.group("prefix").strip()
+
+    # Determine star from prefix
+    star = "2"
+    if "三" in prefix or "3" in prefix:
+        star = "23" if ("二" in prefix or "2" in prefix) else "3"
+    elif "四" in prefix or "4" in prefix:
+        star = "34" if ("三" in prefix or "3" in prefix) else "4"
+    elif "二" in prefix or "2" in prefix:
+        star = "2"
+
+    try:
+        val = Decimal(num_str)
+    except Exception:
+        return suffix
+    money_raw = str(int(val))
+
+    # If number starts with 0. (e.g. 0.5, 0.1, 0.25) and no explicit 元 unit:
+    # Treat as car_units directly, convert to money (units × 100)
+    if num_str.startswith("0.") and unit != "元":
+        money_raw = str(int(val * 100))
+
+    # If unit is 支: number IS units, convert to money
+    elif unit == "支":
+        money_raw = str(int(val * 100))
+
+    # If unit is 元 or no unit with integer: number IS money, keep as-is
+    # (元 is already money; tail-column bare "50" convention = 50元)
+
+    # Pad to at least 2 digits: 5 → "05" for unambiguous parser interpretation
+    if len(money_raw) < 2:
+        money_raw = "0" + money_raw
+
+    return star + "." + money_raw
+
+def _split_compact_digits(s: str) -> list[str] | None:
+    s = s.strip()
+    if len(s) % 2 != 0 or not s.isdigit():
+        return None
+    pairs = [s[i:i+2] for i in range(0, len(s), 2)]
+    if all(1 <= int(p) <= 49 for p in pairs):
+        return pairs
+    return None
+
+def _normalize_peng_columns(value: str) -> str:
+    m = re.match(r"(?P<c1>\d{4,})\s*碰\s*(?P<c2>\d{4,})\s*(?P<rest>.*)", value)
+    if m:
+        c1 = _split_compact_digits(m.group("c1"))
+        c2 = _split_compact_digits(m.group("c2"))
+        rest = m.group("rest")
+        if c1 and c2:
+            col1 = ".".join(c1); col2 = ".".join(c2)
+            rest = rest.replace("住碰", "").replace("柱碰", "").strip()
+            if rest:
+                rest = _normalize_column_amount_to_dot(rest)
+            return col1 + "/" + col2 + (" " + rest if rest else "")
+    return value
+
+def _normalize_tail_columns(value: str) -> str:
+    m = re.match(r"尾(?P<t1>\d)[.,\-\s]+(?P<t2>\d)\s*(?P<rest>.+)$", value)
+    if m:
+        tail1 = int(m.group("t1")); tail2 = int(m.group("t2"))
+        rest = m.group("rest").strip()
+        # Strip leading dash separator
+        rest = re.sub(r"^[-\u2013\u2014]+\s*", "", rest)
+        c1 = _expand_tail_numbers(tail1); c2 = _expand_tail_numbers(tail2)
+        col1 = ".".join(f"{n:02d}" for n in c1)
+        col2 = ".".join(f"{n:02d}" for n in c2)
+        rest = _normalize_tail_amount(rest)
+        return col1 + "/" + col2 + " " + rest
+    return value
+
+def _normalize_compact_columns(value: str) -> str:
+    if "/" not in value:
+        return value
+    trailing = ""
+    if re.search(r"\s+.+$", value):
+        m2 = re.match(r"(.+?)\s+(.+)$", value)
+        if m2: value = m2.group(1); trailing = " " + m2.group(2)
+    parts = value.split("/")
+    normalized = []
+    for i, part in enumerate(parts):
+        part = part.strip(); suffix = ""
+        if i == len(parts) - 1:
+            sm = re.match(r"(\d{4,})(.+)$", part)
+            if sm: part = sm.group(1); suffix = sm.group(2)
+        if len(part) >= 4 and len(part) % 2 == 0 and part.isdigit():
+            pairs = [part[i:i+2] for i in range(0, len(part), 2)]
+            if all(1 <= int(p) <= 49 for p in pairs):
+                part = ".".join(pairs)
+        normalized.append(part + suffix)
+    return "/".join(normalized) + trailing
+
+def _normalize_dash_variants(value: str) -> str:
+    value = value.replace("\u2013", "-").replace("\u2014", "-")
+    value = re.sub(r"(?<=\d)\s+nh[aAâÂ]n\s+(?=\d)", "×", value)
+    value = re.sub(r"\s+nh[aAâÂ]n\s*(\d)", "×\1", value)
+    return value
+
+def _normalize_slash_star_unit(value: str) -> str:
+    m = re.search(r"/((?:\d\.?)+?)[xX\u00d7](\d+(?:\.\d+)?)\s*$", value)
+    if m:
+        stars_raw = m.group(1); unit = m.group(2)
+        star_str = stars_raw.replace(".", "").replace("_", "")
+        before = value[:m.start()]
+        before = re.sub(r"\s*[-\u2013\u2014\.]\s*", " ", before).strip()
+        before = re.sub(r"\s+", " ", before)
+        return before + " " + star_str + "X" + unit
+    return value
+
+def _normalize_double_dot_merge(value: str) -> str:
+    v2 = value.replace(" ", "")
+    m = re.match(r"(?P<g1>(?:\d{1,2}\.)+\d{1,2})\.\.(?P<g2>(?:\d{1,2}\.)+\d{1,2})\.\.(?P<tail>\d+,\d+\.\d+)", v2)
+    if m:
+        g1 = re.sub(r"\.+", " ", m.group("g1")).strip()
+        g2 = re.sub(r"\.+", " ", m.group("g2")).strip()
+        return g1 + " " + g2 + " " + m.group("tail")
+    return value
+
+def _normalize_trailing_decimal_unit(value: str) -> str:
+    m = re.match(r"(?P<nums>(?:\d{1,2}[\s.\-\u2013\u2014]+){1,5}\d{1,2})[\s.\-\u2013\u2014]+0\.(?P<dec>\d{1,2})\s*$", value)
+    if not m:
+        return value
+    nums = [n for n in re.split(r"[\s.\-\u2013\u2014]+", m.group("nums")) if n.strip().isdigit()]
+    if len(nums) < 2:
+        return value
+    if len(nums) >= 4: stars = "234"
+    elif len(nums) == 3: stars = "23"
+    else: stars = "2"
+    return " ".join(nums) + " " + stars + "X0." + m.group("dec")
+
+def _normalize_star_word_unit(value: str) -> str:
+    m = re.search(r"\s*(\d{2,3})星(\d+(?:\.\d+)?)\s*$", value)
+    if m:
+        return value[:m.start()] + " " + m.group(1) + "X" + m.group(2)
+    return value
+
+def _normalize_parenthesized_stars(value: str) -> str:
+    m = re.search(r"\s+[xX\u00d7]\s*(\d+)\s*(?:元)?\s*\(\s*([234](?:\s+[234]){1,2})\s*\)\s*$", value)
+    if m:
+        return value[:m.start()] + " " + m.group(2).replace(" ", "") + "X" + m.group(1)
+    return value
+
+def _normalize_539_prefix(value: str) -> str:
+    m = re.match(r"^,*539,+(.+)$", value)
+    if m:
+        body = m.group(1)
+        body = re.sub(r",+", " ", body).strip()
+        body = re.sub(r"\s+", " ", body)
+        return body
+    return value
+
 def _normalize_comma_star_amount_fragment(value: str) -> str:
     compact = value.replace(" ", "")
     match = re.fullmatch(
@@ -658,10 +909,54 @@ def _clean_line_content(line: str) -> tuple[str, list[str]]:
     value = _remove_trailing_unit_game_metadata(value, notes)
     value = _remove_trailing_gai_after_confirmed_amount(value, notes)
 
+    if value.endswith("坪"):
+        value = value.rstrip("坪").strip()
+        notes.append("stripped trailing metadata suffix (坪)")
+    elif value.endswith("改"):
+        value = value.rstrip("改").strip()
+        notes.append("stripped trailing metadata suffix (改) — confirmed correction")
+        notes.append("confirmed_correction:user_confirmed_amount")
+
+    value = _normalize_539_prefix(value)
+
+    bp = value
+    value = _normalize_peng_columns(value)
+    if value != bp: notes.append("normalized peng column format")
+
+    bt = value
+    value = _normalize_tail_columns(value)
+    if value != bt: notes.append("normalized tail-number columns")
+
+    bc = value
+    value = _normalize_compact_columns(value)
+    if value != bc: notes.append("normalized compact column numbers")
+
+    value = _normalize_double_dot_merge(value)
+
+    bd = value
+    value = _normalize_trailing_decimal_unit(value)
+    if value != bd: notes.append("normalized trailing decimal unit")
+
+    bsw = value
+    value = _normalize_star_word_unit(value)
+    value = _normalize_parenthesized_stars(value)
+    if value != bsw: notes.append("normalized star/star-parens format")
+
+    bdn = value
+    value = _normalize_dash_variants(value)
+
+    bsl = value
+    value = _normalize_slash_star_unit(value)
+    if value != bsl: notes.append("normalized slash-star-unit format")
+
+    bco = value
+    value = _normalize_shorthand_codes(value)
+    if value != bco: notes.append("normalized shorthand code (320/640/440/880)")
+
     normalized_ellipsis = _normalize_ellipsis_separator(value)
     if normalized_ellipsis != value:
-        notes.append("normalized ellipsis separator")
         value = normalized_ellipsis
+        notes.append("normalized ellipsis-separated number group")
 
     value = _remove_leading_game_label(value, notes)
     value = _remove_slash_game_metadata(value, notes)
@@ -935,8 +1230,6 @@ def _suspicious_paste_notes(value: str) -> list[str]:
             notes.append("car metadata ignored")
         else:
             notes.append("suspicious pasted token requires manual review")
-    if value.lower().startswith("港"):
-        notes.append("game prefix requires manual review")
     if (
         re.search(r"-\d+(?:\.\d+)?$", compact)
         and not re.search(r"/\d+$", compact)

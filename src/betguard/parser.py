@@ -58,7 +58,7 @@ PER_STAR_AMOUNT_PATTERN = re.compile(
     rf"\s*(?P<value>\d+(?:\.\d+)?)(?P<kind>{AMOUNT_KIND_PATTERN})"
 )
 COLUMN_SPLIT_PATTERN = re.compile(rf"\s*(?:/|{TOUCH_WORD}|{MULTIPLY_SIGN}|[xX])\s*")
-TAIL_SHORTHAND_SPLIT_PATTERN = re.compile(rf"[{COMMA_WORD}{FULL_COMMA},\s]+")
+TAIL_SHORTHAND_SPLIT_PATTERN = re.compile(rf"[{COMMA_WORD}{FULL_COMMA},\s\-]+")
 
 
 class ParseError(ValueError):
@@ -114,6 +114,10 @@ def _parse_line_without_diagnostics(value: str, *, game_name: str) -> ParsedBet:
     shorthand = _parse_confirmed_shorthand_line(value, game_name=game_name)
     if shorthand is not None:
         return shorthand
+
+    five_star_shorthand = _parse_five_number_thousand_shorthand(value, game_name=game_name)
+    if five_star_shorthand is not None:
+        return five_star_shorthand
 
     if not _should_parse_column_before_normal(value):
         return _parse_normal_line(value, game_name=game_name)
@@ -655,12 +659,54 @@ def _parse_confirmed_shorthand_line(value: str, *, game_name: str) -> ParsedBet 
     )
 
 
+def _parse_five_number_thousand_shorthand(value: str, *, game_name: str) -> ParsedBet | None:
+    """Detect 5-number + 1000/2000 shorthand: 09 15 22 27 33 1000 → 二三四星, unit=0.5."""
+    m = re.fullmatch(
+        r"\s*(?P<n1>\d{1,2})\s+(?P<n2>\d{1,2})\s+(?P<n3>\d{1,2})\s+(?P<n4>\d{1,2})\s+(?P<n5>\d{1,2})\s+(?P<th>1000|2000)\s*",
+        value,
+    )
+    if not m:
+        return None
+    numbers = [int(m.group(f"n{i}")) for i in range(1, 6)]
+    # All numbers must be valid (1-39), no duplicates
+    if len(set(numbers)) != 5:
+        return None
+    for n in numbers:
+        if n < 1 or n > 39:
+            return None
+    th = m.group("th")
+    # 1000 → 0.5 unit, 50 per star; 2000 → 1 unit, 100 per star
+    if th == "1000":
+        unit_val = 0.5
+        per_star_money = 50
+    else:
+        unit_val = 1
+        per_star_money = 100
+    unit = _number_for_json(Decimal(str(unit_val)))
+    amount = BetAmount(unit=unit, money=_money_from_unit(Decimal(str(unit_val))))
+    stars = [2, 3, 4]
+    bets_per_star = BetAmount(unit=_number_for_json(Decimal(str(unit_val))), money=per_star_money)
+    amounts = {str(s): bets_per_star for s in stars}
+    return ParsedBet(
+        game=game_name,
+        type="normal",
+        numbers=numbers,
+        stars=stars,
+        unit=amount.unit,
+        money=amount.money,
+        bets=amounts,
+        parse_notes=[f"5-number {th} shorthand → 二三四星, unit={unit_val}"],
+    )
+
+
 def _parse_column_line(value: str, *, game_name: str) -> ParsedBet | None:
     working, stars, amount = _peel_attached_column_star_amount_suffix(value)
     if amount is None:
         working, stars, amount = _peel_star_amount_suffix(value)
     if amount is None:
         working, amount = _peel_tail_amount(working)
+    if amount is None:
+        working, stars, amount = _peel_column_tail_star_amount(value)
 
     if not stars:
         working, stars = _peel_star_suffix(working, allow_numeric=amount is not None)
@@ -730,23 +776,28 @@ def _parse_flat_slash_dunhao_column_group(text: str) -> list[int] | None:
 
 def _parse_tail_shorthand(text: str) -> list[list[int]] | None:
     value = text.strip()
-    if not value.startswith(TAIL_WORD):
-        return None
 
-    body = value[len(TAIL_WORD) :].strip()
-    if not body:
-        return None
+    # Format: 尾2-9, 尾2,9, etc.
+    if value.startswith(TAIL_WORD):
+        body = value[len(TAIL_WORD):].strip()
+        if body:
+            parts = [part for part in TAIL_SHORTHAND_SPLIT_PATTERN.split(body) if part]
+            if len(parts) >= 2:
+                columns: list[list[int]] = []
+                for part in parts:
+                    if not re.fullmatch(r"\d", part):
+                        raise ParseError("tail must be between 0 and 9")
+                    columns.append(expand_tail(int(part)))
+                return columns
 
-    parts = [part for part in TAIL_SHORTHAND_SPLIT_PATTERN.split(body) if part]
-    if len(parts) < 2:
-        return None
+    # Format: 2尾碰9尾, 2尾-9尾
+    tail_match = re.fullmatch(
+        rf"(\d){TAIL_WORD}\s*(?:碰|[-,\s])\s*(\d){TAIL_WORD}", value
+    )
+    if tail_match:
+        return [expand_tail(int(tail_match.group(1))), expand_tail(int(tail_match.group(2)))]
 
-    columns: list[list[int]] = []
-    for part in parts:
-        if not re.fullmatch(r"\d", part):
-            raise ParseError("tail must be between 0 and 9")
-        columns.append(expand_tail(int(part)))
-    return columns
+    return None
 
 
 def _parse_column_numbers(text: str) -> list[int]:
@@ -772,7 +823,12 @@ def _parse_column_numbers(text: str) -> list[int]:
             raise ParseError("unsupported or unclear column format")
         token = match.group(0)
         if len(token) > 2:
-            raise ParseError("unsupported or unclear column format")
+            if len(token) % 2 != 0:
+                raise ParseError("unsupported or unclear column format")
+            for k in range(0, len(token), 2):
+                numbers.append(int(token[k:k+2]))
+            index += len(token)
+            continue
         numbers.append(int(token))
         index += len(token)
 
@@ -881,6 +937,9 @@ def _valid_star_amount_suffix(match: re.Match[str]) -> bool:
         return False
     if token.isdigit() and len(star) == 1 and sep == "" and before.isspace() and len(match.group("value")) >= 2:
         return False
+    # Reject suffix where amount is 0 (e.g., "234 40" mis-parsed as star=4 amount=0)
+    if match.group("value") == "0":
+        return False
     if before == "" and token[0].isdigit():
         return False
     return True
@@ -954,8 +1013,26 @@ def _peel_attached_column_star_amount_suffix(text: str) -> tuple[str, list[int],
 def _peel_tail_amount(text: str) -> tuple[str, BetAmount | None]:
     x_match = X_AMOUNT_PATTERN.search(text)
     if x_match:
-        amount = _amount_from_parts(x_match.group("value"), UNIT_WORD, source="x")
-        return text[: x_match.start()].strip(), amount
+        prefix = text[:x_match.start()].strip()
+        # If prefix has 3+ two-digit numbers AND no column separators,
+        # treat X as money separator, not unit
+        num_count = _count_prefix_numbers(prefix)
+        has_column_sep = bool(re.search(r"[/×\u78b0]", prefix))
+        if num_count >= 3 and not has_column_sep:
+            amount = _amount_from_parts(x_match.group("value"), None, source="bare_money")
+        else:
+            amount = _amount_from_parts(x_match.group("value"), UNIT_WORD, source="x")
+        return prefix, amount
+
+    # Also match × as amount separator (multiply sign)
+    mul_match = re.search(rf"×(?P<value>\d+(?:\.\d+)?)\s*$", text)
+    if mul_match:
+        prefix = text[:mul_match.start()].strip()
+        num_count = _count_prefix_numbers(prefix)
+        has_column_sep = bool(re.search(r"[/×\u78b0]", prefix))
+        if num_count >= 3 and not has_column_sep:
+            amount = _amount_from_parts(mul_match.group("value"), None, source="bare_money")
+            return prefix, amount
 
     match = TAIL_OPERATOR_AMOUNT_PATTERN.search(text)
     if match:
@@ -979,6 +1056,21 @@ def _peel_tail_amount(text: str) -> tuple[str, BetAmount | None]:
 
     amount = _amount_from_parts(value, kind, source="bare")
     return text[: bare_match.start()].strip(), amount
+
+
+def _peel_column_tail_star_amount(text: str) -> tuple[str, list[int], BetAmount | None]:
+    """Peel star+amount from column tail, e.g., 2尾碰9尾二50 → (2尾碰9尾, [2], BetAmount(50))."""
+    match = re.fullmatch(
+        rf"(?P<prefix>.+{TAIL_WORD}.+)"
+        rf"(?P<star>二|三|四|兩|[234])"
+        rf"\s*(?P<value>\d+(?:\.\d+)?)(?P<kind>{AMOUNT_KIND_PATTERN})?",
+        text,
+    )
+    if match:
+        stars = _stars_from_token(match.group("star"))
+        amount = _amount_from_parts(match.group("value"), match.group("kind"), source="star")
+        return match.group("prefix").strip(), stars, amount
+    return text, [], None
 
 
 def _looks_like_slash_amount(value: str, kind: str | None) -> bool:
