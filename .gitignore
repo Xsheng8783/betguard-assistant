@@ -31,6 +31,13 @@ overrides/
 .env
 .env.*
 
+training.tsv
+**/training.tsv
+ocr_private/
+vision_private/
+vision_samples_private/
+BetguardOCRSamples/
+
 *.log
 site_profile*.json
 fill_plan*.json

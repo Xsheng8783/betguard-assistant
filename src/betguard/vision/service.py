@@ -19,7 +19,15 @@ from betguard.vision.image_intake import (
     save_metadata,
     validate_and_store,
 )
+from betguard.vision.paid_fallback import run_paid_vision_fallback_job
 from betguard.vision.providers.fake import FakeProvider
+from betguard.vision.providers.openai_paid import (
+    DOCUMENT_MODES,
+    MODEL_ENV,
+    PROVIDER_ID as OPENAI_PAID_PROVIDER_ID,
+    get_config_from_env,
+    has_api_key,
+)
 
 
 # ── Error helpers ────────────────────────────────────────────────────────────
@@ -53,6 +61,17 @@ def list_providers() -> dict[str, Any]:
                 "real_ocr": False,
                 "external_network": False,
                 "fixtures": ["bet_slip", "no_confidence", "multi_line"],
+            },
+            {
+                "id": OPENAI_PAID_PROVIDER_ID,
+                "mode": "paid_api",
+                "real_ocr": True,
+                "external_network": True,
+                "requires_env": ["OPENAI_API_KEY", MODEL_ENV],
+                "configured": has_api_key() and get_config_from_env() is not None,
+                "human_confirmation_required": True,
+                "auto_submit": False,
+                "auto_confirm": False,
             },
         ],
     })
@@ -112,12 +131,33 @@ def delete_image_api(image_id: str) -> dict[str, Any]:
 # ── Job execution ────────────────────────────────────────────────────────────
 
 
-def run_job(image_id: str, provider_id: str, fixture: str = "bet_slip") -> dict[str, Any]:
+def run_job(
+    image_id: str,
+    provider_id: str,
+    fixture: str = "bet_slip",
+    aided_image_id: str = "",
+    document_mode: str = "auto",
+) -> dict[str, Any]:
     """Run a recognition job. Returns RecognitionResult dict on success."""
     # Validate image_id exists and is not expired
     meta = get_metadata(image_id)
     if meta is None:
         return _error("IMAGE_NOT_FOUND", "圖片不存在或已過期")
+
+    if provider_id in {OPENAI_PAID_PROVIDER_ID, "openai-paid", "paid-openai"}:
+        normalized_document_mode = str(document_mode or "auto").strip().lower()
+        if normalized_document_mode not in DOCUMENT_MODES:
+            return _error("INVALID_DOCUMENT_MODE", "unsupported vision document mode")
+        try:
+            aided_meta = get_metadata(aided_image_id) if aided_image_id else None
+        except (OSError, ValueError):
+            aided_meta = None
+        return run_paid_vision_fallback_job(
+            meta,
+            request_id=f"job-{image_id}:openai-paid",
+            paid_image_metadata=aided_meta,
+            document_mode=normalized_document_mode,
+        )
 
     if provider_id != "fake":
         return _error("PROVIDER_NOT_SUPPORTED", f"不支援的 provider: {provider_id}")

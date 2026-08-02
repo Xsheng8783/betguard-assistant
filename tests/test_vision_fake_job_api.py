@@ -43,18 +43,37 @@ def _upload_cleanup(meta) -> None:
 
 
 class TestProviders:
-    def test_only_fake(self):
+    def test_fake_and_paid_provider_listed(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("BETGUARD_VISION_MODEL", raising=False)
         r = list_providers()
         assert r["ok"] is True
         providers = r["providers"]
-        assert len(providers) == 1
-        assert providers[0]["id"] == "fake"
-        assert providers[0]["real_ocr"] is False
-        assert providers[0]["external_network"] is False
+        by_id = {provider["id"]: provider for provider in providers}
+        assert "fake" in by_id
+        assert by_id["fake"]["real_ocr"] is False
+        assert by_id["fake"]["external_network"] is False
+        assert "openai-vision-paid" in by_id
+        assert by_id["openai-vision-paid"]["real_ocr"] is True
+        assert by_id["openai-vision-paid"]["external_network"] is True
+        assert by_id["openai-vision-paid"]["configured"] is False
+        assert by_id["openai-vision-paid"]["human_confirmation_required"] is True
+        assert by_id["openai-vision-paid"]["auto_submit"] is False
 
     def test_has_fixtures(self):
         r = list_providers()
-        assert "bet_slip" in r["providers"][0]["fixtures"]
+        fake = next(provider for provider in r["providers"] if provider["id"] == "fake")
+        assert "bet_slip" in fake["fixtures"]
+
+    def test_paid_provider_reports_configured_without_exposing_key(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "unit-test-token")
+        monkeypatch.setenv("BETGUARD_VISION_MODEL", "test-model")
+
+        r = list_providers()
+        paid = next(provider for provider in r["providers"] if provider["id"] == "openai-vision-paid")
+
+        assert paid["configured"] is True
+        assert "unit-test-token" not in str(r)
 
 
 # ── Upload ───────────────────────────────────────────────────────────────────
@@ -157,9 +176,23 @@ class TestJob:
         png = _make_png()
         meta = validate_and_store(png, "image/png")
         save_metadata(meta)
-        result = run_job(meta.image_id, "openai", "bet_slip")
+        result = run_job(meta.image_id, "unknown-provider", "bet_slip")
         assert result["ok"] is False
         assert result["error"]["code"] == "PROVIDER_NOT_SUPPORTED"
+        delete_image(meta.image_id)
+
+    def test_openai_paid_without_key_falls_back_without_crashing(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setenv("BETGUARD_VISION_MODEL", "test-model")
+        png = _make_png(800, 600)
+        meta = validate_and_store(png, "image/png")
+        save_metadata(meta)
+        result = run_job(meta.image_id, "openai-vision-paid", "bet_slip")
+        assert result["ok"] is True
+        assert result["mode"] == "paid_vision_fallback"
+        assert result["pending_confirmation"]["status"] == "PENDING_HUMAN_CONFIRMATION"
+        assert result["pending_confirmation"]["can_assisted_fill"] is False
+        assert result["safety"]["auto_submit"] is False
         delete_image(meta.image_id)
 
     def test_job_other_fixtures(self):

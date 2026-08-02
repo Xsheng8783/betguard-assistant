@@ -31,6 +31,7 @@ from betguard.vision.providers.fake import (
     multi_line_fixture,
     no_confidence_fixture,
 )
+from betguard.vision.providers.openai_paid import OpenAIPaidVisionProvider
 from betguard.vision.image_intake import (
     ImageMetadata,
     delete_image,
@@ -61,6 +62,7 @@ __all__ = [
     # Providers
     "ImageRecognitionProvider",
     "FakeProvider",
+    "OpenAIPaidVisionProvider",
     # Fixtures
     "bet_slip_fixture",
     "multi_line_fixture",

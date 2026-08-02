@@ -115,6 +115,30 @@ Streamlit 本地審核 UI（僅供審核，不會 submit）：
 streamlit run src/betguard/ui_review.py
 ```
 
+## 手寫牌單 AI 辨識
+
+圖片工作台支援上傳 PNG / JPEG / WebP，辨識範圍刻意限制為數字、`x` 與
+`二／三／四` 等下注文字。付費 Vision 會先讀整張圖片，結果一律停在
+`PENDING_HUMAN_CONFIRMATION`；每行經人工修正並勾選後，才可帶回文字 Review。
+
+PowerShell 可用隱藏輸入設定當次工作階段的 API Key，不會寫入專案：
+
+```powershell
+$secret = Read-Host "OPENAI_API_KEY" -AsSecureString
+$env:OPENAI_API_KEY = [System.Net.NetworkCredential]::new('', $secret).Password
+Remove-Variable secret
+$env:BETGUARD_VISION_MODEL = "gpt-5"
+$env:PYTHONPATH = (Resolve-Path .\src).Path
+python -m betguard.webui.app
+```
+
+開啟 `http://127.0.0.1:8765/assist-panel`，切換到「手寫圖片辨識」。如果
+API Key 或模型未設定，畫面會明確顯示本機 OCR fallback；沒有可用的本機 OCR
+也不會假裝成功。圖片品質 Gate 未通過時，不能把 OCR 文字帶回 Review。
+
+安全邊界固定為 `auto_submit=false`、`auto_confirm=false`，OCR 不會直接進入
+webfill，也不會操作任何下注網站。
+
 ## Documentation
 
 - [End-to-End Demo](docs/demo_e2e.md)

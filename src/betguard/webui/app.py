@@ -1766,7 +1766,7 @@ def build_workbench_handler(
             mode_toggle = """
 <div style="margin-bottom:8px;display:flex;gap:6px">
   <button id="mode-text-btn" style="font-size:13px;padding:4px 10px;min-height:unset;background:#2563eb;color:#fff" onclick="switchMode('text')">文字輸入</button>
-  <button id="mode-vision-btn" style="font-size:13px;padding:4px 10px;min-height:unset;background:#94a3b8;color:#fff" onclick="switchMode('vision')">圖片辨識（測試）</button>
+  <button id="mode-vision-btn" style="font-size:13px;padding:4px 10px;min-height:unset;background:#94a3b8;color:#fff" onclick="switchMode('vision')">手寫圖片辨識</button>
 </div>
 """
             html = html.replace('<textarea id="batch-text"', mode_toggle + '<textarea id="batch-text"')
@@ -2587,10 +2587,18 @@ window.assistPanelFill = assistPanelFill;
                 self._send_json({"ok": False, "error": {"code": "INVALID_JSON", "message": "JSON 格式無效"}})
                 return
             image_id = data.get("image_id", "")
+            aided_image_id = data.get("aided_image_id", "")
+            document_mode = data.get("document_mode", "auto")
             provider_id = data.get("provider_id", "fake")
             fixture = data.get("fixture", "bet_slip")
             from betguard.vision.service import run_job
-            result = run_job(image_id, provider_id, fixture)
+            result = run_job(
+                image_id,
+                provider_id,
+                fixture,
+                aided_image_id=aided_image_id,
+                document_mode=document_mode,
+            )
             self._send_json(result, status=200 if result["ok"] else 400)
 
         # ----------------------------------------------------------------
