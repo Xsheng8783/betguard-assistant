@@ -210,13 +210,9 @@ class TestCLISafety:
 
 
 class TestNoPollution:
-    """Main venv must not import cv2, numpy, paddle, or prohibited modules."""
-
-    def test_no_cv2_in_main(self):
-        assert "cv2" not in sys.modules
-
-    def test_no_numpy_in_main(self):
-        assert "numpy" not in sys.modules
+    """Main venv must not import paddle/paddleocr (heavy OCR runtime).
+    cv2/numpy ARE now declared runtime deps of betguard (row pipeline),
+    so only the heavy OCR stack is prohibited in the main environment."""
 
     def test_no_paddle_in_main(self):
         assert "paddle" not in sys.modules

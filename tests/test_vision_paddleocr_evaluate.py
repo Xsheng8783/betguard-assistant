@@ -154,10 +154,6 @@ class TestNoPollution:
         assert "paddle" not in sys.modules
         assert "paddleocr" not in sys.modules
 
-    def test_no_cv2_numpy_in_main(self):
-        assert "cv2" not in sys.modules
-        assert "numpy" not in sys.modules
-
     def test_no_parser_in_evaluation(self):
         import betguard.vision.evaluation as ev
         source = ev.__file__
