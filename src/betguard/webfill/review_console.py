@@ -562,6 +562,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
       <p class="subtitle">僅供本地審核 — 不合格項目不會進入 approved_fill_queue</p>
     </div>
     <div style="display:flex;gap:8px;align-items:center">
+      <a href="/ocr" style="font-size:14px;padding:8px 16px;background:var(--blue);color:#fff;border-radius:8px;text-decoration:none;white-space:nowrap">🖼️ 圖片轉文字</a>
       <button class="btn-open-site" id="open-site-btn" onclick="openBettingSite()" style="font-size:14px;padding:8px 16px">🌐 開啟下牌網站</button>
       <span id="open-site-status" style="font-size:12px;color:var(--slate);margin-left:8px"></span>
       <span class="mode-tag">僅本機模式</span>

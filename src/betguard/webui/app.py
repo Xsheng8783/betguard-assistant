@@ -30,6 +30,8 @@ import subprocess
 import sys
 import urllib.parse
 from datetime import datetime, timezone
+from email import policy
+from email.parser import BytesParser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -53,6 +55,9 @@ CLI_REF_PATH = PROJECT_ROOT / "docs" / "cli_reference.md"
 VENV_PYTHON = PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
 
 ALLOWED_GAME_OPTIONS = {"auto", "539", "天天樂", "zhupeng"}
+
+# Multipart form overhead (boundary + headers) allowed on top of the image cap.
+_OCR_MAX_MULTIPART_BYTES = 21 * 1024 * 1024  # 21 MB
 
 # Flags that the workbench will NEVER pass to the CLI, even if a test or
 # refactor accidentally tries to.  See HARD RULES in the module docstring.
@@ -132,6 +137,7 @@ def _build_dashboard_links() -> str:
     lines = [
         '<div class="links">',
         '  <a href="/workbench">貼上牌單建立審核</a>',
+        '  <a href="/ocr">圖片轉文字 (OCR)</a>',
         '  <a class="danger" href="/latest-review">開啟最新 review.html</a>',
     ]
     latest_unrec = _find_latest_unrecognized()
@@ -369,6 +375,63 @@ def _render_version_page() -> str:
 <p><a href="/">返回首頁</a></p>
 """
     return _HTML_HEAD.format(title="版本資訊") + body + _HTML_FOOTER
+
+
+def _render_ocr_form(error: str | None = None) -> str:
+    """Render the OCR upload form (image → text)."""
+    error_html = ""
+    if error:
+        error_html = (
+            f'<div class="safety"><strong>錯誤：</strong>'
+            f"{_html_escape(error)}</div>"
+        )
+    body = f"""<h2>圖片轉文字 (OCR)</h2>
+<p>上傳圖片，從圖片中取出文字。文字只會顯示在此頁面，不會送出任何下注。</p>
+{error_html}
+<form method="post" action="/ocr" enctype="multipart/form-data">
+  <p><input type="file" name="image" accept="image/png,image/jpeg,image/webp,image/bmp" required></p>
+  <p><button type="submit">取出文字</button></p>
+</form>
+<p><a href="/">返回首頁</a></p>
+"""
+    return _HTML_HEAD.format(title="圖片轉文字") + body + _HTML_FOOTER
+
+
+def _render_ocr_result(lines: list[dict[str, Any]], filename: str = "") -> str:
+    """Render OCR result: each recognized line with confidence + copyable text."""
+    if not lines:
+        body = f"""<h2>圖片轉文字 (OCR)</h2>
+<p><strong>未辨識到任何文字。</strong> 請確認圖片內容清晰（可嘗試放大字體或提高對比度）。</p>
+<p><a href="/ocr">重新上傳</a> ｜ <a href="/">返回首頁</a></p>
+"""
+        return _HTML_HEAD.format(title="圖片轉文字") + body + _HTML_FOOTER
+
+    full_text = "\n".join(line["text"] for line in lines)
+    rows = []
+    for i, line in enumerate(lines, start=1):
+        score = line.get("score")
+        # GLM-OCR 引擎不提供信心度 → 顯示「-」；RapidOCR 才顯示百分比。
+        pct = f"{score * 100:.1f}%" if isinstance(score, (int, float)) else "-"
+        rows.append(
+            f"<tr><td>{i}</td><td>{_html_escape(line['text'])}</td>"
+            f"<td>{pct}</td></tr>"
+        )
+    fname_html = _html_escape(filename) if filename else ""
+    body = f"""<h2>圖片轉文字 (OCR)</h2>
+<p><strong>來源圖片：</strong>{fname_html or "（未命名）"} ｜ <a href="/ocr">換一張圖</a></p>
+<table>
+  <tr><th>#</th><th>文字</th><th>信心度</th></tr>
+  {chr(10).join(rows)}
+</table>
+<h3>全文（可複製）</h3>
+<textarea id="ocr-text" rows="10" readonly>{_html_escape(full_text)}</textarea>
+<p>
+  <button type="button" onclick="const t=document.getElementById('ocr-text');t.select();document.execCommand('copy');this.textContent='已複製!';">複製全文</button>
+  <a href="/workbench">貼到工作台建立審核</a>
+</p>
+<p><a href="/">返回首頁</a></p>
+"""
+    return _HTML_HEAD.format(title="圖片轉文字") + body + _HTML_FOOTER
 
 
 def _render_license_page() -> str:
@@ -1146,6 +1209,11 @@ def build_workbench_handler(
                 self._send_html(_render_version_page())
                 return
 
+            # GET /ocr — image-to-text upload form
+            if path == "/ocr":
+                self._send_html(_render_ocr_form())
+                return
+
             # GET /license/status — JSON
             if path == "/license/status":
                 self._handle_license_status()
@@ -1266,6 +1334,11 @@ def build_workbench_handler(
             # POST /api/window-pin — toggle always-on-top (localhost only)
             if path == "/api/window-pin":
                 self._handle_window_pin()
+                return
+
+            # POST /ocr — image-to-text (multipart form upload)
+            if path == "/ocr":
+                self._handle_ocr_post()
                 return
 
             self._send_text("not found", status=404)
@@ -2455,6 +2528,66 @@ window.assistPanelFill = assistPanelFill;
             from betguard.webui.window_pin import set_always_on_top
             result = set_always_on_top(enable)
             self._send_json(result)
+
+        def _handle_ocr_post(self) -> None:
+            """POST /ocr — parse multipart form, run OCR, render result page."""
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            if length <= 0:
+                self._send_html(_render_ocr_form("沒有收到檔案"), status=400)
+                return
+            # Multipart overhead: allow some slack beyond the image limit.
+            if length > _OCR_MAX_MULTIPART_BYTES:
+                self._send_html(
+                    _render_ocr_form(f"檔案太大（上限 {_OCR_MAX_MULTIPART_BYTES // (1024 * 1024)} MB）"),
+                    status=413,
+                )
+                return
+            body_raw = self.rfile.read(length)
+            # email.parser needs a Content-Type header to resolve the boundary;
+            # inject the request's header into a synthetic email message.
+            content_type = self.headers.get("Content-Type", "")
+            # chr(13)+chr(10) == CRLF; written via chr() to avoid escaping issues
+            _crlf = chr(13) + chr(10)
+            synthetic = (
+                f"Content-Type: {content_type}{_crlf}MIME-Version: 1.0{_crlf}{_crlf}"
+            ).encode("utf-8", "surrogateescape") + body_raw
+            try:
+                msg = BytesParser(policy=policy.default).parsebytes(synthetic)
+            except Exception:
+                self._send_html(_render_ocr_form("無法解析上傳內容"), status=400)
+                return
+
+            image_bytes: bytes | None = None
+            filename = ""
+            for part in msg.iter_parts():
+                if part.get_content_disposition() != "form-data":
+                    continue
+                name = part.get_param("name", header="content-disposition")
+                if name != "image":
+                    continue
+                payload = part.get_payload(decode=True)
+                if payload:
+                    image_bytes = payload
+                    filename = part.get_filename() or ""
+                break
+            if not image_bytes:
+                self._send_html(_render_ocr_form("沒有收到圖片檔案"), status=400)
+                return
+
+            try:
+                from betguard import ocr as ocr_mod
+                lines = ocr_mod.extract_text(image_bytes)
+            except ocr_mod.ImageTooLargeError as exc:
+                self._send_html(_render_ocr_form(str(exc)), status=413)
+                return
+            except ocr_mod.OcrError as exc:
+                self._send_html(_render_ocr_form(str(exc)), status=400)
+                return
+            except Exception as exc:  # pragma: no cover — unexpected
+                self._send_html(_render_ocr_form(f"OCR 處理失敗: {exc}"), status=500)
+                return
+
+            self._send_html(_render_ocr_result(lines, filename))
 
     return WorkbenchHandler
 
