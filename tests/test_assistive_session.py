@@ -240,6 +240,8 @@ class TestPersistence:
             assert "api_key" not in raw.lower()
             assert "access_token" not in raw.lower()
             assert "base64" not in raw.lower()
+            assert "application_default_credentials" not in raw.lower()
+            assert "application_default" not in raw.lower()
             # no image payload
             assert data.get("source_image_sha256") == "a" * 64
 
