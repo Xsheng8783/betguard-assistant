@@ -56,6 +56,7 @@ class WarningCode(str, Enum):
     PARSER_FAILURE = "PARSER_FAILURE"
     TRUNCATED_RESPONSE = "TRUNCATED_RESPONSE"
     EMPTY_MODEL_RESPONSE = "EMPTY_MODEL_RESPONSE"
+    UNKNOWN_MARKER = "UNKNOWN_MARKER"
     # WARNING
     POSSIBLE_ROW_OMISSION = "POSSIBLE_ROW_OMISSION"
     INVALID_MULTIPLIER = "INVALID_MULTIPLIER"
@@ -105,6 +106,20 @@ def _extract_tokens(text: str) -> list[str]:
     return tokens
 
 
+def _strip_multipliers(text: str) -> str:
+    """Remove multiplier segments so their digits are NOT treated as bet
+    numbers. Handles: X1, 二X1, 三X0.5, 四X10, x0.2, ×1 ..."""
+    # chinese-prefixed multipliers first (三X0.5), then bare (x1, X10)
+    stripped = _CHINESE_MULT_RE.sub(" ", text)
+    stripped = re.sub(r"(?<!\d)[xX×]\d+(?:\.\d+)?", " ", stripped)
+    return stripped
+
+
+def _bet_number_tokens(text: str) -> list[str]:
+    """Two-digit tokens that are NOT part of a multiplier segment."""
+    return _NUMBER_RE.findall(_strip_multipliers(text))
+
+
 # ── line-level warnings ────────────────────────────────────────────────────
 
 def warn_invalid_charset(text: str, allow_unknown: bool = True) -> list[AssistiveWarning]:
@@ -129,9 +144,9 @@ def warn_invalid_charset(text: str, allow_unknown: bool = True) -> list[Assistiv
 
 
 def warn_number_out_of_range(text: str) -> list[AssistiveWarning]:
-    """BLOCKER: two-digit tokens outside 01-39."""
+    """BLOCKER: two-digit tokens (excluding multiplier segments) outside 01-39."""
     out = []
-    for token in _NUMBER_RE.findall(text):
+    for token in _bet_number_tokens(text):
         val = int(token)
         if not (1 <= val <= 39):
             out.append(token)
@@ -146,8 +161,9 @@ def warn_number_out_of_range(text: str) -> list[AssistiveWarning]:
 
 
 def warn_duplicate_number(text: str) -> list[AssistiveWarning]:
-    """WARNING: same two-digit token repeated within the line."""
-    tokens = [t for t in _NUMBER_RE.findall(text) if 1 <= int(t) <= 39]
+    """WARNING: same two-digit token repeated within the line
+    (multiplier digits excluded)."""
+    tokens = [t for t in _bet_number_tokens(text) if 1 <= int(t) <= 39]
     seen: set[str] = set()
     dup = sorted({t for t in tokens if t in seen or seen.add(t)})
     if not dup:
@@ -182,15 +198,27 @@ def warn_invalid_multiplier(text: str) -> list[AssistiveWarning]:
 
 
 def warn_bottom_special(text: str) -> list[AssistiveWarning]:
-    """WARNING: bottom-special content (parentheses, tail digits, matrix,
-    chinese multiplier combos) — requires human review but not BLOCK."""
-    if not _BOTTOM_SPECIAL_RE.search(text):
+    """WARNING: bottom-special content — parentheses, tail digits (尾),
+    matrix ('/'), 各 marker, or multiple chinese multipliers in one line.
+    Requires human review but never BLOCKs."""
+    special = []
+    if "/" in text:
+        special.append("/")
+    if re.search(r"[()（）、]", text):
+        special.append("括號")
+    if "各" in text:
+        special.append("各")
+    if "尾" in text:
+        special.append("尾")
+    if len(_CHINESE_MULT_RE.findall(text)) > 1:
+        special.append("多組倍率")
+    if not special:
         return []
     return [AssistiveWarning(
         code=WarningCode.BOTTOM_SPECIAL_REVIEW_REQUIRED.value,
         severity=WarningSeverity.WARNING.value,
-        message="內容含括號/尾數/矩陣/特殊倍率，請人工檢視",
-        details={"matched": _BOTTOM_SPECIAL_RE.search(text).group(0)},
+        message="內容含底部特殊格式，請人工檢視: " + "、".join(special),
+        details={"markers": special},
     )]
 
 
@@ -210,10 +238,12 @@ def warn_unparsed(text: str) -> list[AssistiveWarning]:
 
 
 def warn_ambiguous_glyphs(text: str) -> list[AssistiveWarning]:
-    """RISK_HIGHLIGHT: ambiguous glyph pairs, one warning per pair per line."""
+    """RISK_HIGHLIGHT: ambiguous glyph pairs, one warning per pair per line.
+    Multiplier digits excluded (三X0.5's 3 is a multiplier, not a bet 3)."""
     out = []
+    number_part = _strip_multipliers(text)
     for code, a, b in _AMBIGUOUS_PAIRS:
-        if a in text or b in text:
+        if a in number_part or b in number_part:
             out.append(AssistiveWarning(
                 code=code.value,
                 severity=WarningSeverity.RISK_HIGHLIGHT.value,
@@ -230,7 +260,7 @@ def warn_leading_zero(text: str) -> list[AssistiveWarning]:
     single digits in the number portion trigger this.
     """
     # remove multiplier tokens first (e.g. "x1", "二X1", "三X0.5")
-    number_part = _MULTIPLIER_RE.sub(" ", text)
+    number_part = _strip_multipliers(text)
     singles = [t for t in _NUMBER_RE.findall(number_part) if len(t) == 1]
     if not singles:
         return []
@@ -239,6 +269,20 @@ def warn_leading_zero(text: str) -> list[AssistiveWarning]:
         severity=WarningSeverity.RISK_HIGHLIGHT.value,
         message="出現單一數字，可能遺失前導 0，請確認",
         details={"tokens": singles},
+    )]
+
+
+def warn_unknown_marker(text: str) -> list[AssistiveWarning]:
+    """BLOCKER: '?' unknown marker — the line may be saved/shown/edited but
+    cannot be CONFIRMED or CORRECTED until the user resolves it. The model
+    output is never auto-guessed."""
+    if "?" not in text:
+        return []
+    return [AssistiveWarning(
+        code=WarningCode.UNKNOWN_MARKER.value,
+        severity=WarningSeverity.BLOCKER.value,
+        message="含有 ? 未知字元，需人工修正後才能確認",
+        details={"count": text.count("?")},
     )]
 
 
@@ -280,6 +324,7 @@ def analyze_line(text: str) -> list[AssistiveWarning]:
         warn_unparsed(text),
         warn_ambiguous_glyphs(text),
         warn_leading_zero(text),
+        warn_unknown_marker(text),
     ]
     seen: set[str] = set()
     for group in groups:

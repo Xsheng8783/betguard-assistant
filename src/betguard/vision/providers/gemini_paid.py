@@ -190,10 +190,17 @@ def normalize_gemini_output(data: Any) -> dict[str, Any]:
 
 
 def _post_generate(payload: dict[str, Any], api_key: str, timeout_seconds: int) -> dict[str, Any]:
-    """Call generateContent. Returns the parsed JSON body or raises."""
-    model = payload.pop("_model", DEFAULT_MODEL)
+    """Call generateContent. Returns the parsed JSON body or raises.
+
+    Never mutates the caller's payload dict (no pop): the model name is
+    read via .get() and stripped into a separate request copy so retries
+    always serialize the identical body.
+    """
+    model = payload.get("_model", DEFAULT_MODEL)
+    request_payload = {key: value for key, value in payload.items()
+                       if key != "_model"}
     url = GENERATE_CONTENT_URL.format(model=model, api_key=api_key)
-    body = json.dumps(payload).encode("utf-8")
+    body = json.dumps(request_payload).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=body,
@@ -386,13 +393,14 @@ class PlaintextRecognitionResult:
 
 
 def _build_plaintext_payload(image_bytes: bytes,
-                             max_output_tokens: int) -> dict[str, Any]:
+                             max_output_tokens: int,
+                             mime_type: str = "image/png") -> dict[str, Any]:
     b64 = base64.b64encode(image_bytes).decode("ascii")
     return {
         "contents": [{
             "parts": [
                 {"text": ASSISTIVE_WHOLE_PAGE_PROMPT_V1},
-                {"inline_data": {"mime_type": "image/png", "data": b64}},
+                {"inline_data": {"mime_type": mime_type, "data": b64}},
             ]
         }],
         "generationConfig": {
@@ -412,6 +420,9 @@ def _classify_plaintext_status(text: str, finish_reason: str) -> str:
     return PLAINTEXT_STATUS_SUCCESS
 
 
+_SUPPORTED_MIME_TYPES = ("image/png", "image/jpeg", "image/webp")
+
+
 def recognize_whole_page_plaintext(
     image_bytes: bytes,
     *,
@@ -419,9 +430,18 @@ def recognize_whole_page_plaintext(
     max_output_tokens: int = ASSISTIVE_MAX_OUTPUT_TOKENS,
     api_key: str | None = None,
     client: Callable[[dict[str, Any], str, int], dict[str, Any]] | None = None,
+    mime_type: str = "image/png",
+    sleep_fn: Callable[[float], None] | None = None,
 ) -> PlaintextRecognitionResult:
     """Full-page plain-text recognition (assistive flow). No JSON schema,
-    no region crops, no parser pre-fix. Bounded retry only (2x on 429)."""
+    no region crops, no parser pre-fix. Bounded retry only (2x on 429).
+
+    NEVER raises for provider errors — every failure mode maps to a
+    PlaintextRecognitionResult status:
+      RESOURCE_EXHAUSTED   429 after retries exhausted
+      AUTH_OR_CONFIG_ERROR 401/403/404, missing API key, unsupported mime
+      BLOCKED_MODEL_RESPONSE network / other provider errors
+    """
     key = api_key if api_key is not None else os.environ.get(API_KEY_ENV, "").strip()
     if not key:
         return PlaintextRecognitionResult(
@@ -429,31 +449,62 @@ def recognize_whole_page_plaintext(
             status=PLAINTEXT_STATUS_AUTH_ERROR,
             generation_config={"error": f"{API_KEY_ENV} is not configured"},
         )
-    payload = _build_plaintext_payload(image_bytes, max_output_tokens)
+    if mime_type not in _SUPPORTED_MIME_TYPES:
+        return PlaintextRecognitionResult(
+            text="", requested_model=model, prompt_version=ASSISTIVE_PROMPT_VERSION,
+            status=PLAINTEXT_STATUS_AUTH_ERROR,
+            generation_config={
+                "error": f"unsupported mime_type {mime_type!r}; "
+                         f"supported: {', '.join(_SUPPORTED_MIME_TYPES)}"},
+        )
+    payload = _build_plaintext_payload(image_bytes, max_output_tokens,
+                                       mime_type=mime_type)
     payload["_model"] = model
     poster = client or _post_generate
-
     import time
+    sleeper = sleep_fn or time.sleep
+
     started = time.monotonic()
     last_err: Optional[Exception] = None
+    response: Optional[dict[str, Any]] = None
     for attempt in range(3):
         try:
             response = poster(payload, key, timeout_seconds=120)
+            last_err = None
             break
         except GeminiPaidVisionError as exc:
             last_err = exc
-            if "HTTP 429" in str(exc) and attempt < 2:
-                time.sleep(15 * (attempt + 1))  # bounded backoff, no long waits
-                continue
-            raise
-    else:  # pragma: no cover - defensive
-        assert last_err is not None
-        raise last_err
+            msg = str(exc)
+            if "HTTP 429" in msg:
+                if attempt < 2:  # bounded backoff, no long waits
+                    sleeper(15 * (attempt + 1))
+                    continue
+                return PlaintextRecognitionResult(
+                    text="", requested_model=model,
+                    prompt_version=ASSISTIVE_PROMPT_VERSION,
+                    status=PLAINTEXT_STATUS_RATE_LIMITED,
+                    generation_config={"error": msg})
+            if "HTTP 401" in msg or "HTTP 403" in msg or "HTTP 404" in msg \
+                    or "API key not valid" in msg:
+                return PlaintextRecognitionResult(
+                    text="", requested_model=model,
+                    prompt_version=ASSISTIVE_PROMPT_VERSION,
+                    status=PLAINTEXT_STATUS_AUTH_ERROR,
+                    generation_config={"error": msg})
+            # network / other provider error -> BLOCKED_MODEL_RESPONSE
+            return PlaintextRecognitionResult(
+                text="", requested_model=model,
+                prompt_version=ASSISTIVE_PROMPT_VERSION,
+                status=PLAINTEXT_STATUS_MODEL_ERROR,
+                generation_config={"error": msg})
+        except Exception as exc:  # noqa: BLE001 - never leak to UI
+            return PlaintextRecognitionResult(
+                text="", requested_model=model,
+                prompt_version=ASSISTIVE_PROMPT_VERSION,
+                status=PLAINTEXT_STATUS_MODEL_ERROR,
+                generation_config={"error": f"provider call failed: {exc}"})
+    assert response is not None  # loop either breaks with response or returns
     latency_ms = round((time.monotonic() - started) * 1000, 1)
-
-    err = _classify_http_error(last_err) if last_err else None
-    if err is not None:
-        return err
 
     try:
         text = extract_output_text(response)
@@ -486,20 +537,7 @@ def recognize_whole_page_plaintext(
         generation_config={
             "temperature": ASSISTIVE_TEMPERATURE,
             "max_output_tokens": max_output_tokens,
+            "mime_type": mime_type,
         },
         status=status,
     )
-
-
-def _classify_http_error(err: GeminiPaidVisionError) -> Optional[PlaintextRecognitionResult]:
-    """Map a transport/auth/rate-limit error to a status result."""
-    msg = str(err)
-    if "HTTP 429" in msg:
-        return PlaintextRecognitionResult(
-            text="", status=PLAINTEXT_STATUS_RATE_LIMITED,
-            generation_config={"error": msg})
-    if "HTTP 401" in msg or "HTTP 403" in msg or "API key not valid" in msg:
-        return PlaintextRecognitionResult(
-            text="", status=PLAINTEXT_STATUS_AUTH_ERROR,
-            generation_config={"error": msg})
-    return None  # not classified — caller sees the exception

@@ -158,3 +158,98 @@ class TestSessionLevel:
         assert out["session"]  # omission warning
         codes = {w["code"] for w in out["session"]}
         assert WarningCode.POSSIBLE_ROW_OMISSION.value in codes
+
+
+class TestMultiplierExclusion:
+    """Multiplier segments (X1, 二X1, 三X0.5, 四X10, x0.2) must NOT be
+    treated as bet numbers."""
+
+    def test_x1_only_numbers(self):
+        ws = warn_number_out_of_range("01 20 二X1")
+        assert ws == []  # 1 is multiplier, not a bet number
+
+    def test_x1_no_1_7_hint(self):
+        # 02/03 contain no 1 or 7; the multiplier "二X1"'s 1 must not
+        # trigger AMBIGUOUS_1_7
+        ws = warn_ambiguous_glyphs("02 03 二X1")
+        assert WarningCode.AMBIGUOUS_1_7.value not in _codes(ws)
+
+    def test_1_7_hint_still_fires_for_bet_number_1(self):
+        # bet number "01" legitimately contains 1 -> hint is correct
+        ws = warn_ambiguous_glyphs("01 20 二X1")
+        assert WarningCode.AMBIGUOUS_1_7.value in _codes(ws)
+
+    def test_x1_no_leading_zero_warning(self):
+        ws = warn_leading_zero("01 20 二X1")
+        assert ws == []
+
+    def test_san_x0_5_no_range_error(self):
+        assert warn_number_out_of_range("三X0.5") == []
+        assert warn_leading_zero("三X0.5") == []
+        assert warn_ambiguous_glyphs("三X0.5") == []
+
+    def test_six_x10_not_bet_number(self):
+        ws = warn_number_out_of_range("04 11 四X10")
+        assert ws == []  # 10 in multiplier is not a bet number
+
+    def test_out_of_range_40_detected(self):
+        ws = warn_number_out_of_range("40 01 二X1")
+        assert _codes(ws) == [WarningCode.NUMBER_OUT_OF_RANGE.value]
+        assert "40" in ws[0].details["tokens"]
+
+    def test_zero_zero_out_of_range(self):
+        ws = warn_number_out_of_range("00 20 二X1")
+        assert _codes(ws) == [WarningCode.NUMBER_OUT_OF_RANGE.value]
+
+    def test_duplicate_excludes_multiplier(self):
+        assert warn_duplicate_number("07 07 二X1") != []  # real dup
+        assert warn_duplicate_number("07 21 x1") == []  # x1 not a dup
+
+
+class TestUnknownMarker:
+    def test_unknown_marker_blocker(self):
+        ws = analyze_line("01 ? 二X1")
+        assert WarningCode.UNKNOWN_MARKER.value in _codes(ws)
+        assert _sev(ws, WarningCode.UNKNOWN_MARKER.value) == \
+            WarningSeverity.BLOCKER.value
+
+    def test_no_unknown_marker_without_question(self):
+        assert WarningCode.UNKNOWN_MARKER.value not in \
+            _codes(analyze_line("01 20 二X1"))
+
+    def test_question_marker_count(self):
+        ws = analyze_line("? ? 二X1")
+        for w in ws:
+            if w.code == WarningCode.UNKNOWN_MARKER.value:
+                assert w.details["count"] == 2
+
+
+class TestBottomSpecial:
+    def test_slash_matrix(self):
+        ws = warn_bottom_special("01 02 03 / 10 11 12 / 17 18 27 三X0.2")
+        assert _codes(ws) == [WarningCode.BOTTOM_SPECIAL_REVIEW_REQUIRED.value]
+        assert "/" in ws[0].details["markers"]
+
+    def test_parentheses(self):
+        ws = warn_bottom_special("(08.10.18.20) 三X0.5")
+        assert "括號" in ws[0].details["markers"]
+
+    def test_ge_marker(self):
+        ws = warn_bottom_special("各二三x0.5")
+        assert "各" in ws[0].details["markers"]
+
+    def test_tail_marker(self):
+        ws = warn_bottom_special("13X24X8尾 二三X1")
+        assert "尾" in ws[0].details["markers"]
+
+    def test_multiple_chinese_multipliers(self):
+        ws = warn_bottom_special("三X0.5 四X3")
+        assert "多組倍率" in ws[0].details["markers"]
+
+    def test_bottom_special_is_warning_not_blocker(self):
+        ws = analyze_line("(08.10.18.20) 三X0.5")
+        assert _sev(ws, WarningCode.BOTTOM_SPECIAL_REVIEW_REQUIRED.value) == \
+            WarningSeverity.WARNING.value
+
+    def test_plain_line_no_bottom_warning(self):
+        assert warn_bottom_special("01 20 二X1") == []

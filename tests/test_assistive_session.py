@@ -201,6 +201,92 @@ class TestSessionMutations:
         # nothing confirmed anymore -> nothing stale
         s.verify_confirmation_freshness()
 
+
+class TestEditReanalysis:
+    def test_edit_reanalyzes_warnings_out_of_range(self):
+        s = _make_session()
+        line_id = s.non_blank_lines()[0].line_id
+        s.update_line_edited(line_id, "40 20 二X1")  # 40 out of range
+        line = s._get_line(line_id)
+        codes = [w["code"] for w in line.warnings]
+        assert "NUMBER_OUT_OF_RANGE" in codes
+        with pytest.raises(ConfirmationError):
+            s.confirm_line(line_id, "user")
+
+    def test_edit_reanalyzes_unknown_marker(self):
+        s = _make_session()
+        line_id = s.non_blank_lines()[0].line_id
+        s.update_line_edited(line_id, "01 ? 二X1")
+        line = s._get_line(line_id)
+        codes = [w["code"] for w in line.warnings]
+        assert "UNKNOWN_MARKER" in codes
+        with pytest.raises(ConfirmationError):
+            s.confirm_line(line_id, "user")
+
+    def test_confirm_line_reanalyzes_fresh(self):
+        """confirm_line must re-run analyze_line on the backend — a stale
+        cached warning (or missing warning) cannot bypass the gate."""
+        s = _make_session()
+        line_id = s.non_blank_lines()[0].line_id
+        # tamper: clear warnings then set edited text to an invalid value
+        # without going through update_line_edited (simulating stale cache)
+        line = s._get_line(line_id)
+        line.edited_text = "45 20 二X1"  # out of range
+        line.set_warnings([])  # stale cache: no warnings
+        with pytest.raises(ConfirmationError):
+            s.confirm_line(line_id, "user")
+
+    def test_unknown_marker_blocked_from_confirm(self):
+        s = _make_session()
+        line_id = s.non_blank_lines()[0].line_id
+        s.update_line_edited(line_id, "01 ? 二X1")
+        with pytest.raises(ConfirmationError):
+            s.confirm_line(line_id, "user")
+
+    def test_edit_to_valid_then_confirm_ok(self):
+        s = _make_session()
+        line_id = s.non_blank_lines()[0].line_id
+        s.update_line_edited(line_id, "01 20 二X1")
+        # raw was "01 20 x1" -> edited differs -> CORRECTED (per rules)
+        s.confirm_line(line_id, "user")
+        assert s._get_line(line_id).status == LineStatus.CORRECTED
+
+
+class TestWarningInvalidation:
+    def test_blocker_after_final_confirm_clears_confirmation(self):
+        s = _make_session()
+        for l in s.non_blank_lines():
+            l.confirm("user")
+        s.set_parsed_output([{"gt": "01 20 x1"}])
+        s.final_confirm("alice")
+        assert s.final_confirmed_at is not None
+        # backend adds a BLOCKER after final confirm
+        line_id = s.non_blank_lines()[0].line_id
+        s.set_line_warnings(line_id, [{"code": "NUMBER_OUT_OF_RANGE",
+                                       "severity": "BLOCKER"}])
+        assert s.final_confirmed_at is None  # invalidated
+        assert s.edited_output_sha256 is None
+        assert s._get_line(line_id).status == LineStatus.BLOCKED
+
+    def test_blocker_removed_returns_to_unreviewed(self):
+        s = _make_session()
+        line_id = s.non_blank_lines()[0].line_id
+        s.set_line_warnings(line_id, [{"code": "NUMBER_OUT_OF_RANGE",
+                                       "severity": "BLOCKER"}])
+        line = s._get_line(line_id)
+        line.status = LineStatus.BLOCKED
+        s.set_line_warnings(line_id, [])  # blocker removed
+        assert line.status == LineStatus.UNREVIEWED
+        assert s.final_confirmed_at is None
+
+    def test_set_warnings_keeps_confirm_without_blocker(self):
+        s = _make_session()
+        line_id = s.non_blank_lines()[0].line_id
+        s.confirm_line(line_id, "user")
+        s.set_line_warnings(line_id, [{"code": "AMBIGUOUS_2_3",
+                                       "severity": "RISK_HIGHLIGHT"}])
+        assert s._get_line(line_id).status == LineStatus.CONFIRMED
+
     def test_edited_document_reconstruction_preserves_blanks(self):
         s = _make_session()
         doc = s.build_edited_document()

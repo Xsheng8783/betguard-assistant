@@ -301,14 +301,28 @@ class AssistiveSession:
 
     # ── user actions ─────────────────────────────────────────────────────
 
+    def _analyze(self, text: str) -> list[dict[str, Any]]:
+        """Run the warning analyzer; returns dict warnings (or [])."""
+        from .assistive_warnings import analyze_line
+        return [w.to_dict() for w in analyze_line(text)]
+
     def update_line_edited(self, line_id: str, new_text: str) -> None:
+        """User edit: update text, RE-ANALYZE warnings immediately, reset
+        to UNREVIEWED, invalidate parse + final confirmation."""
         line = self._get_line(line_id)
         line.set_edited_text(new_text)
+        line.set_warnings(self._analyze(new_text))
         self.parsed_output = None
         self._clear_confirmation()
+        self.updated_at = _now()
 
     def confirm_line(self, line_id: str, by: str) -> None:
+        """Confirm a line. The backend RE-ANALYZES the current edited text
+        before accepting — never trusts front-end cached warnings."""
         line = self._get_line(line_id)
+        fresh = self._analyze(line.edited_text)
+        if [w["code"] for w in line.warnings] != [w["code"] for w in fresh]:
+            line.set_warnings(fresh)
         line.confirm(by)
         self.updated_at = _now()
         self._clear_confirmation()
@@ -321,7 +335,22 @@ class AssistiveSession:
 
     def set_line_warnings(self, line_id: str,
                           warnings: list[dict[str, Any]]) -> None:
-        self._get_line(line_id).set_warnings(warnings)
+        """Backend warning update. If severity changed (BLOCKER added/removed)
+        the line's confirmation is invalidated; a removed BLOCKER returns the
+        line to UNREVIEWED waiting for a fresh explicit confirm."""
+        line = self._get_line(line_id)
+        had_blocker = line._blockers()
+        line.set_warnings(warnings)
+        has_blocker = line._blockers()
+        if line.status in (LineStatus.CONFIRMED, LineStatus.CORRECTED) \
+                and has_blocker:
+            line.status = LineStatus.BLOCKED
+            self._clear_confirmation()
+        elif line.status == LineStatus.BLOCKED and had_blocker and \
+                not has_blocker:
+            line.status = LineStatus.UNREVIEWED
+            self._clear_confirmation()
+        self.updated_at = _now()
 
     def set_parsed_output(self, parsed: list[dict[str, Any]]) -> None:
         self.parsed_output = parsed
