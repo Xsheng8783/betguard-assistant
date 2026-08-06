@@ -1267,39 +1267,93 @@ def test_repair_line_evidence_driven():
             "review_action": "pending",
             "uncertain": False,
             "warnings": [],
+            "human_raw_text": None,
+            "model_raw_text": None,
         }
 
     # R03: monotonic upgrade keeps BOTH rules in order
     l = line("R03-L1", "32 . 34 . 35 2 x 2 3 x 5", [["32", "34", "35"]], "3 x 5", "normal_row")
-    R.repair_line(l, ["2X2", "3X5"], [], apply=True)
+    R.recover_multiplier(l, ["2X2", "3X5"], [])
     assert l["multiplier_text"] == "2X2 3X5"
     assert [r["rule_text"] for r in l["multiplier_rules"]] == ["2X2", "3X5"]
+    res = R.apply_canonical_raw(l)
+    assert res["changed"] is True
+    assert l["raw_text"] == "32 34 35 2X2 3X5"
+    assert l["correction_source"] == R.REPAIR_SOURCE
 
     # R04: partial fragment -> complete evidence (same-value union)
     l = line("R04-L1", "24 34 / 03 23 / 17 27 37 / 20 30 35 2/3", [["24", "34"], ["03", "23"], ["17", "27", "37"], ["20", "30", "35"]], "2/3", "column_bet")
-    R.repair_line(l, ["2/3/4X0.1"], [], apply=True)
+    R.recover_multiplier(l, ["2/3/4X0.1"], [])
     assert l["multiplier_text"] == "2/3/4X0.1"
 
     # R07: three independent rules with DIFFERENT values stay three
     l = line("R07-L1", "21 35 / 23 / 34 / 37 4/3", [["21", "35"], ["23"], ["34"], ["37"]], "4/3", "column_bet")
-    R.repair_line(l, ["2X1", "3X0.2", "4X0.5"], [], apply=True)
+    R.recover_multiplier(l, ["2X1", "3X0.2", "4X0.5"], [])
     assert l["multiplier_text"] == "2X1 3X0.2 4X0.5"
     assert len(l["multiplier_rules"]) == 3
 
     # R09: column structure restored ONLY with column evidence + v3 nested
     v3 = [(['34', '23', '35', '27', '37'], [['34'], ['23'], ['35'], ['27', '37']], ['2X1'], ['2×1'])]
     l = line("R09-L1", "34 x 23 x 35 x 27 / 37 2 x 1", [["34", "23", "35", "27", "37"]], "23 x 35", "normal_row")
-    R.repair_line(l, ["2X1"], v3, apply=True, column_evidence=True)
+    R.recover_multiplier(l, ["2X1"], v3, column_evidence=True)
     assert l["multiplier_text"] == "2X1"
     assert l["number_groups"] == [["34"], ["23"], ["35"], ["27", "37"]]
     assert l["layout_hint"] == "column_bet"
 
     # no evidence -> must NOT guess; stays needs_human and never gets a value
     l = line("R99-L1", "?? ?? 2", [["01", "02"]], "2", "column_bet")
-    plan = R.repair_line(l, [], [], apply=True)
+    plan = R.recover_multiplier(l, [], [])
     assert plan["needs_human"] is True
     assert l["multiplier_text"] is None
     assert "incomplete_multiplier_evidence" in l["warnings"]
+
+
+def test_repair_line_id_keyed_assertions():
+    import repair_sample011_multipliers as R
+    with pytest.raises(AssertionError):
+        R._assert_unique_ids([{"line_id": "R03-L1"}, {"line_id": "R03-L1"}])
+
+    r02 = {
+        "line_id": "R02-L1",
+        "number_groups": [["30", "35", "36", "38"]],
+        "multiplier_text": "3/4 x 1",
+        "layout_hint": "normal_row",
+        "raw_text": "30 . 35 . 36 . 38 3 / 4 x 1",
+        "human_raw_text": None,
+        "model_raw_text": "30.35.36.38 ¾×1",
+        "review_action": "confirmed",
+        "uncertain": False,
+        "warnings": [],
+        "fallback_candidate": {},
+    }
+    before = json.dumps(r02, ensure_ascii=False, sort_keys=True)
+    # Even if R09's evidence is passed by mistake, R02 stays untouched
+    # (monotonic policy: existing complete 3/4X1 is not superseded by 2X1).
+    plan = R.recover_multiplier(r02, ["2X1"], [], column_evidence=True)
+    assert plan["changes"] == []
+    assert json.dumps(r02, ensure_ascii=False, sort_keys=True) == before
+
+    bad = dict(r02)
+    bad["multiplier_text"] = "2"  # partial
+    with pytest.raises(AssertionError):
+        R._assert_preconditions(bad)
+
+
+def test_multiplier_policy_spaced_complete():
+    from betguard.vision.multiplier_policy import (
+        is_complete_multiplier,
+        partial_tokens,
+        split_complete_rules,
+    )
+    assert is_complete_multiplier("3/4 x 1") is True
+    assert is_complete_multiplier("2 x 1") is True
+    assert is_complete_multiplier("2 x 2 3 x 5") is True
+    assert split_complete_rules("2 x 2 3 x 5") == ["2X2", "3X5"]
+    assert partial_tokens("3/4 x 1") == []
+    assert partial_tokens("2 x 1") == []
+    assert partial_tokens("2 x 2 3 x 5") == []
+    assert partial_tokens("2/3") == ["2/3"]
+    assert partial_tokens("23 x 35") == ["23X35"]
 
 
 def test_partial_multiplier_never_executable():

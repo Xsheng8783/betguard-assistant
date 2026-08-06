@@ -234,36 +234,29 @@ def _structured_divergence(cs: dict, sem: dict, groups: list | None = None) -> b
 def _revalidate_line(line: dict, revision: int | None = None, game: str = "539") -> dict:
     """Human edit -> re-run the whole pipeline; fail-closed on structured/text
     divergence (STRUCTURED_TEXT_DIVERGENT)."""
-    line["pipeline_review"] = _reapply_pipeline(line, game=game)
+    # Backend contract: number_groups + multiplier_text are authoritative;
+    # raw_text is display evidence. Validate against the CANONICAL text
+    # (digit categories translated to the parser's Chinese grammar for this
+    # internal parse only), so repaired lines are never blocked by stale raw.
+    tmp = dict(line)
+    tmp["raw_text"] = _canonical_text(line, zh_mult=True)
+    tmp["human_raw_text"] = tmp["raw_text"]
+    line["pipeline_review"] = _reapply_pipeline(tmp, game=game)
     if revision is not None:
         line["pipeline_review_revision"] = revision
     cs = line["pipeline_review"].get("closed_set") or {}
     sem = line["pipeline_review"].get("semantic") or {}
     groups = line.get("number_groups")
     if _structured_divergence(cs, sem, groups):
-        # The stored raw_text may be the messy first-pass text. Backend
-        # contract uses number_groups + multiplier_text, so verify against
-        # the CANONICAL text instead; if that agrees, this is not a real
-        # divergence (the UI already shows the canonical 標準化結果).
-        canonical = _canonical_text(line)
-        current_raw = str(line.get("human_raw_text") or line.get("raw_text") or "")
-        if canonical and canonical != current_raw:
-            tmp = dict(line)
-            # Verification uses the parser's Chinese grammar; digit shorthand
-            # (2X5 / 2/3X1) is translated for THIS internal parse only. The
-            # stored fields and the UI 標準化結果 keep the digit form.
-            tmp["raw_text"] = _canonical_text(line, zh_mult=True)
-            tmp["human_raw_text"] = tmp["raw_text"]
-            rec2 = _reapply_pipeline(tmp, game=game)
-            sem2 = rec2.get("semantic") or {}
-            if not _structured_divergence(cs, sem2, groups):
-                line["pipeline_review"]["semantic"] = sem2
-                line["pipeline_review"]["parse_error"] = rec2.get("parse_error")
-                sem = sem2
-            else:
-                _mark_divergent(line)
-        else:
-            _mark_divergent(line)
+        _mark_divergent(line)
+    # Fail-closed: a partial/invalid multiplier must never be executable.
+    from betguard.vision.multiplier_policy import is_complete_multiplier
+    if line.get("multiplier_text") and not is_complete_multiplier(line.get("multiplier_text")):
+        pr = line["pipeline_review"]
+        pr["decision"]["executable"] = False
+        pr["decision"]["block_reasons"] = ["INCOMPLETE_MULTIPLIER"]
+        pr["checks"]["blocked"] = True
+        pr["checks"]["block_reason"] = "INCOMPLETE_MULTIPLIER"
     return line
 
 

@@ -65,7 +65,7 @@
   function standardizedResultText(line) {
     if (!line) return "";
     const groups = line.number_groups || [];
-    const mult = String(line.multiplier_text || "").trim();
+    const mult = canonicalMultiplierText(line.multiplier_text);
     if (groups.length) {
       const body =
         line.layout_hint === "column_bet"
@@ -74,6 +74,26 @@
       return mult ? `${body} ${mult}` : body;
     }
     return String(line.raw_text || "");
+  }
+
+  // Display-only canonical multiplier: spaces around x/× and / collapsed,
+  // x/× -> X, category order 2/3/4. PURE: never mutates anything.
+  function canonicalMultiplierText(text) {
+    if (!text) return "";
+    const compact = String(text)
+      .trim()
+      .replace(/\s*([xX×])\s*/g, "X")
+      .replace(/\s*\/\s*/g, "/");
+    return compact
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((rule) => {
+        const m = /^([234/]+)X([\d.]+)$/.exec(rule);
+        if (!m) return rule;
+        const cats = Array.from(new Set(m[1].match(/[234]/g) || [])).sort().join("/");
+        return cats + "X" + m[2];
+      })
+      .join(" ");
   }
 
   // Returns {hasCandidates, candidates, merged, displayCandidates, adopted,
@@ -252,5 +272,6 @@
     adoptMultiplierCandidate,
     normalizeCandidate,
     standardizedResultText,
+    canonicalMultiplierText,
   };
 });

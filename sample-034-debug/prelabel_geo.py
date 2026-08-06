@@ -18,6 +18,8 @@ from betguard.vision.multiplier_policy import (  # noqa: E402
     COMPLETE,
     classify_multiplier_token,
     merge_complete_rules,
+    partial_tokens,
+    split_complete_rules,
 )
 from betguard.vision.replay import parse_model_json  # noqa: E402
 from test_combined_bbox import PROMPT, call  # noqa: E402
@@ -386,20 +388,16 @@ def _normal_lines(
         toktxt = " ".join(str(t.get("text") or "") for t in (r.get("tokens") or []) if str(t.get("text") or "") not in ("", " "))
         rules = extract_multiplier_rules(toktxt)
         model_mult = str(r.get("multiplier") or "").strip()
-        partial_tokens: list[str] = []
         if not rules and model_mult:
-            for tok in model_mult.split():
-                if classify_multiplier_token(tok) == COMPLETE:
-                    rules.append(tok)
-                else:
-                    partial_tokens.append(tok)
+            rules = split_complete_rules(model_mult)
+        partial_toks = partial_tokens(model_mult)
         mult = " ".join(merge_complete_rules(rules)) if rules else None
         warnings = []
         uncertain = False
         uncertain_reason = None
         play_mark = None
         fallback_candidate = None
-        if partial_tokens:
+        if partial_toks:
             uncertain = True
             uncertain_reason = "incomplete_multiplier_evidence"
             if "incomplete_multiplier_evidence" not in warnings:
@@ -407,11 +405,11 @@ def _normal_lines(
             fallback_candidate = {
                 "source": "first_pass_model",
                 "rule": "partial_evidence_only",
-                "multiplier_partial_evidence": list(partial_tokens),
+                "multiplier_partial_evidence": list(partial_toks),
                 "evidence": [{
                     "source": "first_pass_model",
                     "rule": "incomplete_multiplier_evidence",
-                    "partial_tokens": list(partial_tokens),
+                    "partial_tokens": list(partial_toks),
                 }],
             }
         toks = [

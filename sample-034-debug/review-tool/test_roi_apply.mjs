@@ -324,4 +324,23 @@ function ok(name) {
   ok("標準化 無 number_groups 時退回 raw_text");
 }
 
+// ---- canonical multiplier display (spaced complete rules) ----
+{
+  assert.equal(R.canonicalMultiplierText("3/4 x 1"), "3/4X1");
+  assert.equal(R.canonicalMultiplierText("2 x 1"), "2X1");
+  assert.equal(R.canonicalMultiplierText("2 x 2 3 x 5"), "2X2 3X5");
+  assert.equal(R.canonicalMultiplierText("4/3 x 1"), "3/4X1");
+  const line = {
+    line_id: "R03-L1",
+    number_groups: [["32", "34", "35"]],
+    multiplier_text: "3 x 5",
+    layout_hint: "normal_row",
+    model_raw_text: "32 . 34 . 35 2 x 2 3 x 5",
+  };
+  const before = JSON.stringify(line);
+  assert.equal(R.standardizedResultText(line), "32 34 35 3X5");
+  assert.equal(JSON.stringify(line), before, "canonical display must not mutate");
+  ok("標準化 spaced complete 倍率顯示 3/4X1/2X1/2X2 3X5、不改資料");
+}
+
 console.log(`\n${passed} tests passed`);

@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from betguard.vision.multiplier_policy import (  # noqa: E402
     COMPLETE,
     classify_multiplier_token,
+    partial_tokens as policy_partial_tokens,
 )
 
 DATASET = Path(os.environ.get("BETGUARD_DATASET", ""))
@@ -155,8 +156,8 @@ def backfill_line(line: dict, v3_rows: list[tuple[list[str], list[str], list[str
             uniq_candidates.append(r)
     stats["candidates"] = uniq_candidates
 
-    partial_tokens = [t for t in v3_raw_tokens if classify_multiplier_token(t) != COMPLETE]
-    stats["partial_tokens"] = partial_tokens
+    partial_toks = policy_partial_tokens(" ".join(v3_raw_tokens))
+    stats["partial_tokens"] = partial_toks
 
     evidence = {
         "source": "v3_prelabel",
@@ -183,9 +184,9 @@ def backfill_line(line: dict, v3_rows: list[tuple[list[str], list[str], list[str
     line["fallback_candidate"] = fallback
 
     warnings = list(line.get("warnings") or [])
-    if partial_tokens:
+    if partial_toks:
         existing_partial = list(fallback.get("multiplier_partial_evidence") or [])
-        for t in partial_tokens:
+        for t in partial_toks:
             if t not in existing_partial:
                 existing_partial.append(t)
         fallback["multiplier_partial_evidence"] = existing_partial

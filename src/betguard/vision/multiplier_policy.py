@@ -146,3 +146,14 @@ def split_complete_rules(text: str | None) -> list[str]:
 def _compact_rules(text: str) -> str:
     """Collapse spacing around / and x/× so "3 / 4 x 1" -> "3/4X1"."""
     return re.sub(r"\s*/\s*", "/", re.sub(r"\s*([xX×])\s*", "X", text.strip()))
+
+
+def partial_tokens(text: str | None) -> list[str]:
+    """Partial/invalid tokens AFTER normalization.
+
+    "3/4 x 1" / "2 x 1" / "2 x 2 3 x 5" are COMPLETE and return [];
+    "2", "2/3", "4/3", "X1", "23 x 35" return the offending token(s).
+    """
+    if not text or not str(text).strip():
+        return []
+    return [t for t in _compact_rules(str(text)).split() if classify_multiplier_token(t) != COMPLETE]
