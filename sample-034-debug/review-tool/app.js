@@ -405,6 +405,7 @@ function renderLineCard(line, region) {
     ${cropImg}
     <div class="row"><label>人工修正原文</label><input type="text" class="f-human" value="${esc(line.human_raw_text ?? "")}"></div>
     <div class="row"><label>倍率</label><input type="text" class="f-mult" value="${esc(line.multiplier_text || "")}"></div>
+    ${ROILogic.multiplierCandidatesHtml(line)}
     <div class="row"><label>版面類型</label>
       <select class="f-layout">
         ${[["normal_row", "一般行"], ["number_set", "括號號碼組"], ["shared_multiplier", "共用倍率"], ["column_bet", "柱碰"]]

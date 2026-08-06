@@ -41,6 +41,60 @@
     return MULT_RE.test(raw) ? raw : null;
   }
 
+  function escHtml(s) {
+    return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  function normRuleText(r) {
+    return String(r || "").replace(/\s+/g, "").replace(/[x×]/g, "X");
+  }
+
+  function ruleParts(rule) {
+    const m = /^([234/]+)X(\d+(?:\.\d+)?)$/.exec(normRuleText(rule));
+    if (!m) return null;
+    return { cats: m[1].match(/[234]/g) || [], value: m[2] };
+  }
+
+  // Returns {hasCandidates, candidates, hint}. PURE: never mutates line.
+  function multiplierCandidatesInfo(line) {
+    const fb = line && line.fallback_candidate;
+    const candidates = Array.isArray(fb && fb.multiplier_candidates)
+      ? fb.multiplier_candidates.map((c) => String(c).trim()).filter(Boolean)
+      : [];
+    let hint = null;
+    if (candidates.length) {
+      const currentRules = String(line.multiplier_text || "").split(/\s+/).filter(Boolean);
+      for (const cand of candidates) {
+        const cp = ruleParts(cand);
+        if (!cp) continue;
+        const cats = new Set(cp.cats);
+        for (const r of currentRules) {
+          const p = ruleParts(r);
+          if (p && p.value === cp.value) p.cats.forEach((c) => cats.add(c));
+        }
+        if (cats.size >= 2) {
+          hint = `可能為 ${Array.from(cats).sort().join("/")}X${cp.value}，請依圖片確認`;
+          break;
+        }
+      }
+    }
+    return { hasCandidates: candidates.length > 0, candidates, hint };
+  }
+
+  // Display-only HTML; returns "" when there is nothing to show.
+  function multiplierCandidatesHtml(line) {
+    const info = multiplierCandidatesInfo(line);
+    if (!info.hasCandidates) return "";
+    const items = info.candidates.map((c) => `<li>${escHtml(c)}</li>`).join("");
+    return (
+      '<div class="mult-candidates"><b>倍率候選（需人工確認）</b><ul>' +
+      items +
+      "</ul>" +
+      (info.hint ? `<div class="mult-hint">${escHtml(info.hint)}</div>` : "") +
+      "</div>"
+    );
+  }
+
   // Returns {ok, missing[], digits, multiplier, playText, fullText}.
   function canApplyRoi(pm) {
     const missing = [];
@@ -102,5 +156,5 @@
     return { ok: true, idempotent: false, edit, missing: [], error: null };
   }
 
-  return { roiDigits, playText, canApplyRoi, applyRoiToLine, ZH };
+  return { roiDigits, playText, canApplyRoi, applyRoiToLine, ZH, multiplierCandidatesInfo, multiplierCandidatesHtml };
 });

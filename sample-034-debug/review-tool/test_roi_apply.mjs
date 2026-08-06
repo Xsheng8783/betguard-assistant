@@ -139,4 +139,71 @@ function ok(name) {
   ok("額外 柱碰 human_raw_text 用 / 分欄");
 }
 
+// ---- multiplier candidates display (display-only, no mutation) ----
+{
+  const line = {
+    line_id: "R02-L1",
+    multiplier_text: "2X1",
+    review_action: "pending",
+    fallback_candidate: { multiplier_candidates: ["3X1"] },
+  };
+  const before = JSON.stringify(line);
+  const info = R.multiplierCandidatesInfo(line);
+  assert.equal(info.hasCandidates, true);
+  assert.deepEqual(info.candidates, ["3X1"]);
+  assert.equal(info.hint, "可能為 2/3X1，請依圖片確認");
+  const html = R.multiplierCandidatesHtml(line);
+  assert.ok(html.includes("倍率候選（需人工確認）"), "R02: block title shown");
+  assert.ok(html.includes("3X1"), "R02: candidate shown");
+  assert.ok(html.includes("可能為 2/3X1，請依圖片確認"), "R02: merged hint shown");
+  assert.equal(JSON.stringify(line), before, "R02: display must not mutate line");
+  assert.equal(line.review_action, "pending", "R02: review_action unchanged");
+  ok("候選 R02 顯示 3X1 與「可能為 2/3X1」提示、不改資料");
+}
+
+{
+  const line = {
+    line_id: "R05-L1",
+    multiplier_text: "3X1",
+    review_action: "pending",
+    fallback_candidate: { multiplier_candidates: ["3/4X1"] },
+  };
+  const before = JSON.stringify(line);
+  const info = R.multiplierCandidatesInfo(line);
+  assert.deepEqual(info.candidates, ["3/4X1"]);
+  assert.equal(info.hint, "可能為 3/4X1，請依圖片確認");
+  const html = R.multiplierCandidatesHtml(line);
+  assert.ok(html.includes("3/4X1"), "R05: candidate shown");
+  assert.equal(JSON.stringify(line), before, "R05: display must not mutate line");
+  assert.equal(line.review_action, "pending", "R05: review_action unchanged");
+  ok("候選 R05 顯示 3/4X1、不改資料");
+}
+
+{
+  const noFb = { line_id: "R03-L1", multiplier_text: "2X1", review_action: "pending" };
+  assert.equal(R.multiplierCandidatesInfo(noFb).hasCandidates, false);
+  assert.equal(R.multiplierCandidatesHtml(noFb), "");
+  const emptyFb = { line_id: "R03-L1", multiplier_text: "2X1", fallback_candidate: { multiplier_candidates: [] } };
+  assert.equal(R.multiplierCandidatesInfo(emptyFb).hasCandidates, false);
+  assert.equal(R.multiplierCandidatesHtml(emptyFb), "");
+  ok("候選 無 fallback_candidate／空陣列→不顯示區塊");
+}
+
+{
+  const line = {
+    line_id: "R07-L1",
+    multiplier_text: null,
+    review_action: "pending",
+    fallback_candidate: { multiplier_candidates: ["3/4X1"] },
+  };
+  const before = JSON.stringify(line);
+  const info = R.multiplierCandidatesInfo(line);
+  assert.equal(info.hasCandidates, true);
+  assert.deepEqual(info.candidates, ["3/4X1"]);
+  assert.equal(info.hint, "可能為 3/4X1，請依圖片確認");
+  assert.ok(R.multiplierCandidatesHtml(line).includes("3/4X1"));
+  assert.equal(JSON.stringify(line), before);
+  ok("候選 只有 candidates（目前倍率空白）仍正常顯示");
+}
+
 console.log(`\n${passed} tests passed`);
