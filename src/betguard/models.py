@@ -34,6 +34,9 @@ class ParsedBet:
     columns: list[list[int]] = field(default_factory=list)
     number: int | None = None
     car_units: JsonNumber | None = None
+    executable: bool = True
+    supported: bool = True
+    block_reason: str | None = None
     parse_errors: list[str] = field(default_factory=list)
     original_text: str = ""
     normalized_text: str = ""
@@ -97,6 +100,11 @@ class BetReport:
                 star: amount.to_dict()
                 for star, amount in self.bet.bets.items()
             }
+        if not self.bet.supported or not self.bet.executable:
+            data["supported"] = self.bet.supported
+            data["executable"] = self.bet.executable
+            if self.bet.block_reason:
+                data["block_reason"] = self.bet.block_reason
         self._add_parser_metadata(data)
         return data
 

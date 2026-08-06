@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>M1-A 牌單人工審核工具</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <h1>M1-A 牌單人工審核工具</h1>
+    <div id="status" class="status"></div>
+  </header>
+  <main>
+    <aside id="sidebar">
+      <h2>樣本</h2>
+      <ul id="sample-list"></ul>
+      <div class="filters">
+        <h2>篩選</h2>
+        <label><input type="checkbox" data-filter="uncertain"> 不確定</label>
+        <label><input type="checkbox" data-filter="shared"> 共用倍率</label>
+        <label><input type="checkbox" data-filter="car_bet"> 車玩法</label>
+        <label><input type="checkbox" data-filter="column_bet"> 柱碰</label>
+        <label><input type="checkbox" data-filter="legacy"> 出現「=」</label>
+        <label><input type="checkbox" data-filter="ambiguous"> 二三/23 位置歧義</label>
+        <label><input type="checkbox" data-filter="unsupported"> 未支援玩法</label>
+      </div>
+    </aside>
+    <section id="viewer">
+      <div class="viewer-tools">
+        <span id="img-label">原圖</span>
+        <button id="zoom-in">＋</button>
+        <button id="zoom-out">－</button>
+        <button id="zoom-fit">適合</button>
+        <button data-pos="left">左</button>
+        <button data-pos="center">中</button>
+        <button data-pos="right">右</button>
+        <button data-pos="bottom">底</button>
+      </div>
+      <div id="viewer-canvas">
+        <img id="review-img" alt="牌單原圖">
+      </div>
+      <div id="known-issues"></div>
+    </section>
+    <section id="editor">
+      <div id="editor-head">
+        <h2 id="editor-title">尚未選取樣本</h2>
+        <span id="progress-label"></span>
+        <input id="reviewer-name" placeholder="審核人姓名（完成本張時使用）">
+        <button id="btn-save">儲存</button>
+        <button id="btn-complete" class="danger">完成本張人工審核</button>
+      </div>
+      <div id="hint" class="hint">
+        口訣：<b>看得清楚就「確認本行正確」；看不清楚就勾「不確定」，不要猜。</b><br>
+        行號說明：R01-L1 ＝ 第1區第1行（R＝區塊、L＝行）。區塊位置若顯示「未知」，請對照原圖判斷是哪一欄。
+      </div>
+      <div id="editor-body"></div>
+    </section>
+  </main>
+  <script src="/roi_logic.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -11,9 +11,11 @@ from betguard.vision.closed_set import (
     normalize_text,
     normalize_token,
     normalize_whitespace,
+    parse_multi_category_shared,
     parse_multiplier_text,
     parse_paren_number_set,
     parse_shared_multiplier,
+    parse_tail_expansion,
     validate_group_structure,
     validate_label,
     validate_layout,
@@ -21,6 +23,7 @@ from betguard.vision.closed_set import (
     validate_multiplier,
     validate_number_token,
     validate_scope,
+    validate_tail_expansion,
 )
 
 
@@ -100,13 +103,17 @@ class TestValidateNumberToken:
 
     def test_single_digit_canonical(self):
         tv = validate_number_token("5")
-        assert tv.canonical == "05"
+        # single digits are kept as written (no auto-padding)
+        assert tv.canonical == "5"
 
     def test_39_valid(self):
         assert validate_number_token("39").issues == []
 
-    def test_40_rejected(self):
-        tv = validate_number_token("40")
+    def test_49_valid_mark_six(self):
+        assert validate_number_token("49").issues == []
+
+    def test_50_rejected(self):
+        tv = validate_number_token("50")
         assert ClosedSetIssue.INVALID_NUMBER_RANGE.value in tv.issues
         assert tv.requires_human_confirmation is True
 
@@ -170,6 +177,9 @@ class TestValidateMultiplier:
     def test_multiple_multipliers_legal(self):
         assert validate_multiplier("三×0.5 四×3") == []
 
+    def test_compound_multiplier_no_space_legal(self):
+        assert validate_multiplier("三×0.5四×3") == []
+
     def test_shared_multiplier_marker_legal(self):
         assert validate_multiplier("三×0.3") == []
 
@@ -229,8 +239,8 @@ class TestValidateLine:
 
     def test_out_of_range_flags(self):
         v = validate_line(
-            number_groups=[["40"]], multiplier_text="×1",
-            raw_text="40 ×1", layout_hint="normal_like", uncertain=False,
+            number_groups=[["50"]], multiplier_text="×1",
+            raw_text="50 ×1", layout_hint="normal_like", uncertain=False,
         )
         assert v["needs_human_confirmation"] is True
         assert ClosedSetIssue.INVALID_NUMBER_RANGE.value in v["issues"]
@@ -259,8 +269,8 @@ class TestValidateLine:
 
     def test_token_validations_attached(self):
         v = validate_line(
-            number_groups=[["05", "40"]], multiplier_text="×1",
-            raw_text="05 40 ×1", layout_hint="normal_like", uncertain=False,
+            number_groups=[["05", "50"]], multiplier_text="×1",
+            raw_text="05 50 ×1", layout_hint="normal_like", uncertain=False,
         )
         assert len(v["token_validations"]) == 2
         assert v["token_validations"][0]["canonical"] == "05"
@@ -323,18 +333,33 @@ class TestV2Semantics:
 
     def test_parse_shared_multiplier(self):
         r = parse_shared_multiplier("各=三×0.3")
-        assert r == {"category": "三", "value_text": "0.3", "scope": "all_groups_in_region"}
+        assert r == {"multipliers": [{"category": "三", "value_text": "0.3"}], "scope": "all_groups_in_region"}
 
-    def test_parse_shared_multiplier_no_equals_rejected(self):
-        # '=' is required; 各三×0.3 without it is ambiguous
-        assert parse_shared_multiplier("各三×0.3") is None
+    def test_parse_shared_multiplier_no_equals(self):
+        # real slips have no '=': 各三×0.3 is the canonical V2 form
+        r = parse_shared_multiplier("各三×0.3")
+        assert r == {"multipliers": [{"category": "三", "value_text": "0.3"}], "scope": "all_groups_in_region"}
+
+    def test_parse_shared_multiplier_ge_two_three(self):
+        r = parse_shared_multiplier("各二三×0.5")
+        assert r["multipliers"] == [
+            {"category": "二", "value_text": "0.5"},
+            {"category": "三", "value_text": "0.5"},
+        ]
+        assert r["scope"] == "all_groups_in_region"
+
+    def test_parse_multiplier_compound_no_space(self):
+        assert parse_multiplier_text("三×0.5四×3") == [
+            {"category": "三", "value_text": "0.5"},
+            {"category": "四", "value_text": "3"},
+        ]
 
     def test_parse_shared_multiplier_rejects_plain(self):
         assert parse_shared_multiplier("三×0.3") is None
 
     def test_parse_shared_multiplier_fullwidth(self):
         r = parse_shared_multiplier("各＝三×0.3")
-        assert r is not None and r["value_text"] == "0.3"
+        assert r is not None and r["multipliers"][0]["value_text"] == "0.3"
 
     def test_scope_validation(self):
         assert validate_scope("current_group") == []
@@ -386,7 +411,8 @@ class TestContextValidation:
         assert parse_paren_number_set("()") is None
 
     def test_shared_multiplier_missing_parts_rejected(self):
-        assert parse_shared_multiplier("各三×0.3") is None  # missing =
+        assert parse_shared_multiplier("各三0.3") is None  # missing ×
+        assert parse_shared_multiplier("各×0.3") is None  # missing category
         assert parse_shared_multiplier("各=×0.3") is None   # missing category
         assert parse_shared_multiplier("各=三0.3") is None   # missing ×
         assert parse_shared_multiplier("各=三×.3") is None   # leading dot
@@ -479,3 +505,157 @@ class TestConfirmationInvariant:
         )
         self._assert_invariant(v)
         assert "ambiguous_symbol" in v["issues"]
+
+
+class TestMultiCategoryShared:
+    """二三x0.3 — multi-category shared multiplier (user-confirmed syntax)."""
+
+    def test_normalize_lowercase_x(self):
+        assert normalize_text("二三x0.3") == "二三×0.3"
+
+    def test_normalize_uppercase_x(self):
+        assert normalize_text("二三X0.3") == "二三×0.3"
+
+    def test_normalize_already_multiply(self):
+        assert normalize_text("二三×0.3") == "二三×0.3"
+
+    def test_star_not_normalized(self):
+        assert normalize_text("二三*0.3") != "二三×0.3"
+
+    def test_parse_multiplier_text_expands(self):
+        assert parse_multiplier_text("二三x0.3") == [
+            {"category": "二", "value_text": "0.3"},
+            {"category": "三", "value_text": "0.3"},
+        ]
+
+    def test_parse_er_si_x1(self):
+        assert parse_multiplier_text("二四X1") == [
+            {"category": "二", "value_text": "1"},
+            {"category": "四", "value_text": "1"},
+        ]
+
+    def test_parse_san_si_x05(self):
+        assert parse_multiplier_text("三四x0.5") == [
+            {"category": "三", "value_text": "0.5"},
+            {"category": "四", "value_text": "0.5"},
+        ]
+
+    def test_parse_full_three(self):
+        assert parse_multiplier_text("二三四x0.2") == [
+            {"category": "二", "value_text": "0.2"},
+            {"category": "三", "value_text": "0.2"},
+            {"category": "四", "value_text": "0.2"},
+        ]
+
+    def test_duplicate_category_rejected(self):
+        assert parse_multiplier_text("二二x0.3") == []
+        assert validate_multiplier("二二x0.3") != []
+
+    def test_illegal_category_rejected(self):
+        assert parse_multiplier_text("二五x0.3") == []
+
+    def test_missing_category_rejected(self):
+        assert parse_multiplier_text("x0.3") == [{"category": None, "value_text": "0.3"}]
+        # bare x0.3 as shared requires category — multi-category parser rejects
+        assert parse_multi_category_shared("x0.3") is None
+
+    def test_missing_multiply_rejected(self):
+        assert parse_multi_category_shared("二三0.3") is None
+
+    def test_missing_value_rejected(self):
+        assert parse_multi_category_shared("二三x") is None
+        assert parse_multi_category_shared("二三x.") is None
+
+    def test_invalid_decimal_rejected(self):
+        assert parse_multi_category_shared("二三x.3") is None
+        assert parse_multi_category_shared("二三x0.") is None
+        assert parse_multi_category_shared("二三x0.3.2") is None
+        assert parse_multi_category_shared("二三x-0.3") is None
+        assert parse_multi_category_shared("二三x3e-1") is None
+
+    def test_star_or_ge_mixed_rejected(self):
+        assert parse_multi_category_shared("二三*x0.3") is None
+        assert parse_multi_category_shared("二三各x0.3") is None
+
+    def test_legal_x_no_disallowed(self):
+        v = validate_line(
+            number_groups=[], multiplier_text=None, raw_text="二三x0.3",
+            layout_hint="unknown", uncertain=False, region_bound=False,
+        )
+        assert "disallowed_character" not in v["issues"]
+        assert "ambiguous_symbol" not in v["issues"]
+        assert v["semantics"]["layout"] == "shared_multiplier"
+        assert v["semantics"]["scope"] == "unresolved_region"
+
+    def test_legal_x_uppercase_no_disallowed(self):
+        v = validate_line(
+            number_groups=[], multiplier_text=None, raw_text="二三X0.3",
+            layout_hint="unknown", uncertain=False, region_bound=False,
+        )
+        assert "disallowed_character" not in v["issues"]
+        assert v["semantics"]["multipliers"] == [
+            {"category": "二", "value_text": "0.3"},
+            {"category": "三", "value_text": "0.3"},
+        ]
+
+    def test_bound_scope_current_group_without_ge(self):
+        v = validate_line(
+            number_groups=[], multiplier_text=None, raw_text="二三x0.3",
+            layout_hint="unknown", uncertain=False, region_bound=True,
+        )
+        assert v["semantics"]["scope"] == "current_group"
+
+    def test_ge_equals_still_works(self):
+        v = validate_line(
+            number_groups=[], multiplier_text=None, raw_text="各=三×0.3",
+            layout_hint="unknown", uncertain=False, region_bound=False,
+        )
+        assert v["semantics"]["layout"] == "shared_multiplier"
+        assert v["semantics"]["multipliers"] == [{"category": "三", "value_text": "0.3"}]
+        assert v["semantics"]["scope"] == "unresolved_region"
+
+    def test_number_set_still_works(self):
+        v = validate_line(
+            number_groups=[["12", "18", "20", "23"]], multiplier_text="三×0.5 四×3",
+            raw_text="(12.18.20.23) 三×0.5 四×3", layout_hint="normal_like",
+            uncertain=False,
+        )
+        assert v["semantics"]["layout"] == "number_set"
+        assert v["semantics"]["multipliers"] == [
+            {"category": "三", "value_text": "0.5"},
+            {"category": "四", "value_text": "3"},
+        ]
+
+
+class TestTailExpansion:
+    """13X24X8尾 → 13/24/08 18 28 38 (tail-digit expansion)."""
+
+    def test_full_example(self):
+        assert parse_tail_expansion("13X24X8尾") == ["13", "24", "08", "18", "28", "38"]
+
+    def test_full_example_with_multiplier(self):
+        assert parse_tail_expansion("13X24X8尾 二三X1") == ["13", "24", "08", "18", "28", "38"]
+
+    def test_bare_tail(self):
+        assert parse_tail_expansion("X8尾") == ["08", "18", "28", "38"]
+
+    def test_tail_zero(self):
+        assert parse_tail_expansion("X0尾") == ["10", "20", "30"]
+
+    def test_tail_nine_with_multiplier(self):
+        assert parse_tail_expansion("X9尾 四X3") == ["09", "19", "29", "39"]
+
+    def test_no_x_prefix(self):
+        assert parse_tail_expansion("8尾") == ["08", "18", "28", "38"]
+
+    def test_unknown_token_kept(self):
+        r = parse_tail_expansion("1?X24X8尾")
+        assert r is not None and "1?" in r
+
+    def test_invalid_tail_ambiguous(self):
+        assert validate_tail_expansion("尾") != []
+        assert parse_tail_expansion("13X24X8尾 垃圾") is None
+        assert parse_tail_expansion("13X尾") is None
+
+    def test_normalize_x_forms(self):
+        assert parse_tail_expansion("13X24X8尾") == parse_tail_expansion("13x24x8尾")

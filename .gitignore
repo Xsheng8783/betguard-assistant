@@ -43,6 +43,12 @@ site_profile*.json
 fill_plan*.json
 amount_summary.txt
 
+# Local backup / debug artifacts
+*.bak*
+sample-034-debug/**/*.png
+sample-034-debug/**/*.jpg
+sample-034-debug/**/*.jpeg
+
 # Local workbench artifacts (created by `python -m betguard.webui.app`)
 runs/
 dist/

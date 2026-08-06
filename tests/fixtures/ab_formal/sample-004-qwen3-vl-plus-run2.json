@@ -1,0 +1,21 @@
+{
+ "model": "qwen3-vl-plus",
+ "prompt_version": "v2",
+ "raw_output": "{\n  \"sections\": [\n    {\n      \"rows\": [\n        {\n          \"raw_text\": \"15.25\",\n          \"numbers\": [\"15\", \"25\"],\n          \"multiplier\": null,\n          \"layout_hint\": \"normal_row\",\n          \"play_type\": null\n        }\n      ],\n      \"shared_multiplier\": \"各1.5車\"\n    },\n    {\n      \"rows\": [\n        {\n          \"raw_text\": \"04×30×39\\n23×49\",\n          \"numbers\": [[\"04\"], [\"30\"], [\"39\"], [\"23\"], [\"49\"]],\n          \"multiplier\": null,\n          \"layout_hint\": \"column_bet\",\n          \"play_type\": null\n        }\n      ],\n      \"shared_multiplier\": \"2.3×1\"\n    },\n    {\n      \"rows\": [\n        {\n          \"raw_text\": \"05×08 10\\n09×20\\n23>9\",\n          \"numbers\": [[\"05\"], [\"08\", \"10\"], [\"09\"], [\"20\"], [\"23\"]],\n          \"multiplier\": null,\n          \"layout_hint\": \"column_bet\",\n          \"play_type\": null\n        }\n      ],\n      \"shared_multiplier\": \"2.3×0.5\"\n    },\n    {\n      \"rows\": [\n        {\n          \"raw_text\": \"36×15×11×29\\n25×47×40\",\n          \"numbers\": [[\"36\"], [\"15\"], [\"11\"], [\"29\"], [\"25\"], [\"47\"], [\"40\"]],\n          \"multiplier\": null,\n          \"layout_hint\": \"column_bet\",\n          \"play_type\": null\n        }\n      ],\n      \"shared_multiplier\": \"2.3.4×0.5\"\n    },\n    {\n      \"rows\": [\n        {\n          \"raw_text\": \"36×47×15×11\\n25×41\",\n          \"numbers\": [[\"36\"], [\"47\"], [\"15\"], [\"11\"], [\"25\"], [\"41\"]],\n          \"multiplier\": null,\n          \"layout_hint\": \"column_bet\",\n          \"play_type\": null\n        }\n      ],\n      \"shared_multiplier\": \"2.3.4×1\"\n    },\n    {\n      \"rows\": [\n        {\n          \"raw_text\": \"15×11×29×23\\n25×41×40×1\",\n          \"numbers\": [[\"15\"], [\"11\"], [\"29\"], [\"23\"], [\"25\"], [\"41\"], [\"40\"], [\"01\"]],\n          \"multiplier\": null,\n          \"layout_hint\": \"column_bet\",\n          \"play_type\": null\n        }\n      ],\n      \"shared_multiplier\": null\n    },\n    {\n      \"rows\": [\n        {\n          \"raw_text\": \"14×29×40×23×0.5\\n35×45×46\",\n          \"numbers\": [[\"14\"], [\"29\"], [\"40\"], [\"23\"], [\"35\"], [\"45\"], [\"46\"]],\n          \"multiplier\": \"0.5\",\n          \"layout_hint\": \"column_bet\",\n          \"play_type\": null\n        }\n      ],\n      \"shared_multiplier\": null\n    },\n    {\n      \"rows\": [\n        {\n          \"raw_text\": \"16 27 35 23\\n01×09×15×05\",\n          \"numbers\": [[\"16\"], [\"27\"], [\"35\"], [\"23\"], [\"01\"], [\"09\"], [\"15\"], [\"05\"]],\n          \"multiplier\": null,\n          \"layout_hint\": \"column_bet\",\n          \"play_type\": null\n        }\n      ],\n      \"shared_multiplier\": null\n    },\n    {\n      \"rows\": [\n        {\n          \"raw_text\": \"01 06 13 15 37 ×0.5\",\n          \"numbers\": [\"01\", \"06\", \"13\", \"15\", \"37\"],\n          \"multiplier\": \"0.5\",\n          \"layout_hint\": \"normal_row\",\n          \"play_type\": null\n        }\n      ],\n      \"shared_multiplier\": \"2.3.4\"\n    }\n  ]\n}",
+ "meta": {
+  "usage": {
+   "prompt_tokens": 1515,
+   "completion_tokens": 936,
+   "total_tokens": 2451,
+   "prompt_tokens_details": {
+    "image_tokens": 882,
+    "text_tokens": 633
+   },
+   "completion_tokens_details": {
+    "text_tokens": 936
+   }
+  },
+  "latency_s": 16.6,
+  "cost_usd": 0.00156
+ }
+}

@@ -47,7 +47,7 @@ ALLOWED_IMAGE_DETAILS = frozenset({"low", "high", "auto"})
 # contains only digits, Chinese 二/三/四/各, the fixed × token, the number-set
 # separators . ( ), the shared-multiplier marker =, and whitespace. English
 # letters and other punctuation never appear.
-BET_SLIP_TEXT_PATTERN = r"^[0-9?二三四各×.=() 　]*$"
+BET_SLIP_TEXT_PATTERN = r"^[0-9?二三四各尾×.=() 　]*$"
 _BET_SLIP_TEXT_RE = re.compile(BET_SLIP_TEXT_PATTERN)
 _NUMBER_GROUP_TOKEN_RE = re.compile(r"^[0-9?]{1,2}$")
 
@@ -271,6 +271,10 @@ def build_prompt(document_mode: str = "auto") -> str:
         "a border, heading, blank gap, or unrelated section. When the region a shared "
         "multiplier controls cannot be determined, set scope=unresolved_region and "
         "uncertain=true. "
+        "A bare multi-category multiplier such as 二三×0.3 (the user writes 二三x0.3; "
+        "transcribe it as 二三×0.3) means BOTH 二 and 三 share multiplier 0.3 — emit "
+        "it verbatim as 二三×0.3, never rewrite it as 各=三×0.3, never drop either "
+        "category, and never split it into separate lines. "
         "A multi-column arrangement "
         "connected visually by × marks and followed by one shared star/multiplier is one "
         "column_like entry with one inner list per visible column. "

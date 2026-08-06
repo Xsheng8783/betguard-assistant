@@ -37,10 +37,10 @@ ALLOWED_DIGITS = frozenset("0123456789")
 ALLOWED_CHINESE = frozenset("二三四各")
 ALLOWED_SYMBOLS = frozenset("×.=()")
 ALLOWED_TOKEN_CHARS = ALLOWED_DIGITS | ALLOWED_CHINESE | ALLOWED_SYMBOLS
-ALLOWED_RAW_TEXT_CHARS = ALLOWED_TOKEN_CHARS | frozenset("? ")  # ? = unknown marker
+ALLOWED_RAW_TEXT_CHARS = ALLOWED_TOKEN_CHARS | frozenset("? ¾⅔")  # ¾/⅔ = stacked-category glyphs
 
 LOTTERY_NUMBER_MIN = 1
-LOTTERY_NUMBER_MAX = 39  # matches parser.py (1-39); never widen/narrow independently
+LOTTERY_NUMBER_MAX = 49  # 539 (01-39) or 六合彩 (01-49); per-region game_context refines later
 
 _FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
 _FULLWIDTH_PARENS = str.maketrans("（）", "()")
@@ -82,6 +82,7 @@ class ClosedSetIssue(str, Enum):
     UNKNOWN_TOKEN = "unknown_token"
     LAYOUT_UNCERTAIN = "layout_uncertain"
     GROUP_STRUCTURE_UNCERTAIN = "group_structure_uncertain"
+    LEGACY_OR_HALLUCINATED_EQUALS = "legacy_or_hallucinated_equals"
 
 
 # ── Normalizer ───────────────────────────────────────────────────────────────
@@ -185,8 +186,8 @@ class TokenValidation:
 
 
 def _canonical_two_digit(token: str) -> str:
-    n = int(token)
-    return f"{n:02d}"
+    # Single digits are kept AS WRITTEN (no auto-padding): 5 stays 5.
+    return token
 
 
 def validate_number_token(token: str) -> TokenValidation:
@@ -248,8 +249,12 @@ def validate_multiplier(text: str | None) -> list[str]:
         return [ClosedSetIssue.UNKNOWN_TOKEN.value]
     # category? × value  (value = integer or integer.decimal)
     if re.fullmatch(r"(?:[二三四]{1,3})?\s*×?\s*\d+(?:\.\d+)?", t):
+        # duplicate category chars (二二×1) are ambiguous
+        m = re.fullmatch(r"([二三四]{2,3})\s*×\s*\d+(?:\.\d+)?", t)
+        if m and len(set(m.group(1))) != len(m.group(1)):
+            return [ClosedSetIssue.AMBIGUOUS_SYMBOL.value]
         return []
-    if re.fullmatch(r"[二三四]{1,3}\s*×\s*\d+(?:\.\d+)?(?:\s+[二三四]{1,3}\s*×\s*\d+(?:\.\d+)?)*", t):
+    if re.fullmatch(r"[二三四]{1,3}\s*×\s*\d+(?:\.\d+)?(?:\s*[二三四]{1,3}\s*×\s*\d+(?:\.\d+)?)*", t):
         return []  # multiple multipliers on one number set
     if re.search(r"[A-Za-z]", t):
         return [ClosedSetIssue.DISALLOWED_CHARACTER.value]
@@ -262,9 +267,11 @@ def parse_multiplier_text(text: str | None) -> list[dict[str, Any]]:
     Examples:
       三×0.5        → [{"category": "三", "value_text": "0.5"}]
       四×3          → [{"category": "四", "value_text": "3"}]
-      二三×1        → [{"category": "二三", "value_text": "1"}]
+      二三×1        → [{"category": "二", "value_text": "1"},
+                       {"category": "三", "value_text": "1"}]   (multi-category shared)
       三×0.5 四×3   → two entries
       ×1            → [{"category": None, "value_text": "1"}]
+    Duplicate categories (二二×1) → [] (caller decides uncertainty).
     Unparseable → [] (caller decides uncertainty).
     """
     if not text:
@@ -272,7 +279,15 @@ def parse_multiplier_text(text: str | None) -> list[dict[str, Any]]:
     t = normalize_text(text)
     if not t or "?" in t:
         return []
-    parts = re.split(r"\s+", t.strip())
+    # Compound multipliers may be written WITHOUT spaces: 三×0.5四×3
+    matches = list(MULTIPLIER_PATTERN.finditer(t))
+    contiguous = (
+        len(matches) >= 2
+        and matches[0].start() == 0
+        and matches[-1].end() == len(t)
+        and all(matches[i].end() == matches[i + 1].start() for i in range(len(matches) - 1))
+    )
+    parts = [m.group(0) for m in matches] if contiguous else re.split(r"\s+", t.strip())
     result: list[dict[str, Any]] = []
     for part in parts:
         m = MULTIPLIER_PATTERN.fullmatch(part) or re.fullmatch(r"×?\s*(?P<value>\d+(?:\.\d+)?)", part)
@@ -282,8 +297,60 @@ def parse_multiplier_text(text: str | None) -> list[dict[str, Any]]:
         value_text = m.group("value")
         if not VALID_MULTIPLIER_VALUE.fullmatch(value_text):
             return []
-        result.append({"category": category, "value_text": value_text})
+        if category is None:
+            result.append({"category": None, "value_text": value_text})
+            continue
+        # multi-category shared multiplier: 二三×0.3 → 二×0.3 + 三×0.3
+        chars = list(category)
+        if len(set(chars)) != len(chars):
+            return []  # duplicate category (二二×1) is ambiguous
+        for ch in chars:
+            result.append({"category": ch, "value_text": value_text})
     return result
+
+
+def parse_tail_expansion(text: str) -> list[str] | None:
+    """Parse 13X24X8尾 (optionally followed by a multiplier) into numbers.
+
+    The X<N>尾 pattern means "all numbers in 01-39 whose last digit is N"
+    (e.g. X8尾 → 08, 18, 28, 38). Explicit numbers are kept as-is. A
+    trailing multiplier (e.g. "13X24X8尾 二三X1") is validated but NOT
+    included in the returned numbers. Returns None when the text is not a
+    valid tail-expansion expression.
+    """
+    t = normalize_text(text)
+    m = re.match(
+        r"(?P<explicit>(?:[0-9?]{2}\s*[×Xx]\s*)*)(?:[×Xx]\s*)?(?P<tail>[0-9])\s*尾",
+        t,
+    )
+    if m is None:
+        return None
+    rest = t[m.end():].strip()
+    if rest and not parse_multiplier_text(rest):
+        return None  # trailing content must be a legal multiplier
+    result: list[str] = []
+    explicit_part = m.group("explicit")
+    if explicit_part:
+        for token in re.split(r"\s*×\s*", explicit_part.strip()):
+            if re.fullmatch(r"[0-9?]{2}", token):
+                result.append(token)
+    tail_digit = m.group("tail")
+    for n in range(1, 40):
+        if str(n % 10) == tail_digit:
+            result.append(f"{n:02d}")
+    return result or None
+
+
+def validate_tail_expansion(text: str) -> list[str]:
+    """Issues for tail-expansion syntax; [] when legal or not a tail expr."""
+    if "尾" not in text:
+        return []
+    expanded = parse_tail_expansion(text)
+    if expanded is None:
+        return [ClosedSetIssue.AMBIGUOUS_SYMBOL.value]
+    if any("?" in token for token in expanded):
+        return [ClosedSetIssue.UNKNOWN_TOKEN.value]
+    return []
 
 
 def parse_paren_number_set(text: str) -> list[str] | None:
@@ -314,21 +381,53 @@ def parse_paren_number_set(text: str) -> list[str] | None:
 def parse_shared_multiplier(text: str) -> dict[str, Any] | None:
     """Parse 各=三×0.3 into a shared multiplier semantic.
 
-    The '=' marker is REQUIRED (各三×0.3 without '=' is rejected as
-    ambiguous). Returns {"category", "value_text", "scope":
-    "all_groups_in_region"} or None when not a valid shared-multiplier
-    marker. Scope is all_groups_in_region only when the region is actually
-    known; the caller must downgrade to unresolved_region when the region
-    boundary is not yet established.
+    Real slips have NO '='; 各三×0.3 is the canonical V2 form and 各=三×0.3
+    is accepted as legacy. Returns {"multipliers": [{category, value_text}, ...],
+    "scope": "all_groups_in_region"} or None when not a valid
+    shared-multiplier marker. Scope is all_groups_in_region only when the
+    region is actually known; the caller must downgrade to
+    unresolved_region when the region boundary is not yet established.
     """
     t = normalize_text(text)
-    m = re.fullmatch(r"各\s*=\s*(?P<category>[二三四]{1,3})\s*×\s*(?P<value>\d+(?:\.\d+)?)", t)
+    m = re.fullmatch(r"各\s*=?\s*(?P<category>[二三四]{1,3})\s*×\s*(?P<value>\d+(?:\.\d+)?)", t)
     if m is None:
         return None
+    category = m.group("category")
+    if len(set(category)) != len(category):
+        return None  # duplicate category is ambiguous
     return {
-        "category": m.group("category"),
-        "value_text": m.group("value"),
+        "multipliers": [
+            {"category": ch, "value_text": m.group("value")} for ch in category
+        ],
         "scope": "all_groups_in_region",
+    }
+
+
+def parse_multi_category_shared(text: str) -> dict[str, Any] | None:
+    """Parse 二三×0.3 (multi-category multiplier WITHOUT 各).
+
+    Distinct from 各=三×0.3: this is the user's own shorthand meaning
+    "both 二 and 三 share multiplier 0.3". Returns the same shape as
+    parse_shared_multiplier, or None when the text is not a bare
+    multi-category shared multiplier. Single category (三×0.3) is NOT
+    treated as shared here — it stays a normal_row multiplier.
+
+    Scope: WITHOUT 各 the multiplier applies to the CURRENT group only
+    (current_group). The caller must downgrade to unresolved_region when
+    the owning group cannot be established.
+    """
+    t = normalize_text(text)
+    m = re.fullmatch(r"(?P<category>[二三四]{2,3})\s*×\s*(?P<value>\d+(?:\.\d+)?)", t)
+    if m is None:
+        return None
+    category = m.group("category")
+    if len(set(category)) != len(category):
+        return None  # duplicate category (二二×0.3) is ambiguous
+    return {
+        "multipliers": [
+            {"category": ch, "value_text": m.group("value")} for ch in category
+        ],
+        "scope": "current_group",
     }
 
 
@@ -373,8 +472,26 @@ def validate_line(
 
     issues.extend(validate_multiplier(multiplier_text))
     issues.extend(validate_group_structure(number_groups, multiplier_text))
-    if raw_text and not re.fullmatch(r"[0-9?二三四各×.=() ]+", raw_text):
+    # IMPORTANT: normalize BEFORE the closed-set char check — x/X/× are the
+    # same handwritten token and must not surface as disallowed characters.
+    if raw_text and not re.fullmatch(r"[0-9?二三四各尾×.=() ¾⅔]+", normalize_text(raw_text)):
         issues.append(ClosedSetIssue.DISALLOWED_CHARACTER.value)
+    if raw_text and "=" in normalize_text(raw_text):
+        issues.append(ClosedSetIssue.LEGACY_OR_HALLUCINATED_EQUALS.value)
+
+    # Tail expansion (13X24X8尾) contributes its expanded numbers
+    tail_numbers = parse_tail_expansion(raw_text) if raw_text else None
+    if tail_numbers is not None:
+        issues.extend(validate_tail_expansion(raw_text))
+        # multipliers come from the text AFTER the 尾 marker
+        tail_rest = re.sub(r"^.*尾", "", normalize_text(raw_text)).strip()
+        semantics = {
+            "layout": "normal_row",
+            "numbers": tail_numbers,
+            "multipliers": parse_multiplier_text(tail_rest) if tail_rest else [],
+            "scope": scope if scope in SCOPES else "current_group",
+            "needs_human_confirmation": True,
+        }
 
     # ── V2 structured semantics (deterministic parser, production path) ──────
     multiplier_semantics = parse_multiplier_text(multiplier_text) if multiplier_text else []
@@ -382,15 +499,24 @@ def validate_line(
         issues.append(ClosedSetIssue.AMBIGUOUS_SYMBOL.value)
 
     shared = parse_shared_multiplier(raw_text or "")
+    if shared is None:
+        shared = parse_multi_category_shared(raw_text or "")
     if shared is not None:
-        # 各=三×0.3: legal only with an explicit region binding
+        # 各=三×0.3 / 二三×0.3: legal only with an explicit region binding
         if not region_bound:
             shared["scope"] = "unresolved_region"
             issues.append(ClosedSetIssue.GROUP_STRUCTURE_UNCERTAIN.value)
+        else:
+            # a bound shared multiplier has numbers=[] BY DESIGN — the
+            # structural-uncertainty flag is not applicable once bound
+            issues = [
+                i for i in issues
+                if i != ClosedSetIssue.GROUP_STRUCTURE_UNCERTAIN.value
+            ]
         semantics = {
             "layout": "shared_multiplier",
             "numbers": [],
-            "multipliers": [{"category": shared["category"], "value_text": shared["value_text"]}],
+            "multipliers": shared["multipliers"],
             "scope": shared["scope"],
             "needs_human_confirmation": True,
         }
@@ -421,6 +547,8 @@ def validate_line(
         and "." in raw_text
         and parse_paren_number_set(raw_text) is None
         and not any(parse_multiplier_text(m) for m in (multiplier_text,) if m)
+        and parse_shared_multiplier(raw_text) is None
+        and parse_multi_category_shared(raw_text) is None
     ):
         issues.append(ClosedSetIssue.AMBIGUOUS_SYMBOL.value)
 

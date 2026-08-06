@@ -1018,7 +1018,7 @@ def _peel_tail_amount(text: str) -> tuple[str, BetAmount | None]:
         # treat X as money separator, not unit
         num_count = _count_prefix_numbers(prefix)
         has_column_sep = bool(re.search(r"[/×\u78b0]", prefix))
-        if num_count >= 3 and not has_column_sep:
+        if num_count >= 3 and not has_column_sep and Decimal(x_match.group("value")) >= Decimal("10"):
             amount = _amount_from_parts(x_match.group("value"), None, source="bare_money")
         else:
             amount = _amount_from_parts(x_match.group("value"), UNIT_WORD, source="x")
@@ -1030,7 +1030,7 @@ def _peel_tail_amount(text: str) -> tuple[str, BetAmount | None]:
         prefix = text[:mul_match.start()].strip()
         num_count = _count_prefix_numbers(prefix)
         has_column_sep = bool(re.search(r"[/×\u78b0]", prefix))
-        if num_count >= 3 and not has_column_sep:
+        if num_count >= 3 and not has_column_sep and Decimal(mul_match.group("value")) >= Decimal("10"):
             amount = _amount_from_parts(mul_match.group("value"), None, source="bare_money")
             return prefix, amount
 
