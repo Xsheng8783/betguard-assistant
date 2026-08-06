@@ -25,6 +25,7 @@ from migration_backfill_multipliers import (  # noqa: E402
     extract_normal_multiplier,
     migrate_sample,
 )
+import backfill_multiplier_candidates as bf  # noqa: E402
 import prelabel_geo as pg  # noqa: E402
 from test_combined_bbox import COLUMN_COMBO_PROMPT, call_column_combo_crop  # noqa: E402
 
@@ -982,3 +983,128 @@ def test_sample010_end_to_end_draft_v3_evidence(sample010_fixture, monkeypatch, 
     assert "3/4X1" in r05["fallback_candidate"]["multiplier_candidates"]
     assert "possible_stacked_category_digit" in r05["warnings"]
     assert r05["model_raw_text"] == "02 . 17 . 20 . 33 3 x 1"
+
+
+# --- merge-only candidate backfill (never regenerates / never degrades) ---
+
+
+@pytest.fixture()
+def sample008_draft_fixture():
+    p = DEBUG / "fixtures" / "sample-008-draft.json"
+    if not p.exists():
+        pytest.skip("fixture sample-008-draft.json missing")
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
+@pytest.fixture()
+def sample008_prelabel_fixture():
+    p = DEBUG / "fixtures" / "sample-008-prelabel.json"
+    if not p.exists():
+        pytest.skip("fixture sample-008-prelabel.json missing")
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
+def test_backfill_sample008_r03_merge_only(monkeypatch, tmp_path, sample008_draft_fixture, sample008_prelabel_fixture):
+    """Regression: sample-008 R03 must keep 08/04/2X5/column_bet; backfill only
+    adds fallback_candidate/evidence; model_raw_text stays byte-identical."""
+    draft_dir = tmp_path / "ground-truth-draft"
+    pre_dir = tmp_path / "prelabels"
+    draft_dir.mkdir()
+    pre_dir.mkdir()
+    (draft_dir / "sample-008.json").write_text(
+        json.dumps(sample008_draft_fixture, ensure_ascii=False, indent=1), encoding="utf-8")
+    (pre_dir / "sample-008.json").write_text(
+        json.dumps(sample008_prelabel_fixture, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(bf, "DRAFT", draft_dir)
+    monkeypatch.setattr(bf, "PRELABELS", pre_dir)
+
+    before = sample008_draft_fixture
+    bf.backfill_sample("sample-008", dry_run=False)
+    after = json.loads((draft_dir / "sample-008.json").read_text(encoding="utf-8"))
+
+    before_r03 = next(l for l in before["lines"] if l["line_id"] == "R03-L1")
+    after_r03 = next(l for l in after["lines"] if l["line_id"] == "R03-L1")
+
+    assert after_r03["number_groups"] == [["08"], ["01", "04"]]
+    assert "68" not in [n for g in after_r03["number_groups"] for n in g]
+    assert "04" in after_r03["number_groups"][1]
+    assert after_r03["multiplier_text"] == "2X5"
+    assert after_r03["layout_hint"] == "column_bet"
+    assert after_r03.get("model_raw_text") == before_r03.get("model_raw_text")
+    assert after_r03["raw_text"] == before_r03.get("raw_text")
+    assert bf.diff_protected(before, after) == []
+    fb = after_r03.get("fallback_candidate") or {}
+    assert fb.get("evidence"), "evidence must be added"
+    assert fb.get("evidence")[0]["rule"] == "merge_only_never_replace"
+
+
+def test_backfill_divergent_adds_candidates_without_touching_protected():
+    line = {
+        "line_id": "R02-L1",
+        "raw_text": "15 / 24 / 22 35 28 2X1",
+        "model_raw_text": "15 . 24 x 22 2 x 1 35 28",
+        "number_groups": [["15"], ["24"], ["22", "35", "28"]],
+        "multiplier_text": "2X1",
+        "multiplier_rules": [{"rule_text": "2X1", "categories": ["2"], "value": "1"}],
+        "layout_hint": "column_bet",
+        "region_id": "R02",
+        "review_action": "pending",
+        "uncertain": False,
+        "warnings": [],
+    }
+    before = json.dumps(line, ensure_ascii=False, sort_keys=True)
+    v3 = [(["15", "24", "22", "35", "28"], ["2X1", "3X1"])]
+    stats = bf.backfill_line(line, v3)
+    assert stats["candidates"] == ["3X1"]
+    assert line["fallback_candidate"]["multiplier_candidates"] == ["3X1"]
+    assert "cross_pass_multiplier_divergent" in line["warnings"]
+    assert "possible_stacked_category_digit" in line["warnings"]
+    assert line["uncertain"] is False  # protected: never auto-set
+    assert line["review_action"] == "pending"
+    assert line["multiplier_text"] == "2X1"
+    assert line["number_groups"] == [["15"], ["24"], ["22", "35", "28"]]
+    assert line["model_raw_text"] == "15 . 24 x 22 2 x 1 35 28"
+    # only fallback_candidate / warnings changed
+    del line["fallback_candidate"]
+    line["warnings"] = []
+    assert json.dumps(line, ensure_ascii=False, sort_keys=True) == before
+
+
+def test_backfill_idempotent():
+    line = {
+        "line_id": "R05-L1",
+        "number_groups": [["02"], ["17"], ["20"], ["33"]],
+        "multiplier_text": "3X1",
+        "layout_hint": "normal_row",
+        "uncertain": True,
+        "warnings": [],
+    }
+    v3 = [(["02", "17", "20", "33"], ["3/4X1"])]
+    first = bf.backfill_line(line, v3)
+    second = bf.backfill_line(line, v3)
+    assert first["candidates"] == ["3/4X1"]
+    assert line["fallback_candidate"]["multiplier_candidates"] == ["3/4X1"]
+    assert len(line["fallback_candidate"]["evidence"]) == 1
+    assert line["warnings"].count("cross_pass_multiplier_divergent") == 1
+    assert line["warnings"].count("possible_stacked_category_digit") == 1
+    assert second["candidates"] == ["3/4X1"]  # idempotent: no duplicates
+
+
+def test_diff_protected_reports_change():
+    before = {"revision": 1, "lines": [
+        {"line_id": "R03-L1", "number_groups": [["08"], ["01", "04"]], "multiplier_text": "2X5", "layout_hint": "column_bet"},
+    ]}
+    after_ok = {"revision": 1, "lines": [
+        {"line_id": "R03-L1", "number_groups": [["08"], ["01", "04"]], "multiplier_text": "2X5", "layout_hint": "column_bet",
+         "fallback_candidate": {"evidence": [{"rule": "merge_only_never_replace"}]}},
+    ]}
+    after_bad = {"revision": 1, "lines": [
+        {"line_id": "R03-L1", "number_groups": [["68", "01"]], "multiplier_text": None, "layout_hint": "normal_row"},
+    ]}
+    assert bf.diff_protected(before, after_ok) == []
+    bad = bf.diff_protected(before, after_bad)
+    assert bad
+    paths = {(v.get("line_id"), v.get("path")) for v in bad}
+    assert ("R03-L1", "number_groups") in paths
+    assert ("R03-L1", "multiplier_text") in paths
+    assert ("R03-L1", "layout_hint") in paths

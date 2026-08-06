@@ -1,0 +1,467 @@
+{
+ "gt_schema_version": "539-semantic-gt-v1",
+ "sample_id": "sample-008",
+ "review_status": "reviewed",
+ "reviewed_by": "local-user",
+ "reviewed_at": "2026-08-06T10:49:09+00:00",
+ "source": "model_prelabel_not_ground_truth",
+ "regions": [
+  {
+   "region_id": "R01",
+   "order": 1,
+   "column": "unknown",
+   "region_type": "normal_block",
+   "line_ids": [
+    "R01-L1"
+   ],
+   "bounding_box": null,
+   "boundary_uncertain": false
+  },
+  {
+   "region_id": "R02",
+   "order": 2,
+   "column": "unknown",
+   "region_type": "normal_block",
+   "line_ids": [
+    "R02-L1"
+   ],
+   "bounding_box": null,
+   "boundary_uncertain": false
+  },
+  {
+   "region_id": "R03",
+   "order": 3,
+   "column": "unknown",
+   "region_type": "column_bet",
+   "line_ids": [
+    "R03-L1"
+   ],
+   "bounding_box": null,
+   "boundary_uncertain": false
+  },
+  {
+   "region_id": "R04",
+   "order": 4,
+   "column": "unknown",
+   "region_type": "column_bet",
+   "line_ids": [
+    "R04-L1"
+   ],
+   "bounding_box": null,
+   "boundary_uncertain": false
+  },
+  {
+   "region_id": "R05",
+   "order": 5,
+   "column": "unknown",
+   "region_type": "normal_block",
+   "line_ids": [
+    "R05-L1"
+   ],
+   "bounding_box": null,
+   "boundary_uncertain": false
+  },
+  {
+   "region_id": "R06",
+   "order": 6,
+   "column": "unknown",
+   "region_type": "column_bet",
+   "line_ids": [
+    "R06-L1"
+   ],
+   "bounding_box": null,
+   "boundary_uncertain": false
+  },
+  {
+   "region_id": "R07",
+   "order": 7,
+   "column": "unknown",
+   "region_type": "column_bet",
+   "line_ids": [
+    "R07-L1"
+   ],
+   "bounding_box": null,
+   "boundary_uncertain": false
+  },
+  {
+   "region_id": "R08",
+   "order": 8,
+   "column": "unknown",
+   "region_type": "column_bet",
+   "line_ids": [
+    "R08-L1"
+   ],
+   "bounding_box": null,
+   "boundary_uncertain": false
+  },
+  {
+   "region_id": "R09",
+   "order": 9,
+   "column": "unknown",
+   "region_type": "normal_block",
+   "line_ids": [
+    "R09-L1"
+   ],
+   "bounding_box": null,
+   "boundary_uncertain": false
+  }
+ ],
+ "lines": [
+  {
+   "line_id": "R01-L1",
+   "entry_id": "R01-E1",
+   "region_id": "R01",
+   "order": 1,
+   "raw_text": "11 . 19 . 24 . 25 3 / 4 x 1",
+   "number_groups": [
+    [
+     "11",
+     "19",
+     "24",
+     "25"
+    ]
+   ],
+   "multiplier_text": "3/4 x 1",
+   "layout_hint": "normal_row",
+   "play_text": null,
+   "play_type": null,
+   "uncertain": false,
+   "uncertain_reason": null,
+   "alternatives": [],
+   "warnings": [],
+   "review_action": "pending",
+   "human_added": false,
+   "model_raw_text": "11.19.24.25 3/4×1",
+   "human_raw_text": null
+  },
+  {
+   "line_id": "R02-L1",
+   "entry_id": "R02-E1",
+   "region_id": "R02",
+   "order": 1,
+   "raw_text": "01 . 04 . 05 . 09 3 / 4 x 1",
+   "number_groups": [
+    [
+     "01",
+     "04",
+     "05",
+     "09"
+    ]
+   ],
+   "multiplier_text": "3/4 x 1",
+   "layout_hint": "normal_row",
+   "play_text": null,
+   "play_type": null,
+   "uncertain": false,
+   "uncertain_reason": null,
+   "alternatives": [],
+   "warnings": [],
+   "review_action": "pending",
+   "human_added": false,
+   "human_raw_text": null
+  },
+  {
+   "line_id": "R03-L1",
+   "entry_id": "R03-E1",
+   "region_id": "R03",
+   "order": 1,
+   "raw_text": "08×01 04 2×5",
+   "number_groups": [
+    [
+     "08"
+    ],
+    [
+     "01",
+     "04"
+    ]
+   ],
+   "multiplier_text": "2X5",
+   "layout_hint": "column_bet",
+   "play_text": null,
+   "play_type": null,
+   "uncertain": false,
+   "uncertain_reason": null,
+   "alternatives": [],
+   "warnings": [
+    "geometry_x_clustered",
+    "restored_08_from_prelabel"
+   ],
+   "review_action": "pending",
+   "human_added": false,
+   "human_raw_text": null
+  },
+  {
+   "line_id": "R04-L1",
+   "entry_id": "R04-E1",
+   "region_id": "R04",
+   "order": 1,
+   "raw_text": "08 / 16 26 2 x 5",
+   "number_groups": [
+    [
+     "08"
+    ],
+    [
+     "16",
+     "26"
+    ]
+   ],
+   "multiplier_text": "2 x 5",
+   "layout_hint": "column_bet",
+   "play_text": null,
+   "play_type": null,
+   "uncertain": false,
+   "uncertain_reason": null,
+   "alternatives": [],
+   "warnings": [
+    "geometry_x_clustered"
+   ],
+   "review_action": "pending",
+   "human_added": false,
+   "human_raw_text": null
+  },
+  {
+   "line_id": "R05-L1",
+   "entry_id": "R05-E1",
+   "region_id": "R05",
+   "order": 1,
+   "raw_text": "09 . 17 . 26 2 / 3 x 0 . 5",
+   "number_groups": [
+    [
+     "09",
+     "17",
+     "26"
+    ]
+   ],
+   "multiplier_text": "2/3 x 0.5",
+   "layout_hint": "normal_row",
+   "play_text": null,
+   "play_type": null,
+   "uncertain": true,
+   "uncertain_reason": "STRUCTURED_TEXT_DIVERGENT",
+   "alternatives": [],
+   "warnings": [
+    "multiplier_conflict",
+    "STRUCTURED_TEXT_DIVERGENT"
+   ],
+   "review_action": "pending",
+   "human_added": false,
+   "human_raw_text": null,
+   "pipeline_review": {
+    "decision": {
+     "parse_status": "success",
+     "supported": true,
+     "executable": false,
+     "review_status": "needs_review",
+     "block_reasons": [
+      "INVALID_NUMBER_RANGE"
+     ],
+     "warnings": [],
+     "check_issues": [
+      "INVALID_NUMBER_RANGE"
+     ]
+    },
+    "closed_set": {
+     "issues": [
+      "ambiguous_symbol",
+      "disallowed_character"
+     ],
+     "semantics_layout": null,
+     "semantics_scope": null,
+     "semantics_numbers": [],
+     "semantics_multipliers": []
+    },
+    "semantic": {
+     "bet_type": "column",
+     "numbers": [
+      9,
+      17,
+      26,
+      2,
+      3,
+      0,
+      5
+     ],
+     "columns": [
+      [
+       9,
+       17,
+       26,
+       2
+      ],
+      [
+       3,
+       0,
+       5
+      ]
+     ],
+     "stars": [],
+     "unit": null,
+     "money": null,
+     "car_units": null,
+     "parse_error": null
+    },
+    "checks": {
+     "issues": [
+      "INVALID_NUMBER_RANGE"
+     ],
+     "warnings": [],
+     "blocked": true,
+     "block_reason": "INVALID_NUMBER_RANGE",
+     "expected_combination_count": 12
+    },
+    "expected_combination_count": 12,
+    "unit": null,
+    "money": null,
+    "parse_error": null
+   },
+   "pipeline_review_revision": 1
+  },
+  {
+   "line_id": "R06-L1",
+   "entry_id": "R06-E1",
+   "region_id": "R06",
+   "order": 1,
+   "raw_text": "25 / 26 / 28 / 07 09 3 x 1",
+   "number_groups": [
+    [
+     "25"
+    ],
+    [
+     "26"
+    ],
+    [
+     "28"
+    ],
+    [
+     "07",
+     "09"
+    ]
+   ],
+   "multiplier_text": "3 x 1",
+   "layout_hint": "column_bet",
+   "play_text": null,
+   "play_type": null,
+   "uncertain": false,
+   "uncertain_reason": null,
+   "alternatives": [],
+   "warnings": [
+    "geometry_x_clustered"
+   ],
+   "review_action": "pending",
+   "human_added": false,
+   "human_raw_text": null
+  },
+  {
+   "line_id": "R07-L1",
+   "entry_id": "R07-E1",
+   "region_id": "R07",
+   "order": 1,
+   "raw_text": "06 07 / 08 38 2 x 1",
+   "number_groups": [
+    [
+     "06",
+     "07"
+    ],
+    [
+     "08",
+     "38"
+    ]
+   ],
+   "multiplier_text": "2 x 1",
+   "layout_hint": "column_bet",
+   "play_text": null,
+   "play_type": null,
+   "uncertain": false,
+   "uncertain_reason": null,
+   "alternatives": [],
+   "warnings": [
+    "geometry_x_clustered"
+   ],
+   "review_action": "pending",
+   "human_added": false,
+   "human_raw_text": null
+  },
+  {
+   "line_id": "R08-L1",
+   "entry_id": "R08-E1",
+   "region_id": "R08",
+   "order": 1,
+   "raw_text": "06 07 / 21 23 2 x 1",
+   "number_groups": [
+    [
+     "06",
+     "07"
+    ],
+    [
+     "21",
+     "23"
+    ]
+   ],
+   "multiplier_text": "2 x 1",
+   "layout_hint": "column_bet",
+   "play_text": null,
+   "play_type": null,
+   "uncertain": false,
+   "uncertain_reason": null,
+   "alternatives": [],
+   "warnings": [
+    "geometry_x_clustered"
+   ],
+   "review_action": "pending",
+   "human_added": false,
+   "human_raw_text": null
+  },
+  {
+   "line_id": "R09-L1",
+   "entry_id": "R09-E1",
+   "region_id": "R09",
+   "order": 1,
+   "raw_text": "06 . 07 . 23 2 x 1",
+   "number_groups": [
+    [
+     "06",
+     "07",
+     "23"
+    ]
+   ],
+   "multiplier_text": "2 x 1",
+   "layout_hint": "normal_row",
+   "play_text": null,
+   "play_type": null,
+   "uncertain": false,
+   "uncertain_reason": null,
+   "alternatives": [],
+   "warnings": [],
+   "review_action": "pending",
+   "human_added": false,
+   "human_raw_text": null
+  }
+ ],
+ "shared_multiplier_rules": [],
+ "warnings": [],
+ "raw_model_output": "{\n  \"sections\": [\n    {\n      \"rows\": [\n        {\n          \"raw_text\": \"11.19.24.25 ¾×1\",\n          \"numbers\": [[\"11\"], [\"19\"], [\"24\"], [\"25\"]],\n          \"multiplier\": \"3/4X1\",\n          \"layout_hint\": \"column_bet\",\n          \"play_type\": null\n        },\n        {\n          \"raw_text\": \"01.04.05.09 ¾×1\",\n          \"numbers\": [[\"01\"], [\"04\"], [\"05\"], [\"09\"]],\n          \"multiplier\": \"3/4X1\",\n          \"layout_hint\": \"column_bet\",\n          \"play_type\": null\n        },\n        {\n          \"raw_text\": \"08×01\\n04 2×5\",\n          \"numbers\": [[\"08\"], [\"01\", \"04\"]],\n          \"multiplier\": \"2X5\",\n          \"layout_hint\": \"column_bet\",\n          \"play_type\": null\n        },\n        {\n          \"raw_text\": \"08×16\\n26 2×5\",\n          \"numbers\": [[\"08\"], [\"16\", \"26\"]],\n          \"multiplier\": \"2X5\",\n          \"layout_hint\": \"column_bet\",\n          \"play_type\": null\n        },\n        {\n          \"raw_text\": \"09.17.26 ⅔×0.5\",\n          \"numbers\": [[\"09\"], [\"17\"], [\"26\"]],\n          \"multiplier\": \"2/3X0.5\",\n          \"layout_hint\": \"column_bet\",\n          \"play_type\": null\n        },\n        {\n          \"raw_text\": \"25×26×28×07\\n09 3×1\",\n          \"numbers\": [[\"25\"], [\"26\"], [\"28\"], [\"07\", \"09\"]],\n          \"multiplier\": \"3X1\",\n          \"layout_hint\": \"column_bet\",\n          \"play_type\": null\n        },\n        {\n          \"raw_text\": \"06×08\\n07 38 2×1\",\n          \"numbers\": [[\"06\"], [\"08\", \"07\"], [\"38\"]],\n          \"multiplier\": \"2X1\",\n          \"layout_hint\": \"column_bet\",\n          \"play_type\": null\n        },\n        {\n          \"raw_text\": \"06×21\\n07 23 2×1\",\n          \"numbers\": [[\"06\"], [\"21\", \"07\"], [\"23\"]],\n          \"multiplier\": \"2X1\",\n          \"layout_hint\": \"column_bet\",\n          \"play_type\": null\n        },\n        {\n          \"raw_text\": \"06.07.23 2×1\",\n          \"numbers\": [[\"06\"], [\"07\"], [\"23\"]],\n          \"multiplier\": \"2X1\",\n          \"layout_hint\": \"column_bet\",\n          \"play_type\": null\n        }\n      ],\n      \"shared_multiplier\": null\n    }\n  ]\n}",
+ "human_edits": [
+  {
+   "at": "2026-08-06T17:55:19.480Z",
+   "line_id": "R05-L1",
+   "fields": [
+    "multiplier_text"
+   ]
+  },
+  {
+   "at": "2026-08-06T17:55:21.032Z",
+   "line_id": "R05-L1",
+   "fields": [
+    "multiplier_text"
+   ]
+  }
+ ],
+ "review_progress": {
+  "confirmed_lines": 0,
+  "corrected_lines": 0,
+  "unresolved_lines": 9,
+  "total_lines": 9
+ },
+ "last_saved_at": "2026-08-06T17:55:22+00:00",
+ "revision": 1
+}
