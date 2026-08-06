@@ -14,6 +14,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from betguard.vision.column_geometry import build_columns_from_bbox, build_grid_from_rows  # noqa: E402
+from betguard.vision.multiplier_policy import (  # noqa: E402
+    COMPLETE,
+    classify_multiplier_token,
+    merge_complete_rules,
+)
 from betguard.vision.replay import parse_model_json  # noqa: E402
 from test_combined_bbox import PROMPT, call  # noqa: E402
 
@@ -118,41 +123,9 @@ def extract_multiplier(text: str) -> str | None:
 
 
 def _compose_collision_rules(rules: list[str], coll: str | None) -> list[str]:
-    """Merge per-rule categories with the geometry collision (碰法).
-
-    - One rule whose single category belongs to the collision becomes
-      "collXvalue" (e.g. "3X1" + collision "2/3" -> "2/3X1").
-    - Several rules with the SAME value whose categories are exactly covered
-      by the collision merge into one rule (e.g. ["2X1","3X1"] -> "2/3X1").
-    - Rules with DIFFERENT values stay separate ("2X5 3X2" is NOT collapsed).
-    """
-    if not rules or not coll:
-        return list(rules)
-    coll_digits = set(re.findall(r"[234]", coll))
-    by_value: dict[str, list[str]] = {}
-    order: list[str] = []
-    raw_out: list[str] = []
-    for rule in rules:
-        flat = re.sub(r"\s+", "", rule)
-        m = re.match(r"([234])[xX×]([\d.]+)", flat)
-        if not m:
-            raw_out.append(rule)
-            continue
-        cat, val = m.group(1), m.group(2)
-        if val not in by_value:
-            by_value[val] = []
-            order.append(val)
-        by_value[val].append(cat)
-    out = list(raw_out)
-    for val in order:
-        cats = by_value[val]
-        if len(cats) >= 2 and set(cats) <= coll_digits and len(coll_digits) >= 2:
-            out.append("/".join(sorted(coll_digits)) + "X" + val)
-        elif len(cats) == 1 and cats[0] in coll_digits:
-            out.append(f"{coll}X{val}")
-        else:
-            out.extend(f"{c}X{val}" for c in cats)
-    return out
+    """Canonical merge policy: merge categories ONLY on identical value,
+    canonical 2/3/4 order, never merge different values."""
+    return merge_complete_rules(rules)
 
 
 def section_to_lines(
@@ -244,10 +217,21 @@ def section_to_lines(
             if m2:
                 raw_rules[-1] = _norm_rule(last.group(0) + "." + m2.group(1))
         rules = _compose_collision_rules(raw_rules, coll)
-        if rules:
-            mult_txt = " ".join(rules)
-        else:
-            mult_txt = f"{coll}X{mult}" if coll and mult else (f"X{mult}" if mult else (coll or None))
+        partial_evidence: list[str] = []
+        if not rules:
+            coll_txt = re.sub(r"\s+", "", coll or "")
+            if coll_txt and mult is not None:
+                val = f"{mult:g}"
+                if re.fullmatch(r"[234](/[234])*", coll_txt) and float(mult) > 0:
+                    rules = [f"{coll_txt}X{val}"]
+                else:
+                    partial_evidence.append(coll_txt)
+                    partial_evidence.append(f"X{val}")
+            elif coll_txt:
+                partial_evidence.append(coll_txt)
+            elif mult is not None:
+                partial_evidence.append(f"X{mult:g}")
+        mult_txt = " ".join(rules) if rules else None
         multiplier_rules = [
             {
                 "rule_text": r,
@@ -256,14 +240,28 @@ def section_to_lines(
             }
             for r in rules
         ] if rules else []
+        fallback_candidate = None
+        if partial_evidence:
+            fallback_candidate = {
+                "source": "geometry_fallback",
+                "rule": "partial_evidence_only",
+                "multiplier_partial_evidence": list(partial_evidence),
+                "evidence": [{
+                    "source": "geometry_fallback",
+                    "rule": "incomplete_multiplier_evidence",
+                    "partial_tokens": list(partial_evidence),
+                }],
+            }
         uncertain = False
         uncertain_reason = None
         warnings = ["geometry_x_clustered"]
         if not mult_txt:
             uncertain = True
-            uncertain_reason = "missing_multiplier_or_collision"
+            uncertain_reason = "incomplete_multiplier_evidence" if partial_evidence else "missing_multiplier_or_collision"
             if "column_combo_needs_review" not in warnings:
                 warnings.append("column_combo_needs_review")
+            if partial_evidence and "incomplete_multiplier_evidence" not in warnings:
+                warnings.append("incomplete_multiplier_evidence")
         play_mark = None
         text = " / ".join(" ".join(v) for v in cols.values())
         if mult_txt:
@@ -286,6 +284,7 @@ def section_to_lines(
             "uncertain_reason": uncertain_reason,
             "alternatives": [],
             "play_mark": play_mark,
+            "fallback_candidate": fallback_candidate,
             "warnings": warnings,
             "review_action": "pending",
             "human_added": False,
@@ -386,13 +385,35 @@ def _normal_lines(
                 flat = [str(x) for x in nums]
         toktxt = " ".join(str(t.get("text") or "") for t in (r.get("tokens") or []) if str(t.get("text") or "") not in ("", " "))
         rules = extract_multiplier_rules(toktxt)
-        mult = r.get("multiplier")
-        if rules:
-            mult = " ".join(rules)
+        model_mult = str(r.get("multiplier") or "").strip()
+        partial_tokens: list[str] = []
+        if not rules and model_mult:
+            for tok in model_mult.split():
+                if classify_multiplier_token(tok) == COMPLETE:
+                    rules.append(tok)
+                else:
+                    partial_tokens.append(tok)
+        mult = " ".join(merge_complete_rules(rules)) if rules else None
         warnings = []
         uncertain = False
         uncertain_reason = None
         play_mark = None
+        fallback_candidate = None
+        if partial_tokens:
+            uncertain = True
+            uncertain_reason = "incomplete_multiplier_evidence"
+            if "incomplete_multiplier_evidence" not in warnings:
+                warnings.append("incomplete_multiplier_evidence")
+            fallback_candidate = {
+                "source": "first_pass_model",
+                "rule": "partial_evidence_only",
+                "multiplier_partial_evidence": list(partial_tokens),
+                "evidence": [{
+                    "source": "first_pass_model",
+                    "rule": "incomplete_multiplier_evidence",
+                    "partial_tokens": list(partial_tokens),
+                }],
+            }
         toks = [
             t for t in (r.get("tokens") or [])
             if len(t.get("bbox", [])) == 4 and str(t.get("text") or "").strip()
@@ -466,6 +487,7 @@ def _normal_lines(
             "uncertain_reason": uncertain_reason,
             "alternatives": [],
             "play_mark": play_mark,
+            "fallback_candidate": fallback_candidate,
             "warnings": warnings,
             "review_action": "pending",
             "human_added": False,
@@ -714,25 +736,35 @@ def _column_combo_line(region_id: str, combo: dict, game: str = "539") -> list[d
         uncertain = True
         reason = "roi_variant_divergent"
         warnings.append("roi_variant_divergent")
+    partial_evidence: list[str] = []
+    multiplier_rules = []
+    mult_txt = None
     if coll and mult:
         mult_txt = f"{coll}X{mult}"
-    elif mult:
-        mult_txt = f"X{mult}"
-    else:
-        mult_txt = coll
-    multiplier_rules = []
-    if coll and mult:
         multiplier_rules.append({
-            "rule_text": f"{coll}X{mult}",
+            "rule_text": mult_txt,
             "categories": [c for c in re.findall(r"[234]", coll)],
             "value": str(mult),
         })
-    elif mult:
-        multiplier_rules.append({
-            "rule_text": f"X{mult}",
-            "categories": [],
-            "value": str(mult),
-        })
+    else:
+        if coll:
+            partial_evidence.append(coll)
+        if mult:
+            partial_evidence.append(f"X{mult}")
+    fallback_candidate = None
+    if partial_evidence:
+        fallback_candidate = {
+            "source": "column_combo_roi",
+            "rule": "partial_evidence_only",
+            "multiplier_partial_evidence": list(partial_evidence),
+            "evidence": [{
+                "source": "column_combo_roi",
+                "rule": "incomplete_multiplier_evidence",
+                "partial_tokens": list(partial_evidence),
+            }],
+        }
+        if "incomplete_multiplier_evidence" not in warnings:
+            warnings.append("incomplete_multiplier_evidence")
     text = " / ".join(" ".join(c) for c in cols)
     if mult_txt:
         text = f"{text} {mult_txt}"
@@ -755,6 +787,7 @@ def _column_combo_line(region_id: str, combo: dict, game: str = "539") -> list[d
         "uncertain_reason": reason or ("column_combo_uncertain" if combo.get("uncertain") else None),
         "alternatives": [],
         "play_mark": None,
+        "fallback_candidate": fallback_candidate,
         "column_combo_status": status,
         "expected_combination_count": combo_count,
         "column_combo_attempts": combo.get("attempts"),

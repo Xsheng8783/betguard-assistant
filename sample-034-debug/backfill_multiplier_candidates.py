@@ -29,6 +29,12 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+from betguard.vision.multiplier_policy import (  # noqa: E402
+    COMPLETE,
+    classify_multiplier_token,
+)
+
 DATASET = Path(os.environ.get("BETGUARD_DATASET", ""))
 DRAFT = DATASET / "ground-truth-draft"
 PRELABELS = DATASET / "prelabels"
@@ -52,6 +58,8 @@ PROTECTED_FIELDS = (
     "reviewed_by",
     "reviewed_at",
     "revision",
+    "correction_source",
+    "adopted",
 )
 
 
@@ -89,8 +97,8 @@ def _flat(v) -> list[str]:
     return [str(v)]
 
 
-def _v3_rows(prelabel: dict) -> list[tuple[list[str], list[str]]]:
-    rows: list[tuple[list[str], list[str]]] = []
+def _v3_rows(prelabel: dict) -> list[tuple[list[str], list[str], list[str]]]:
+    rows: list[tuple[list[str], list[str], list[str]]] = []
     try:
         parsed = json.loads(prelabel.get("raw_model_output") or "{}")
     except Exception:
@@ -99,21 +107,24 @@ def _v3_rows(prelabel: dict) -> list[tuple[list[str], list[str]]]:
         for row in sec.get("rows") or []:
             nums = row.get("numbers") or []
             flat = [n for n in _flat(nums) if re.fullmatch(r"\d{1,2}", str(n))]
-            rows.append((flat, extract_rules(str(row.get("multiplier") or ""))))
+            raw_tokens = [t for t in str(row.get("multiplier") or "").split() if t.strip()]
+            rows.append((flat, extract_rules(str(row.get("multiplier") or "")), raw_tokens))
     return rows
 
 
-def _best_v3_row(v3_rows: list[tuple[list[str], list[str]]], ours: list[str]) -> tuple[list[str], list[str]] | None:
+def _best_v3_row(v3_rows: list[tuple[list[str], list[str], list[str]]], ours: list[str]) -> tuple[list[str], list[str], list[str]] | None:
     best = None
     best_overlap = 0
     best_extra = 10**9
-    for flat, rules in v3_rows:
+    for row in v3_rows:
+        flat, rules = row[0], row[1]
+        raw_tokens = row[2] if len(row) > 2 else []
         overlap = [n for n in ours if str(n) in flat]
         extra = len(set(flat) - set(ours))
         if (len(overlap), -extra) > (best_overlap, -best_extra):
             best_overlap = len(overlap)
             best_extra = extra
-            best = (flat, rules)
+            best = (flat, rules, raw_tokens)
     return best if best is not None and best_overlap >= 2 else None
 
 
@@ -121,7 +132,7 @@ def _current_rules(line: dict) -> list[str]:
     return [_norm_rule(r) for r in (line.get("multiplier_text") or "").split()]
 
 
-def backfill_line(line: dict, v3_rows: list[tuple[list[str], list[str]]]) -> dict:
+def backfill_line(line: dict, v3_rows: list[tuple[list[str], list[str], list[str]]]) -> dict:
     """Merge candidate evidence into ONE line. Never touches protected fields.
 
     Returns stats: {"line_id", "candidates", "evidence_added", "warnings_added"}.
@@ -132,7 +143,8 @@ def backfill_line(line: dict, v3_rows: list[tuple[list[str], list[str]]]) -> dic
     best = _best_v3_row(v3_rows, ours)
     if best is None:
         return stats
-    v3_flat, v3_rules = best
+    v3_flat, v3_rules = best[0], best[1]
+    v3_raw_tokens = best[2] if len(best) > 2 else []
     current = _current_rules(line)
     candidates = [r for r in v3_rules if r not in current]
     seen = set(current)
@@ -142,6 +154,9 @@ def backfill_line(line: dict, v3_rows: list[tuple[list[str], list[str]]]) -> dic
             seen.add(r)
             uniq_candidates.append(r)
     stats["candidates"] = uniq_candidates
+
+    partial_tokens = [t for t in v3_raw_tokens if classify_multiplier_token(t) != COMPLETE]
+    stats["partial_tokens"] = partial_tokens
 
     evidence = {
         "source": "v3_prelabel",
@@ -168,6 +183,15 @@ def backfill_line(line: dict, v3_rows: list[tuple[list[str], list[str]]]) -> dic
     line["fallback_candidate"] = fallback
 
     warnings = list(line.get("warnings") or [])
+    if partial_tokens:
+        existing_partial = list(fallback.get("multiplier_partial_evidence") or [])
+        for t in partial_tokens:
+            if t not in existing_partial:
+                existing_partial.append(t)
+        fallback["multiplier_partial_evidence"] = existing_partial
+        if "incomplete_multiplier_evidence" not in warnings:
+            warnings.append("incomplete_multiplier_evidence")
+            stats["warnings_added"].append("incomplete_multiplier_evidence")
     if uniq_candidates and "cross_pass_multiplier_divergent" not in warnings:
         warnings.append("cross_pass_multiplier_divergent")
         stats["warnings_added"].append("cross_pass_multiplier_divergent")
@@ -205,6 +229,15 @@ def diff_protected(before: dict, after: dict) -> list[dict]:
             av = al.get(key)
             if _json_byte_str(bv) != _json_byte_str(av):
                 violations.append({"line_id": lid, "path": key, "before": bv, "after": av})
+        b_adopted = (bl.get("fallback_candidate") or {}).get("adopted_multiplier")
+        a_adopted = (al.get("fallback_candidate") or {}).get("adopted_multiplier")
+        if _json_byte_str(b_adopted) != _json_byte_str(a_adopted):
+            violations.append({
+                "line_id": lid,
+                "path": "fallback_candidate.adopted_multiplier",
+                "before": b_adopted,
+                "after": a_adopted,
+            })
     return violations
 
 

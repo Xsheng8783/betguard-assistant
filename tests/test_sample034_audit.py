@@ -1205,3 +1205,110 @@ def test_sample010_like_complete_flow_passes():
         S._revalidate_line(l, revision=1, game="539")
     issues = S._complete_validation(draft, expected_revision=1)
     assert issues == []
+
+
+# --- multiplier completeness policy / canonical merge / sample-011 repair ---
+
+
+def test_multiplier_policy_classification():
+    from betguard.vision.multiplier_policy import (
+        COMPLETE,
+        INVALID,
+        PARTIAL,
+        classify_multiplier_token,
+    )
+    assert classify_multiplier_token("2X1") == COMPLETE
+    assert classify_multiplier_token("3X0.2") == COMPLETE
+    assert classify_multiplier_token("2/3/4X0.1") == COMPLETE
+    assert classify_multiplier_token("34X1") == COMPLETE
+    assert classify_multiplier_token("4/3X1") == COMPLETE  # canonicalized on merge
+    for t in ("2", "3", "2/3", "4/3", "X1", "X0.1", "2X"):
+        assert classify_multiplier_token(t) == PARTIAL, t
+    assert classify_multiplier_token("23 x 35") == INVALID  # column separator
+    assert classify_multiplier_token("") == INVALID
+
+
+def test_multiplier_policy_merge_canonical():
+    from betguard.vision.multiplier_policy import merge_complete_rules
+    # same value -> union categories, canonical 2/3/4 order
+    assert merge_complete_rules(["2/3X0.1", "3/4X0.1"]) == ["2/3/4X0.1"]
+    assert merge_complete_rules(["2X1", "3X1"]) == ["2/3X1"]
+    # different values NEVER merge
+    assert merge_complete_rules(["2X1", "3X0.2", "4X0.5"]) == ["2X1", "3X0.2", "4X0.5"]
+    assert merge_complete_rules(["3X0.2", "4X0.5"]) == ["3X0.2", "4X0.5"]
+    # reverse order canonicalized
+    assert merge_complete_rules(["4/3X1"]) == ["3/4X1"]
+    # two complete rules with different values stay two
+    assert merge_complete_rules(["2X2", "3X5"]) == ["2X2", "3X5"]
+
+
+def test_column_geometry_collision_canonical_order():
+    from betguard.vision.column_geometry import parse_collision
+    from betguard.vision.column_geometry import Token
+    raw, zh = parse_collision([Token("4/3", [0, 0, 10, 10])]) or (None, None)
+    assert raw == "3/4" and zh == "三四碰"
+
+
+def test_column_separator_x_never_multiplier_r09():
+    assert pg.extract_multiplier_rules("34 x 23 x 35 x 27 / 37 2 x 1") == ["2X1"]
+
+
+def test_repair_line_evidence_driven():
+    import repair_sample011_multipliers as R
+
+    def line(lid, raw, groups, mult, layout):
+        return {
+            "line_id": lid,
+            "raw_text": raw,
+            "number_groups": groups,
+            "multiplier_text": mult,
+            "multiplier_rules": [],
+            "layout_hint": layout,
+            "review_action": "pending",
+            "uncertain": False,
+            "warnings": [],
+        }
+
+    # R03: monotonic upgrade keeps BOTH rules in order
+    l = line("R03-L1", "32 . 34 . 35 2 x 2 3 x 5", [["32", "34", "35"]], "3 x 5", "normal_row")
+    R.repair_line(l, ["2X2", "3X5"], [], apply=True)
+    assert l["multiplier_text"] == "2X2 3X5"
+    assert [r["rule_text"] for r in l["multiplier_rules"]] == ["2X2", "3X5"]
+
+    # R04: partial fragment -> complete evidence (same-value union)
+    l = line("R04-L1", "24 34 / 03 23 / 17 27 37 / 20 30 35 2/3", [["24", "34"], ["03", "23"], ["17", "27", "37"], ["20", "30", "35"]], "2/3", "column_bet")
+    R.repair_line(l, ["2/3/4X0.1"], [], apply=True)
+    assert l["multiplier_text"] == "2/3/4X0.1"
+
+    # R07: three independent rules with DIFFERENT values stay three
+    l = line("R07-L1", "21 35 / 23 / 34 / 37 4/3", [["21", "35"], ["23"], ["34"], ["37"]], "4/3", "column_bet")
+    R.repair_line(l, ["2X1", "3X0.2", "4X0.5"], [], apply=True)
+    assert l["multiplier_text"] == "2X1 3X0.2 4X0.5"
+    assert len(l["multiplier_rules"]) == 3
+
+    # R09: column structure restored ONLY with column evidence + v3 nested
+    v3 = [(['34', '23', '35', '27', '37'], [['34'], ['23'], ['35'], ['27', '37']], ['2X1'], ['2×1'])]
+    l = line("R09-L1", "34 x 23 x 35 x 27 / 37 2 x 1", [["34", "23", "35", "27", "37"]], "23 x 35", "normal_row")
+    R.repair_line(l, ["2X1"], v3, apply=True, column_evidence=True)
+    assert l["multiplier_text"] == "2X1"
+    assert l["number_groups"] == [["34"], ["23"], ["35"], ["27", "37"]]
+    assert l["layout_hint"] == "column_bet"
+
+    # no evidence -> must NOT guess; stays needs_human and never gets a value
+    l = line("R99-L1", "?? ?? 2", [["01", "02"]], "2", "column_bet")
+    plan = R.repair_line(l, [], [], apply=True)
+    assert plan["needs_human"] is True
+    assert l["multiplier_text"] is None
+    assert "incomplete_multiplier_evidence" in l["warnings"]
+
+
+def test_partial_multiplier_never_executable():
+    from betguard.vision.pipeline import process_row
+    rec = process_row({
+        "raw_text": "24 34 / 19 39 2/3",
+        "numbers": [["24", "34"], ["19", "39"]],
+        "multiplier": "2/3",
+        "layout_hint": "column_bet",
+    }, region_bound=True, game="539")
+    assert rec["decision"]["executable"] is False
+    assert rec["block_reason"] == "MISSING_MULTIPLIER"

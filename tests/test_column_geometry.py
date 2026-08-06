@@ -51,7 +51,7 @@ CASE2_TOKENS = [
     _tok("35", 340, 180, 380, 210),
     _tok("2", 430, 100, 450, 130),   # 碰法雜訊（孤立 2，不新增柱）
     _tok("3", 460, 100, 480, 130),
-    _tok("4", 460, 140, 480, 170),   # 3 上 4 下 = 4/3
+    _tok("4", 460, 140, 480, 170),   # 3 上 4 下 -> canonical 3/4（三四碰）
     _tok("x", 500, 110, 520, 140),
     _tok("0", 530, 110, 550, 140),
     _tok("1", 560, 110, 580, 140),   # x0.1
@@ -68,8 +68,8 @@ def test_case2_four_columns() -> None:
         "3": ["17", "27", "37"],
         "4": ["20", "30", "35"],
     }
-    assert res["collision_raw"] == "4/3"
-    assert res["collision"] == "四三碰"
+    assert res["collision_raw"] == "3/4"
+    assert res["collision"] == "三四碰"
     assert res["multiplier"] == 0.1
 
 

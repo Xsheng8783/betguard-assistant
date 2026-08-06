@@ -37,7 +37,7 @@ class Token:
 
 COLLISION_MAP = {
     frozenset({2, 3}): ("2/3", "二三碰"),
-    frozenset({3, 4}): ("4/3", "四三碰"),
+    frozenset({3, 4}): ("3/4", "三四碰"),
     frozenset({2, 4}): ("2/4", "二四碰"),
     frozenset({2}): ("2", "二碰"),
     frozenset({3}): ("3", "三碰"),
