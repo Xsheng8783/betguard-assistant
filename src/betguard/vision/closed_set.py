@@ -58,14 +58,28 @@ _LETTER_CANDIDATES = {
     "T": "7", "t": "7",
 }
 
-# Multiplier: optional 二/三/四 category + × + integer or decimal value.
+# Multiplier: optional category (Chinese 二/三/四, or the draft's digit
+# shorthand 2/3/4, 2/3, 3/4, 23/24/34, 234) + × + integer or decimal value.
 # value_text keeps the canonical STRING (e.g. "0.5"), never binary float.
+_DIGIT_CN = {"2": "二", "3": "三", "4": "四"}
+_CATEGORY_ALT = r"(?:[二三四]{1,3}|234|[23]4|23|[234](?:[/.][234])?|[234])"
 MULTIPLIER_PATTERN = re.compile(
-    r"(?P<category>[二三四]{1,3})?\s*×\s*(?P<value>\d+(?:\.\d+)?)"
+    rf"(?P<category>{_CATEGORY_ALT})?\s*×\s*(?P<value>\d+(?:\.\d+)?)"
 )
 
 # Valid decimal formats: integer digits, or integer + '.' + >=1 decimal digit.
 VALID_MULTIPLIER_VALUE = re.compile(r"\d+(?:\.\d+)?")
+
+
+def _category_chars(category: str) -> list[str]:
+    """Expand a multiplier category token to Chinese category chars.
+
+    "三四"/"三" stay as-is; digit shorthand is mapped: "2/3" -> 二三,
+    "34" -> 三四, "234" -> 二三四, "2" -> 二.
+    """
+    if re.fullmatch(r"[二三四]+", category):
+        return list(category)
+    return [_DIGIT_CN[d] for d in re.findall(r"[234]", category)]
 
 # Scope enum (closed)
 SCOPES = frozenset({"current_group", "all_groups_in_region", "unresolved_region"})
@@ -239,6 +253,7 @@ def validate_multiplier(text: str | None) -> list[str]:
 
     Decimal multipliers are LEGAL. Rejects: .5, 0., 0.5.2, -0.5, 5e-1,
     letters, and anything else outside the grammar.
+    Digit category shorthand (2X1 / 2/3X1 / 34X1 / 2X5 3X2) is LEGAL too.
     """
     if text is None:
         return []
@@ -248,13 +263,16 @@ def validate_multiplier(text: str | None) -> list[str]:
     if "?" in t:
         return [ClosedSetIssue.UNKNOWN_TOKEN.value]
     # category? × value  (value = integer or integer.decimal)
-    if re.fullmatch(r"(?:[二三四]{1,3})?\s*×?\s*\d+(?:\.\d+)?", t):
+    if re.fullmatch(rf"(?:{_CATEGORY_ALT})?\s*×?\s*\d+(?:\.\d+)?", t):
         # duplicate category chars (二二×1) are ambiguous
-        m = re.fullmatch(r"([二三四]{2,3})\s*×\s*\d+(?:\.\d+)?", t)
-        if m and len(set(m.group(1))) != len(m.group(1)):
+        m = re.fullmatch(rf"({_CATEGORY_ALT})\s*×\s*\d+(?:\.\d+)?", t)
+        if m and len(set(_category_chars(m.group(1)))) != len(_category_chars(m.group(1))):
             return [ClosedSetIssue.AMBIGUOUS_SYMBOL.value]
         return []
-    if re.fullmatch(r"[二三四]{1,3}\s*×\s*\d+(?:\.\d+)?(?:\s*[二三四]{1,3}\s*×\s*\d+(?:\.\d+)?)*", t):
+    if re.fullmatch(
+        rf"(?:{_CATEGORY_ALT})\s*×\s*\d+(?:\.\d+)?(?:\s*(?:{_CATEGORY_ALT})\s*×\s*\d+(?:\.\d+)?)*",
+        t,
+    ):
         return []  # multiple multipliers on one number set
     if re.search(r"[A-Za-z]", t):
         return [ClosedSetIssue.DISALLOWED_CHARACTER.value]
@@ -300,8 +318,9 @@ def parse_multiplier_text(text: str | None) -> list[dict[str, Any]]:
         if category is None:
             result.append({"category": None, "value_text": value_text})
             continue
-        # multi-category shared multiplier: 二三×0.3 → 二×0.3 + 三×0.3
-        chars = list(category)
+        # multi-category shared multiplier: 二三×0.3 → 二×0.3 + 三×0.3;
+        # digit shorthand 2/3×1 → 二×1 + 三×1
+        chars = _category_chars(category)
         if len(set(chars)) != len(chars):
             return []  # duplicate category (二二×1) is ambiguous
         for ch in chars:

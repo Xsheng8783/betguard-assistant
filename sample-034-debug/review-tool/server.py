@@ -189,19 +189,27 @@ def _norm_mult_text(value) -> str:
 def _groups_exact(value):
     """Exact structural groups: list of tuples preserving column order,
     per-column order and duplicates."""
+    def _norm_num(x):
+        s = str(x)
+        return s.zfill(2) if s.isdigit() and len(s) <= 2 else s
+
     if value is None:
+        return []
+    if not value:
         return []
     if isinstance(value, list):
         if value and isinstance(value[0], list):
-            return [tuple(str(x) for x in g) for g in value]
-        return [tuple(str(x) for x in value)]
+            return [tuple(_norm_num(x) for x in g) for g in value]
+        return [tuple(_norm_num(x) for x in value)]
     return []
 
 
-def _structured_divergence(cs: dict, sem: dict) -> bool:
+def _structured_divergence(cs: dict, sem: dict, groups: list | None = None) -> bool:
     """Full-structure comparison: column order, per-column order, duplicates,
     multiplier and collision/stars. Never a sorted(set(...)) bag compare."""
-    cs_groups = _groups_exact(cs.get("semantics_numbers"))
+    # Backend contract: number_groups is the authoritative structured field
+    # (never re-parse model_raw_text), so compare it directly.
+    cs_groups = _groups_exact(groups if groups is not None else cs.get("semantics_numbers"))
     sem_groups = _groups_exact(sem.get("columns")) or _groups_exact(sem.get("numbers"))
     if cs_groups != sem_groups:
         return True
@@ -209,7 +217,12 @@ def _structured_divergence(cs: dict, sem: dict) -> bool:
     def _mults(value):
         return [_norm_mult_text(x) for x in (value or [])]
 
-    if _mults(cs.get("semantics_multipliers")) != _mults(sem.get("multipliers")):
+    # The pipeline semantic record does not carry a "multipliers" list, so
+    # only compare when BOTH sides actually expose one (avoids a false
+    # STRUCTURED_TEXT_DIVERGENT for every draft multiplier).
+    cs_mults = _mults(cs.get("semantics_multipliers"))
+    sem_mults = _mults(sem.get("multipliers"))
+    if cs_mults and sem_mults and cs_mults != sem_mults:
         return True
     cs_stars = sorted(str(x) for x in (cs.get("semantics_stars") or []))
     sem_stars = sorted(str(x) for x in (sem.get("stars") or []))
@@ -226,13 +239,75 @@ def _revalidate_line(line: dict, revision: int | None = None, game: str = "539")
         line["pipeline_review_revision"] = revision
     cs = line["pipeline_review"].get("closed_set") or {}
     sem = line["pipeline_review"].get("semantic") or {}
-    if _structured_divergence(cs, sem):
-        line.setdefault("warnings", [])
-        if "STRUCTURED_TEXT_DIVERGENT" not in line["warnings"]:
-            line["warnings"].append("STRUCTURED_TEXT_DIVERGENT")
-        line["uncertain"] = True
-        line["uncertain_reason"] = "STRUCTURED_TEXT_DIVERGENT"
+    groups = line.get("number_groups")
+    if _structured_divergence(cs, sem, groups):
+        # The stored raw_text may be the messy first-pass text. Backend
+        # contract uses number_groups + multiplier_text, so verify against
+        # the CANONICAL text instead; if that agrees, this is not a real
+        # divergence (the UI already shows the canonical 標準化結果).
+        canonical = _canonical_text(line)
+        current_raw = str(line.get("human_raw_text") or line.get("raw_text") or "")
+        if canonical and canonical != current_raw:
+            tmp = dict(line)
+            # Verification uses the parser's Chinese grammar; digit shorthand
+            # (2X5 / 2/3X1) is translated for THIS internal parse only. The
+            # stored fields and the UI 標準化結果 keep the digit form.
+            tmp["raw_text"] = _canonical_text(line, zh_mult=True)
+            tmp["human_raw_text"] = tmp["raw_text"]
+            rec2 = _reapply_pipeline(tmp, game=game)
+            sem2 = rec2.get("semantic") or {}
+            if not _structured_divergence(cs, sem2, groups):
+                line["pipeline_review"]["semantic"] = sem2
+                line["pipeline_review"]["parse_error"] = rec2.get("parse_error")
+                sem = sem2
+            else:
+                _mark_divergent(line)
+        else:
+            _mark_divergent(line)
     return line
+
+
+def _canonical_text(line: dict, *, zh_mult: bool = False) -> str:
+    """Standardized text from the authoritative structured fields:
+    number_groups -> multiplier_text LAST (same as the UI 標準化結果)."""
+    groups = line.get("number_groups") or []
+    if not groups:
+        return str(line.get("raw_text") or "")
+    if line.get("layout_hint") == "column_bet":
+        body = " / ".join(" ".join(g or []) for g in groups)
+    else:
+        body = " ".join(x for g in groups for x in (g or []))
+    mult = str(line.get("multiplier_text") or "").strip()
+    if zh_mult:
+        mult = _multiplier_to_zh(mult)
+    return f"{body} {mult}".strip() if mult else body
+
+
+_DIGIT_CN = {"2": "二", "3": "三", "4": "四"}
+
+
+def _multiplier_to_zh(text: str) -> str:
+    """Translate digit-category multiplier rules to the parser's Chinese
+    grammar for an internal verification parse only:
+    "2X5 3X2" -> "二X5 三X2", "2/3X1" -> "二三X1". Never stored."""
+    out = []
+    for rule in str(text or "").split():
+        m = re.fullmatch(r"([234/]+)X(\d+(?:\.\d+)?)", rule, re.IGNORECASE)
+        if not m:
+            out.append(rule)
+            continue
+        seen = set()
+        cats = [c for c in re.findall(r"[234]", m.group(1)) if not (c in seen or seen.add(c))]
+        out.append("".join(_DIGIT_CN[c] for c in cats) + "X" + m.group(2))
+    return " ".join(out)
+
+
+def _mark_divergent(line: dict) -> None:
+    line.setdefault("warnings", [])
+    if "STRUCTURED_TEXT_DIVERGENT" not in line["warnings"]:
+        line["warnings"].append("STRUCTURED_TEXT_DIVERGENT")
+    line["uncertain"] = True
+    line["uncertain_reason"] = "STRUCTURED_TEXT_DIVERGENT"
 
 
 def _complete_validation(draft: dict, expected_revision: int | None = None) -> list[dict]:

@@ -31,6 +31,7 @@ UNIT_AMOUNT = Decimal("100")  # 1 柱 = 100 元
 CATEGORY_CN: dict[str, list[int]] = {
     "二三": [2, 3],
     "二三四": [2, 3, 4],
+    "二": [2],
     "三四": [3, 4],
     "三": [3],
     "四": [4],
@@ -45,7 +46,7 @@ CATEGORY_NUM: dict[str, list[int]] = {
     "23.4": [2, 3, 4],
 }
 CATEGORY_MAP: dict[str, list[int]] = {**CATEGORY_CN, **CATEGORY_NUM}
-CATEGORY_TOKEN = r"(?:二三|二三四|三四|三|四|¾|⅔|23|2\.3|234|2\.3\.4|23\.4)"
+CATEGORY_TOKEN = r"(?:二三|二三四|三四|三|四|¾|⅔|23|2\.3|234|2\.3\.4|23\.4|二)"
 
 TAIL_RE = re.compile(r"(?P<d>[0-9])\s*尾")
 MULT_TAIL_RE = re.compile(
@@ -56,7 +57,7 @@ MULT_TAIL_RE = re.compile(
 # NOTE: "34" and single digits are intentionally excluded here (ambiguous
 # with column numbers); they are handled by the standalone tail checks.
 MULT_ANYWHERE_RE = re.compile(
-    rf"(?:二三|二三四|三四|三|四|¾|⅔|23|2\.3|234|2\.3\.4|23\.4)\s*[xX×]\s*\d+(?:\.\d+)?"
+    rf"(?:二三|二三四|三四|三|四|¾|⅔|23|2\.3|234|2\.3\.4|23\.4|二)\s*[xX×]\s*\d+(?:\.\d+)?"
 )
 COMPOUND_PART_RE = re.compile(
     rf"(?P<cat>{CATEGORY_TOKEN})\s*[xX×]\s*(?P<val>\d+(?:\.\d+)?)"

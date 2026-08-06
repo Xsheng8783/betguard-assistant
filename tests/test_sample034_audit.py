@@ -1108,3 +1108,100 @@ def test_diff_protected_reports_change():
     assert ("R03-L1", "number_groups") in paths
     assert ("R03-L1", "multiplier_text") in paths
     assert ("R03-L1", "layout_hint") in paths
+
+
+# --- sample-010 completion: digit-category multipliers must not block ---
+
+
+def test_closed_set_digit_multiplier_forms():
+    from betguard.vision.closed_set import parse_multiplier_text, validate_multiplier
+    assert parse_multiplier_text("2X1") == [{"category": "二", "value_text": "1"}]
+    assert parse_multiplier_text("2/3X1") == [
+        {"category": "二", "value_text": "1"},
+        {"category": "三", "value_text": "1"},
+    ]
+    assert parse_multiplier_text("3/4X1") == [
+        {"category": "三", "value_text": "1"},
+        {"category": "四", "value_text": "1"},
+    ]
+    assert parse_multiplier_text("2X5 3X2") == [
+        {"category": "二", "value_text": "5"},
+        {"category": "三", "value_text": "2"},
+    ]
+    assert parse_multiplier_text("2.2X1") == []  # duplicate category -> ambiguous
+    for t in ("2X1", "2/3X1", "3/4X1", "2X5 3X2"):
+        assert validate_multiplier(t) == []
+    assert validate_multiplier("2.2X1") != []
+
+
+def test_semantic_parser_compound_digit_rules():
+    from betguard.semantic_parser import parse_ocr_text
+    b = parse_ocr_text("11 15 24 37 二X5 三X2", game="539")
+    assert b.type == "normal"
+    assert b.numbers == [11, 15, 24, 37]
+    assert b.stars == [2, 3]
+    assert b.unit == 5
+
+
+def test_revalidate_canonical_no_false_divergence():
+    import server as S
+    line = {
+        "line_id": "R01-L1",
+        "raw_text": "11 , 15 , 24 . 37 2 x 5 3 x 2",
+        "human_raw_text": None,
+        "number_groups": [["11", "15", "24", "37"]],
+        "multiplier_text": "2X5 3X2",
+        "multiplier_rules": [
+            {"rule_text": "2X5", "categories": ["2"], "value": "5"},
+            {"rule_text": "3X2", "categories": ["3"], "value": "2"},
+        ],
+        "layout_hint": "normal_row",
+        "uncertain": False,
+        "warnings": [],
+    }
+    S._revalidate_line(line, revision=1, game="539")
+    assert "STRUCTURED_TEXT_DIVERGENT" not in line["warnings"]
+    assert line["pipeline_review"]["semantic"]["numbers"] == [11, 15, 24, 37]
+
+    bad = dict(line)
+    bad.update({
+        "line_id": "R99-L1",
+        "number_groups": [["68"]],  # 68 is out of 539 range
+        "multiplier_text": "X1",
+        "raw_text": "68 X1",
+    })
+    S._revalidate_line(bad, revision=1, game="539")
+    assert bad["pipeline_review"].get("parse_error")
+    codes = [i["code"] for i in S._complete_validation(
+        {"lines": [bad], "shared_multiplier_rules": [], "game": "539"})]
+    assert "PARSE_ERROR" in codes
+
+
+def test_sample010_like_complete_flow_passes():
+    import server as S
+
+    def line(lid, groups, raw, mult, layout):
+        return {
+            "line_id": lid,
+            "review_action": "confirmed",
+            "raw_text": raw,
+            "human_raw_text": None,
+            "number_groups": groups,
+            "multiplier_text": mult,
+            "multiplier_rules": [],
+            "layout_hint": layout,
+            "uncertain": False,
+            "warnings": [],
+        }
+
+    lines = [
+        line("R01-L1", [["11", "15", "24", "37"]], "11 , 15 , 24 . 37 2 x 5 3 x 2", "2X5 3X2", "normal_row"),
+        line("R02-L1", [["15"], ["24"], ["22", "35", "28"]], "15 / 24 / 22 35 28 2/3X1", "2/3X1", "column_bet"),
+        line("R05-L1", [["02", "17", "20", "33"]], "02 17 20 33 3/4X1", "3/4X1", "normal_row"),
+        line("R09-L1", [["24", "37"]], "24 x 37 2 x 4", "2X4", "normal_row"),
+    ]
+    draft = {"lines": lines, "shared_multiplier_rules": [], "game": "539"}
+    for l in lines:
+        S._revalidate_line(l, revision=1, game="539")
+    issues = S._complete_validation(draft, expected_revision=1)
+    assert issues == []
