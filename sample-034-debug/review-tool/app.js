@@ -401,6 +401,7 @@ function renderLineCard(line, region) {
     </div>
     ${line.human_raw_text ? `<div class="human-raw"><b>修正後原文：</b>${esc(line.human_raw_text)}</div>` : ""}
     <div class="model-raw"><b>AI 讀到的原文：</b>${esc(line.model_raw_text ?? line.raw_text ?? "")}</div>
+    <div class="norm-result"><b>標準化結果：</b>${esc(ROILogic.standardizedResultText(line))}</div>
     ${roiEvidence}
     ${cropImg}
     <div class="row"><label>人工修正原文</label><input type="text" class="f-human" value="${esc(line.human_raw_text ?? "")}"></div>

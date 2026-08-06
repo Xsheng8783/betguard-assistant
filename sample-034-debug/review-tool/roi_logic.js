@@ -59,6 +59,23 @@
     return normRuleText(value);
   }
 
+  // Display-only canonical result: number_groups in order, multiplier_text
+  // LAST. NEVER parses model_raw_text; if there are no groups, raw_text is
+  // shown as-is. PURE: never mutates line.
+  function standardizedResultText(line) {
+    if (!line) return "";
+    const groups = line.number_groups || [];
+    const mult = String(line.multiplier_text || "").trim();
+    if (groups.length) {
+      const body =
+        line.layout_hint === "column_bet"
+          ? groups.map((g) => (g || []).join(" ")).join(" / ")
+          : groups.flat().join(" ");
+      return mult ? `${body} ${mult}` : body;
+    }
+    return String(line.raw_text || "");
+  }
+
   // Returns {hasCandidates, candidates, merged, displayCandidates, adopted,
   // hint}. PURE: never mutates line. Candidates are normalized + deduped for
   // DISPLAY ONLY; the original fallback_candidate.multiplier_candidates array
@@ -234,5 +251,6 @@
     multiplierCandidatesHtml,
     adoptMultiplierCandidate,
     normalizeCandidate,
+    standardizedResultText,
   };
 });

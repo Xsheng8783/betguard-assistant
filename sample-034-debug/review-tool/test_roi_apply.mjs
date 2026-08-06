@@ -261,4 +261,67 @@ function ok(name) {
   ok("候選 非候選值不可採用、資料不變");
 }
 
+// ---- standardized result display (number_groups -> multiplier_text last) ----
+{
+  const line = {
+    line_id: "R02-L1",
+    layout_hint: "column_bet",
+    number_groups: [["15"], ["24"], ["22", "35", "28"]],
+    multiplier_text: "2X1",
+    model_raw_text: "15 . 24 x 22 2 x 1 35 28",
+    raw_text: "15 / 24 / 22 35 28 2X1",
+  };
+  const before = JSON.stringify(line);
+  assert.equal(R.standardizedResultText(line), "15 / 24 / 22 35 28 2X1", "R02: multiplier last");
+  assert.equal(line.model_raw_text, "15 . 24 x 22 2 x 1 35 28", "R02: model_raw_text unchanged");
+  assert.equal(JSON.stringify(line), before, "R02: standardization is display-only");
+  ok("標準化 R02 柱碰：number_groups → 2X1 最後、model_raw_text 不變");
+}
+
+{
+  const line = {
+    line_id: "R05-L1",
+    layout_hint: "normal_row",
+    number_groups: [["02"], ["17"], ["20"], ["33"]],
+    multiplier_text: "3X1",
+    model_raw_text: "02 . 17 . 20 . 33 3 x 1",
+  };
+  assert.equal(R.standardizedResultText(line), "02 17 20 33 3X1", "normal row: multiplier last");
+  assert.equal(line.model_raw_text, "02 . 17 . 20 . 33 3 x 1");
+  ok("標準化 一般行：號碼在前、倍率最後");
+}
+
+{
+  const line = {
+    line_id: "R03-L1",
+    layout_hint: "column_bet",
+    number_groups: [["35"], ["24", "34"], ["18", "28"]],
+    multiplier_text: "",
+    model_raw_text: "35 x 24 x 18 2 x 1 34 28",
+  };
+  assert.equal(R.standardizedResultText(line), "35 / 24 34 / 18 28", "no trailing space when no multiplier");
+  assert.equal(line.model_raw_text, "35 x 24 x 18 2 x 1 34 28");
+  ok("標準化 柱碰無倍率：不補空白、model_raw_text 不變");
+}
+
+{
+  // Scrambled model_raw_text must NOT affect the standardized result.
+  const line = {
+    line_id: "R02-L1",
+    layout_hint: "column_bet",
+    number_groups: [["15"], ["24"], ["22", "35", "28"]],
+    multiplier_text: "2X1",
+    model_raw_text: "22 2 x 1 15 . 24 x 35 28",
+  };
+  assert.equal(R.standardizedResultText(line), "15 / 24 / 22 35 28 2X1");
+  assert.equal(line.model_raw_text, "22 2 x 1 15 . 24 x 35 28");
+  ok("標準化 不重新解析 model_raw_text（順序只來自 number_groups）");
+}
+
+{
+  const line = { line_id: "R99-L1", raw_text: "只有原文", number_groups: [] };
+  assert.equal(R.standardizedResultText(line), "只有原文");
+  ok("標準化 無 number_groups 時退回 raw_text");
+}
+
 console.log(`\n${passed} tests passed`);
