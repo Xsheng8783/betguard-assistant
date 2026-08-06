@@ -690,3 +690,295 @@ def test_combo_no_attempts_fail_closed(monkeypatch):
     issues = [i["code"] for i in S._complete_validation(
         {"lines": lines, "shared_multiplier_rules": [], "game": "539"})]
     assert "LINE_NOT_CONFIRMED" in issues  # complete endpoint -> 409
+
+
+# --- sample-010 right-side play marks / multipliers ---
+
+
+@pytest.fixture()
+def sample010_fixture():
+    p = DEBUG / "fixtures" / "sample-010-combined.json"
+    if not p.exists():
+        pytest.skip("fixture sample-010-combined.json missing")
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
+def _mark(text, cy):
+    return {"text": text, "bbox": [500, cy - 20, 560, cy + 20]}
+
+
+def test_sample010_extract_all_multipliers_not_last():
+    """A. One row with two category multipliers keeps BOTH, never matches[-1]."""
+    text = "11 , 15 , 24 . 37 2 x 5 3 x 2"
+    assert pg.extract_multiplier_rules(text) == ["2X5", "3X2"]
+    assert pg.extract_multiplier(text) == "2X5 3X2"
+
+
+def test_sample010_column_separator_not_multiplier():
+    """"24 x 22" / "24 x 37" are column separators, not multiplier rules."""
+    assert pg.extract_multiplier_rules("15 . 24 x 22 2 x 1 35 28") == ["2X1"]
+    assert pg.extract_multiplier_rules("24 x 37 2 x 4") == ["2X4"]
+
+
+def test_sample010_stacked_34x1_still_kept():
+    """A two-digit CATEGORY shorthand (34=三四) with a one-digit value stays."""
+    assert pg.extract_multiplier_rules("02 30 33 34X1") == ["34X1"]
+
+
+def test_sample010_normal_row_not_routed_to_column_combo(sample010_fixture, monkeypatch):
+    """R01 is a normal row: its x's are play marks, so it must never call the
+    column_combo ROI (which would waste a paid call and add false uncertainty)."""
+    def boom(*a, **k):
+        raise AssertionError("normal row must not call column_combo ROI")
+
+    monkeypatch.setattr(pg, "_read_column_combo", boom)
+    monkeypatch.setattr(pg, "_read_play_mark", lambda *a, **k: None)
+    lines = pg.section_to_lines(
+        sample010_fixture["sections"][0], "R01", img_path=Path("x.jpg")
+    )
+    assert lines[0]["layout_hint"] == "normal_row"
+
+
+def test_sample010_r01_keeps_both_rules(sample010_fixture, monkeypatch):
+    monkeypatch.setattr(pg, "_read_play_mark", lambda *a, **k: None)
+    lines = pg.section_to_lines(
+        sample010_fixture["sections"][0], "R01", img_path=Path("x.jpg")
+    )
+    l = lines[0]
+    assert l["multiplier_text"] == "2X5 3X2"
+    assert [r["rule_text"] for r in l["multiplier_rules"]] == ["2X5", "3X2"]
+    assert l["model_raw_text"] == l["raw_text"]
+
+
+def test_sample010_r02_columns_and_fail_closed(sample010_fixture, monkeypatch):
+    """B. R02 columns are correct; the saved response has no '3' token, so the
+    pipeline must NOT fabricate 2/3X1 — it stays needs_review with evidence."""
+    monkeypatch.setattr(pg, "_read_column_combo", lambda *a, **k: None)
+    lines = pg.section_to_lines(
+        sample010_fixture["sections"][1], "R02",
+        img_path=Path("x.jpg"), crop_box=[0, 0, 2000, 2000],
+    )
+    l = lines[0]
+    assert l["number_groups"] == [["15"], ["24"], ["22", "35", "28"]]
+    assert l["multiplier_text"] == "2X1"
+    assert l["uncertain"] is True
+    assert l["uncertain_reason"] == "column_combo_insufficient_evidence"
+    assert "column_combo_needs_review" in l["warnings"]
+
+
+def test_sample010_r03_multiplier(sample010_fixture, monkeypatch):
+    """C. R03 keeps 2X1 from the right-band tokens."""
+    monkeypatch.setattr(pg, "_read_column_combo", lambda *a, **k: None)
+    lines = pg.section_to_lines(
+        sample010_fixture["sections"][2], "R03",
+        img_path=Path("x.jpg"), crop_box=[0, 0, 2000, 2000],
+    )
+    l = lines[0]
+    assert l["number_groups"] == [["35"], ["24", "34"], ["18", "28"]]
+    assert l["multiplier_text"] == "2X1"
+
+
+def test_column_combo_crop_includes_right_play_zone(monkeypatch):
+    """E. The column-combo ROI crop must extend to the RIGHT play mark (碰法/
+    倍率), not stop at the last number column; the section band is preserved."""
+    toks = [
+        {"text": "15", "bbox": [50, 230, 90, 265]},
+        {"text": "x", "bbox": [190, 235, 210, 260]},
+        {"text": "22", "bbox": [220, 230, 260, 265]},
+        {"text": "2", "bbox": [390, 255, 410, 280]},
+        {"text": "x", "bbox": [420, 255, 440, 280]},
+        {"text": "1", "bbox": [450, 255, 470, 280]},
+        {"text": "35", "bbox": [220, 275, 260, 310]},
+        {"text": "28", "bbox": [220, 300, 260, 335]},
+    ]
+    captured = {}
+    captured["boxes"] = []
+
+    def fake(img, bbox, *, save_path=None, box=None, variant="original_3x", meta=None, request_id=None):
+        captured["bbox"] = list(bbox)
+        captured["box"] = list(box) if box else None
+        captured["boxes"].append(list(box) if box else None)
+        if meta is not None:
+            meta["request_id"] = request_id or "rid"
+        return json.dumps({
+            "columns": [["15"], ["22", "35", "28"]],
+            "collision": "2", "multiplier": "1", "uncertain": False,
+        })
+
+    monkeypatch.setattr("test_combined_bbox.call_column_combo_crop", fake)
+    pg._read_column_combo(Path("x.jpg"), toks, crop_box=[10, 200, 560, 350])
+    assert captured["bbox"][2] >= 470          # reaches the play mark
+    assert [10, 200, 560, 350] in captured["boxes"]  # dy=0 keeps full band
+    assert all(b[2] >= 470 for b in captured["boxes"])
+
+
+def test_column_combo_multiplier_text_2_3():
+    """ROI path: collision 2/3 + multiplier 1 composes 2/3X1 (never 23X1)."""
+    l = pg._column_combo_line("R02", {
+        "columns": [["15"], ["24"], ["22", "35", "28"]],
+        "collision": "2/3", "multiplier": "1",
+        "uncertain": False, "status": "consensus", "attempts": [],
+    }, game="539")[0]
+    assert l["multiplier_text"] == "2/3X1"
+    assert l["raw_text"] == "15 / 24 / 22 35 28 2/3X1"
+    assert l["multiplier_rules"][0]["categories"] == ["2", "3"]
+
+
+def test_column_combo_multiplier_text_2():
+    """ROI path: collision 2 + multiplier 1 composes 2X1."""
+    l = pg._column_combo_line("R03", {
+        "columns": [["35"], ["24", "34"], ["18", "28"]],
+        "collision": "2", "multiplier": "1",
+        "uncertain": False, "status": "consensus", "attempts": [],
+    }, game="539")[0]
+    assert l["multiplier_text"] == "2X1"
+
+
+def test_first_pass_merge_independent_lower_digit():
+    """D. '3x1' + an independent '4' below -> upper 3 / lower 4 -> 3/4X1."""
+    pm = pg._first_pass_play_mark([_mark("3x1", 200), _mark("4", 260)])
+    assert pm["upper_digits"] == ["3"]
+    assert pm["lower_digits"] == ["4"]
+    assert pg._compose_mult_from_play_mark(pm, ["3X1"]) == "3/4X1"
+
+
+def test_normal_lines_merge_independent_lower_digit():
+    row = {
+        "numbers": [["02"], ["17"], ["20"], ["33"]],
+        "tokens": [
+            {"text": "02", "bbox": [60, 575, 100, 610]},
+            {"text": "17", "bbox": [135, 575, 175, 610]},
+            {"text": "20", "bbox": [210, 575, 250, 610]},
+            {"text": "33", "bbox": [285, 575, 325, 610]},
+            {"text": "3x1", "bbox": [420, 585, 500, 610]},
+            {"text": "4", "bbox": [420, 630, 500, 660]},
+        ],
+        "multiplier": None,
+        "layout_hint": "normal_row",
+    }
+    l = pg._normal_lines([row], "R05")[0]
+    assert l["multiplier_text"] == "3/4X1"
+    assert l["multiplier_rules"][0]["categories"] == ["3", "4"]
+
+
+def test_two_digit_numbers_not_play_digits():
+    """E. Main numbers 24 / 34 must never be read as a stacked lower digit."""
+    pm = pg._first_pass_play_mark([_mark("3x1", 200), _mark("24", 260)])
+    assert pm["upper_digits"] == ["3"]
+    assert pm["lower_digits"] == []
+    assert pg._compose_mult_from_play_mark(pm, ["3X1"]) is None
+    pm2 = pg._first_pass_play_mark([_mark("3x1", 200), _mark("34", 260)])
+    assert pm2["lower_digits"] == []
+
+
+def test_column_combo_missing_collision_or_multiplier_needs_review():
+    """F. ROI without collision/multiplier stays needs_review (fail-closed)."""
+    l = pg._column_combo_line("R02", {
+        "columns": [["15"], ["24"], ["22", "35", "28"]],
+        "collision": None, "multiplier": None,
+        "uncertain": False, "status": "consensus", "attempts": [],
+    }, game="539")[0]
+    assert l["uncertain"] is True
+    assert l["uncertain_reason"] == "column_combo_invalid_structure"
+    assert "column_combo_needs_review" in l["warnings"]
+
+
+def test_geometry_fallback_no_multiplier_fail_closed():
+    """Columns read but no multiplier/collision -> never a certain result."""
+    sec = {"rows": [{"tokens": [
+        {"text": "15", "bbox": [50, 230, 90, 265]},
+        {"text": "x", "bbox": [190, 235, 210, 260]},
+        {"text": "22", "bbox": [220, 230, 260, 265]},
+        {"text": "35", "bbox": [220, 275, 260, 310]},
+        {"text": "28", "bbox": [220, 300, 260, 335]},
+    ]}]}
+    l = pg.section_to_lines(sec, "R06", img_path=None)[0]
+    assert l["uncertain"] is True
+    assert l["uncertain_reason"] == "missing_multiplier_or_collision"
+    assert "column_combo_needs_review" in l["warnings"]
+
+
+def test_v3_fallback_never_touches_model_raw_text(monkeypatch, tmp_path):
+    """G. v3 prelabel evidence is recorded; model_raw_text and multiplier_text
+    are never overwritten (no auto-fill of the stacked 4)."""
+    pre = tmp_path / "prelabels"
+    pre.mkdir()
+    (pre / "sample-034.json").write_text(json.dumps({
+        "raw_model_output": json.dumps({"sections": [{"rows": [
+            {"numbers": [["02"], ["17"], ["20"], ["33"]], "multiplier": "3/4X1"}
+        ]}]}),
+    }, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(pg, "PRELABELS", pre)
+    line = {
+        "line_id": "R05-L1",
+        "model_raw_text": "02 . 17 . 20 . 33 3 x 1",
+        "raw_text": "02 . 17 . 20 . 33 3 x 1",
+        "multiplier_text": "3X1",
+        "number_groups": [["02", "17", "20", "33"]],
+        "warnings": [],
+        "uncertain": False,
+    }
+    pg._apply_v3_fallback("sample-034", {"lines": [line]})
+    assert line["model_raw_text"] == "02 . 17 . 20 . 33 3 x 1"
+    assert line["multiplier_text"] == "3X1"
+    assert line["uncertain"] is True
+    assert "cross_pass_multiplier_divergent" in line["warnings"]
+    assert "possible_stacked_category_digit" in line["warnings"]
+    assert line["fallback_candidate"]["multiplier_candidates"] == ["3/4X1"]
+
+
+def test_sample010_needs_review_cannot_complete():
+    """H. needs_review/pending rows never complete -> never exportable."""
+    import server as S
+    line = _confirmed_line("R02-L1", [["15"], ["24"], ["22", "35", "28"]], None)
+    line["layout_hint"] = "column_bet"
+    line["review_action"] = "pending"
+    line["uncertain"] = True
+    codes = [i["code"] for i in S._complete_validation(
+        {"lines": [line], "shared_multiplier_rules": [], "game": "539"})]
+    assert "LINE_NOT_CONFIRMED" in codes
+
+
+def test_sample010_end_to_end_draft_v3_evidence(sample010_fixture, monkeypatch, tmp_path):
+    """Regenerate the sample-010 draft from the saved combined response with
+    the v3 prelabel evidence: R01 keeps 2X5+3X2, R02/R03 keep 2X1 (no
+    fabricated 2/3), R05 keeps 3X1 with a 3/4X1 candidate, and model_raw_text
+    is never touched."""
+    pre = tmp_path / "prelabels"
+    pre.mkdir()
+    fixture_pre = DEBUG / "fixtures" / "sample-010-prelabel.json"
+    if not fixture_pre.exists():
+        pytest.skip("fixture sample-010-prelabel.json missing")
+    (pre / "sample-010.json").write_text(
+        fixture_pre.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setattr(pg, "PRELABELS", pre)
+    monkeypatch.setattr(pg, "DRAFT", tmp_path / "ground-truth-draft")
+    pg.DRAFT.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(pg, "_read_column_combo", lambda *a, **k: None)
+    monkeypatch.setattr(pg, "_read_play_mark", lambda *a, **k: None)
+
+    pg.process_parsed("sample-010", sample010_fixture, write=True, game="539")
+    d = json.loads((pg.DRAFT / "sample-010.json").read_text(encoding="utf-8"))
+    by_id = {l["line_id"]: l for l in d["lines"]}
+
+    r01 = by_id["R01-L1"]
+    assert r01["multiplier_text"] == "2X5 3X2"
+    assert [r["rule_text"] for r in r01["multiplier_rules"]] == ["2X5", "3X2"]
+    assert r01["model_raw_text"] == "11 , 15 , 24 . 37 2 x 5 3 x 2"
+
+    r02 = by_id["R02-L1"]
+    assert r02["number_groups"] == [["15"], ["24"], ["22", "35", "28"]]
+    assert r02["multiplier_text"] == "2X1"
+    assert r02["model_raw_text"] == "15 . 24 x 22 2 x 1 35 28"
+    assert r02["uncertain"] is True
+    assert r02["fallback_candidate"]["multiplier_candidates"] == ["3X1"]
+    assert "possible_stacked_category_digit" in r02["warnings"]
+
+    assert by_id["R03-L1"]["multiplier_text"] == "2X1"
+    assert by_id["R04-L1"]["multiplier_text"] == "2X1"
+
+    r05 = by_id["R05-L1"]
+    assert r05["multiplier_text"] == "3X1"
+    assert "3/4X1" in r05["fallback_candidate"]["multiplier_candidates"]
+    assert "possible_stacked_category_digit" in r05["warnings"]
+    assert r05["model_raw_text"] == "02 . 17 . 20 . 33 3 x 1"

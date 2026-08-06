@@ -34,6 +34,49 @@ def _cx(t: dict) -> float:
     return (t["bbox"][0] + t["bbox"][2]) / 2
 
 
+def _cy(t: dict) -> float:
+    return (t["bbox"][1] + t["bbox"][3]) / 2
+
+
+def _norm_rule(rule: str) -> str:
+    """Normalize one multiplier rule for the draft field: collapse whitespace,
+    x/× -> X, ¾/⅔ -> 3/4 / 2/3 (e.g. "2 x 5" -> "2X5")."""
+    return (
+        re.sub(r"\s+", "", rule or "")
+        .replace("¾", "3/4")
+        .replace("⅔", "2/3")
+        .replace("×", "X")
+        .replace("x", "X")
+    )
+
+
+def extract_multiplier_rules(text: str) -> list[str]:
+    """ALL category×value rules in reading order (top->bottom / left->right),
+    each normalized. NEVER silently drops earlier rules.
+
+    A "CATxVALUE" token where BOTH sides are two-digit lottery numbers is a
+    column separator (e.g. "24 x 22"), NOT a multiplier, and is skipped.
+    """
+    out: list[str] = []
+    for m in MULT_EXTRACT_RE.finditer(text or ""):
+        raw = _norm_rule(m.group(0))
+        cm = re.fullmatch(r"([^X]+)X(\d+(?:\.\d+)?)", raw)
+        if cm and re.fullmatch(r"\d{2}", cm.group(1)) and re.fullmatch(r"\d{2}", cm.group(2)):
+            continue
+        out.append(raw)
+    return out
+
+
+def _rule_categories(rule: str) -> list[str]:
+    """Category digits from a normalized rule like "2X1" / "2/3X0.1"."""
+    return [c for c in re.findall(r"[234]", rule.split("X", 1)[0] if "X" in rule else rule)]
+
+
+def _rule_value(rule: str) -> str | None:
+    m = re.search(r"X(\d+(?:\.\d+)?)", rule)
+    return m.group(1) if m else None
+
+
 def check_image_quality(path: Path) -> list[str]:
     """Pre-OCR quality / orientation gates. Returns issue codes."""
     from PIL import Image, ImageFilter, ImageOps, ImageStat
@@ -65,11 +108,51 @@ def check_image_quality(path: Path) -> list[str]:
 
 
 def extract_multiplier(text: str) -> str | None:
-    """Reliable multiplier from the model's own section text (last match)."""
-    matches = MULT_EXTRACT_RE.findall(text)
-    if not matches:
-        return None
-    return matches[-1].replace("¾", "3/4").replace("⅔", "2/3")
+    """Backward-compatible single-field view of the model's own section text.
+
+    Returns ALL rules joined by a space (never just the last match), or None
+    when there is no play multiplier.
+    """
+    rules = extract_multiplier_rules(text)
+    return " ".join(rules) if rules else None
+
+
+def _compose_collision_rules(rules: list[str], coll: str | None) -> list[str]:
+    """Merge per-rule categories with the geometry collision (碰法).
+
+    - One rule whose single category belongs to the collision becomes
+      "collXvalue" (e.g. "3X1" + collision "2/3" -> "2/3X1").
+    - Several rules with the SAME value whose categories are exactly covered
+      by the collision merge into one rule (e.g. ["2X1","3X1"] -> "2/3X1").
+    - Rules with DIFFERENT values stay separate ("2X5 3X2" is NOT collapsed).
+    """
+    if not rules or not coll:
+        return list(rules)
+    coll_digits = set(re.findall(r"[234]", coll))
+    by_value: dict[str, list[str]] = {}
+    order: list[str] = []
+    raw_out: list[str] = []
+    for rule in rules:
+        flat = re.sub(r"\s+", "", rule)
+        m = re.match(r"([234])[xX×]([\d.]+)", flat)
+        if not m:
+            raw_out.append(rule)
+            continue
+        cat, val = m.group(1), m.group(2)
+        if val not in by_value:
+            by_value[val] = []
+            order.append(val)
+        by_value[val].append(cat)
+    out = list(raw_out)
+    for val in order:
+        cats = by_value[val]
+        if len(cats) >= 2 and set(cats) <= coll_digits and len(coll_digits) >= 2:
+            out.append("/".join(sorted(coll_digits)) + "X" + val)
+        elif len(cats) == 1 and cats[0] in coll_digits:
+            out.append(f"{coll}X{val}")
+        else:
+            out.extend(f"{c}X{val}" for c in cats)
+    return out
 
 
 def section_to_lines(
@@ -93,12 +176,22 @@ def section_to_lines(
         return _car_lines(section, region_id)
     ys = [(t["bbox"][1] + t["bbox"][3]) / 2 for t in nums]
     single_row = (max(ys) - min(ys)) < 25
-    # Column-combo detection: >=3 numbers AND (>=2 standalone x/× separators
-    # OR a "/" token). Column bets go through the column_combo ROI (never the
-    # play_mark ROI), so the parser can rebuild columns without flattening.
+    # Column-combo detection: >=3 numbers AND (>=2 separator x/× BETWEEN
+    # number columns, OR a "/" token, OR one separator x plus a right-side
+    # play x). A normal row like "11 15 24 37 2X5 3X2" has its x's only in
+    # the right play zone, so it must NOT be routed to the column_combo ROI.
     x_seps = [t for t in toks if str(t.get("text") or "") in "xX×"]
     has_slash = any("/" in str(t.get("text") or "") for t in toks)
-    column_like = len(nums) >= 3 and (len(x_seps) >= 2 or has_slash)
+    nums_cx_min = min((t["bbox"][0] + t["bbox"][2]) / 2 for t in nums)
+    nums_cx_max = max((t["bbox"][0] + t["bbox"][2]) / 2 for t in nums)
+    column_seps = [
+        t for t in x_seps
+        if nums_cx_min - 10 <= _cx(t) <= nums_cx_max + 10
+    ]
+    play_xs = [t for t in x_seps if _cx(t) > nums_cx_max + 20]
+    column_like = len(nums) >= 3 and (
+        len(column_seps) >= 2 or has_slash or (len(column_seps) >= 1 and len(play_xs) >= 1)
+    )
     combo_status: str | None = None
     if column_like and img_path:
         combo = _read_column_combo(
@@ -119,39 +212,58 @@ def section_to_lines(
             _normal_lines(rows, region_id, img_path=img_path, crop_box=crop_box),
             combo_status,
         )
-    nums_cx_min = min((t["bbox"][0] + t["bbox"][2]) / 2 for t in nums)
-    nums_cx_max = max((t["bbox"][0] + t["bbox"][2]) / 2 for t in nums)
     # clean zone: numbers + separators inside the number band; collision digits
-    # and multiplier pieces only in the immediate right band (avoid neighbor bets)
+    # and multiplier pieces in the right band bounded by the SECTION y-range
+    # (so the play mark is kept, but neighboring bets above/below never leak).
+    y_lo = min(t["bbox"][1] for t in toks) - 30
+    y_hi = max(t["bbox"][3] for t in toks) + 30
+    right_x_max = nums_cx_max + 300
     toks = [
         t for t in toks
         if (re.fullmatch(r"\d{2}", str(t.get("text") or "")) and 1 <= int(str(t.get("text") or "")) <= 49)
         or (str(t.get("text") or "") in "xX×")
-        or (str(t.get("text") or "") in "234" and nums_cx_min - 25 <= _cx(t) <= nums_cx_max + 90)
-        or (str(t.get("text") or "") in "01." and nums_cx_max + 8 <= _cx(t) <= nums_cx_max + 200)
+        or (
+            (str(t.get("text") or "") in "23401.")
+            and nums_cx_min - 25 <= _cx(t) <= right_x_max
+            and y_lo <= _cy(t) <= y_hi
+        )
     ]
     res = build_grid_from_rows(toks) if len(toks) >= 3 else None
     if res is not None and res["column_count"] >= 2:
         cols = res["columns"]
         mult = res["multiplier"]
         coll = res["collision_raw"]
-        extracted = extract_multiplier(section_text)
-        # The model often writes "2 x 0 . 1" with spaces; strip them so the
-        # trailing-digit and collision-merge checks see "2x0.1".
-        extracted_flat = re.sub(r"\s+", "", extracted) if extracted else ""
-        if extracted and re.search(r"[xX×]\d+$", extracted_flat):
-            rest = section_text[section_text.rfind(extracted) + len(extracted):]
+        raw_rules = extract_multiplier_rules(section_text)
+        # The model often writes "2 x 0 . 1" with a detached trailing digit;
+        # attach it to the LAST raw match so the rule becomes "2X0.1".
+        raw_matches = list(MULT_EXTRACT_RE.finditer(section_text))
+        if raw_matches:
+            last = raw_matches[-1]
+            rest = section_text[last.end():]
             m2 = re.match(r"\s*\.\s*(\d+)", rest)
             if m2:
-                extracted += "." + m2.group(1)
-        if coll and extracted:
-            cm = re.match(r"([234])[xX×]([\d.]+)", re.sub(r"\s+", "", extracted))
-            if cm and cm.group(1) in coll:
-                extracted = f"{coll}X{cm.group(2)}"
-        mult_txt = extracted or (f"{coll}X{mult}" if coll and mult else (f"X{mult}" if mult else (coll or None)))
+                raw_rules[-1] = _norm_rule(last.group(0) + "." + m2.group(1))
+        rules = _compose_collision_rules(raw_rules, coll)
+        if rules:
+            mult_txt = " ".join(rules)
+        else:
+            mult_txt = f"{coll}X{mult}" if coll and mult else (f"X{mult}" if mult else (coll or None))
+        multiplier_rules = [
+            {
+                "rule_text": r,
+                "categories": _rule_categories(r),
+                "value": _rule_value(r),
+            }
+            for r in rules
+        ] if rules else []
         uncertain = False
         uncertain_reason = None
         warnings = ["geometry_x_clustered"]
+        if not mult_txt:
+            uncertain = True
+            uncertain_reason = "missing_multiplier_or_collision"
+            if "column_combo_needs_review" not in warnings:
+                warnings.append("column_combo_needs_review")
         play_mark = None
         text = " / ".join(" ".join(v) for v in cols.values())
         if mult_txt:
@@ -162,8 +274,11 @@ def section_to_lines(
             "region_id": region_id,
             "order": 1,
             "raw_text": text,
+            "model_raw_text": section_text,
+            "human_raw_text": None,
             "number_groups": [list(v) for v in cols.values()],
             "multiplier_text": mult_txt,
+            "multiplier_rules": multiplier_rules,
             "layout_hint": "column_bet",
             "play_text": None,
             "play_type": None,
@@ -182,6 +297,8 @@ def section_to_lines(
         nums = r.get("numbers") or []
         flat = [str(x) for sub in (nums if nums and isinstance(nums[0], list) else [nums]) for x in (sub if isinstance(sub, list) else [sub])] if nums else []
         toktxt = "".join(str(t.get("text") or "") for t in (r.get("tokens") or []) if str(t.get("text") or "") != " ")
+        rules = extract_multiplier_rules(toktxt)
+        mult_txt = " ".join(rules) if rules else (r.get("multiplier") or None)
         lines.append({
             "line_id": f"{region_id}-L{i}",
             "entry_id": f"{region_id}-E{i}",
@@ -189,7 +306,15 @@ def section_to_lines(
             "order": i,
             "raw_text": toktxt or " ".join(flat),
             "number_groups": [flat] if flat else [],
-            "multiplier_text": r.get("multiplier"),
+            "multiplier_text": mult_txt,
+            "multiplier_rules": [
+                {
+                    "rule_text": r,
+                    "categories": _rule_categories(r),
+                    "value": _rule_value(r),
+                }
+                for r in rules
+            ] if rules else [],
             "layout_hint": "normal_row",
             "play_text": None,
             "play_type": None,
@@ -215,6 +340,7 @@ def _car_lines(section: dict, region_id: str) -> list[dict]:
     m = re.search(r"各[\d.\s]*車", text)
     if m:
         text = " ".join(numbers) + " " + m.group(0) if numbers else m.group(0)
+    rules = extract_multiplier_rules(text)
     return [{
         "line_id": f"{region_id}-L1",
         "entry_id": f"{region_id}-E1",
@@ -223,6 +349,14 @@ def _car_lines(section: dict, region_id: str) -> list[dict]:
         "raw_text": text,
         "number_groups": [numbers] if numbers else [],
         "multiplier_text": extract_multiplier(text),
+        "multiplier_rules": [
+            {
+                "rule_text": r,
+                "categories": _rule_categories(r),
+                "value": _rule_value(r),
+            }
+            for r in rules
+        ] if rules else [],
         "layout_hint": "normal_row",
         "play_text": text,
         "play_type": "car_bet",
@@ -251,14 +385,10 @@ def _normal_lines(
             else:
                 flat = [str(x) for x in nums]
         toktxt = " ".join(str(t.get("text") or "") for t in (r.get("tokens") or []) if str(t.get("text") or "") not in ("", " "))
+        rules = extract_multiplier_rules(toktxt)
         mult = r.get("multiplier")
-        if not mult:
-            m = re.search(
-                r"(?:二三|二三四|三四|三|四|¾|⅔|23|2\.3|234|2\.3\.4|23\.4|3/4|2/3)\s*[xX×]\s*\d+(?:\.\d+)?",
-                toktxt,
-            )
-            if m:
-                mult = m.group(0).replace("¾", "3/4").replace("⅔", "2/3")
+        if rules:
+            mult = " ".join(rules)
         warnings = []
         uncertain = False
         uncertain_reason = None
@@ -287,6 +417,14 @@ def _normal_lines(
             uncertain, uncertain_reason, warn, play_mark = _merge_play_mark(first_play, roi)
             if warn:
                 warnings.append(warn)
+        # A first-pass token like "3x1" with an INDEPENDENT single-digit
+        # token (2/3/4) directly below it is a stacked category: merge it
+        # into upper/lower and compose "3/4X1". Multiple separate multiplier
+        # rules (e.g. "2X5 3X2") are never collapsed.
+        composed = _compose_mult_from_play_mark(first_play, rules)
+        if composed and mult != composed:
+            mult = composed
+            rules = [composed]
         # bbox-height guard: a play token much taller than the row's numbers
         # means a stacked digit may have been missed by BOTH passes; such a row
         # must never be treated as consistent/confirmed.
@@ -302,6 +440,7 @@ def _normal_lines(
                         warnings.append("possible_stacked_category_digit")
                     break
         rt = toktxt or " ".join(flat)
+        final_rules = [r for r in (mult or "").split() if r] if mult else []
         lines.append({
             "line_id": f"{region_id}-L{i}",
             "entry_id": f"{region_id}-E{i}",
@@ -312,6 +451,14 @@ def _normal_lines(
             "human_raw_text": None,
             "number_groups": [flat] if flat else [],
             "multiplier_text": mult,
+            "multiplier_rules": [
+                {
+                    "rule_text": r,
+                    "categories": _rule_categories(r),
+                    "value": _rule_value(r),
+                }
+                for r in final_rules
+            ],
             "layout_hint": "normal_row",
             "play_text": None,
             "play_type": None,
@@ -573,6 +720,19 @@ def _column_combo_line(region_id: str, combo: dict, game: str = "539") -> list[d
         mult_txt = f"X{mult}"
     else:
         mult_txt = coll
+    multiplier_rules = []
+    if coll and mult:
+        multiplier_rules.append({
+            "rule_text": f"{coll}X{mult}",
+            "categories": [c for c in re.findall(r"[234]", coll)],
+            "value": str(mult),
+        })
+    elif mult:
+        multiplier_rules.append({
+            "rule_text": f"X{mult}",
+            "categories": [],
+            "value": str(mult),
+        })
     text = " / ".join(" ".join(c) for c in cols)
     if mult_txt:
         text = f"{text} {mult_txt}"
@@ -587,6 +747,7 @@ def _column_combo_line(region_id: str, combo: dict, game: str = "539") -> list[d
         "raw_text": text,
         "number_groups": cols,
         "multiplier_text": mult_txt,
+        "multiplier_rules": multiplier_rules,
         "layout_hint": "column_bet",
         "play_text": None,
         "play_type": None,
@@ -630,7 +791,12 @@ def _first_pass_play_mark(play_toks: list[dict]) -> dict:
     entries = []
     for t in play_toks:
         text = str(t.get("text") or "")
-        cats = _play_categories_from_token(text)
+        if re.fullmatch(r"[234]", text):
+            # Independent stacked digit (e.g. the 4 below "3x1"): it carries
+            # no ×value of its own, but IS a play category.
+            cats = [text]
+        else:
+            cats = _play_categories_from_token(text)
         vm = re.search(r"[xX×]\s*(\d+(?:\.\d+)?)", text)
         entries.append({
             "cats": cats,
@@ -665,6 +831,32 @@ def _first_pass_play_mark(play_toks: list[dict]) -> dict:
         "multiplier": mults[-1] if mults else None,
         "layout": layout,
     }
+
+
+def _compose_mult_from_play_mark(pm: dict | None, rules: list[str]) -> str | None:
+    """Compose a stacked-category multiplier from the positional play mark.
+
+    Only used when there is exactly ONE extracted rule and the play mark shows
+    EXTRA single category digits (e.g. "3x1" + independent 4 below -> 3/4X1).
+    Multiple separate rules (2X5 3X2) are never collapsed here.
+    """
+    if not pm or len(rules) != 1:
+        return None
+    mult = pm.get("multiplier")
+    if mult is None:
+        return None
+    digits = (
+        list(pm.get("upper_digits") or [])
+        + list(pm.get("lower_digits") or [])
+        + list(pm.get("other_visible_digits") or [])
+    )
+    digits = [d for d in digits if _safe_play_digit(d)]
+    seen: set[str] = set()
+    uniq = [d for d in digits if not (d in seen or seen.add(d))]
+    rule_cats = set(_rule_categories(rules[0]))
+    if not uniq or set(uniq) <= rule_cats:
+        return None
+    return "/".join(uniq) + "X" + str(mult)
 
 
 def _read_play_mark(
@@ -948,7 +1140,7 @@ def _apply_v3_fallback(sid: str, draft: dict) -> None:
     parsed = parse_model_json(pre.get("raw_model_output") or "")
     if parsed is None:
         return
-    v3_rows: list[tuple[list[list[str]], list[str]]] = []
+    v3_rows: list[tuple[list[list[str]], list[str], list[str]]] = []
     for sec in parsed.get("sections") or []:
         for row in sec.get("rows") or []:
             nums = row.get("numbers") or []
@@ -964,33 +1156,66 @@ def _apply_v3_fallback(sid: str, draft: dict) -> None:
                 nested = [[str(x) for x in col] for col in nums]
             else:
                 nested = [flat] if flat else []
-            v3_rows.append((nested, flat))
+            v3_rows.append((nested, flat, extract_multiplier_rules(str(row.get("multiplier") or ""))))
     for line in draft.get("lines", []):
         groups = line.get("number_groups") or []
         ours = [str(n) for g in groups for n in (g if isinstance(g, list) else [g])]
         candidates = []
-        for v3_nested, v3_flat in v3_rows:
+        best_row: tuple[list[list[str]], list[str], list[str]] | None = None
+        best_overlap = 0
+        best_extra = 10**9
+        for v3_nested, v3_flat, v3_mult in v3_rows:
             valid = all(_re.fullmatch(r"\d{1,2}", str(n)) and 1 <= int(str(n)) <= 49 for n in v3_flat)
             if not valid:
                 continue
             overlap = [n for n in ours if _re.fullmatch(r"\d{1,2}", str(n)) and str(n) in v3_flat]
+            extra = len(set(v3_flat) - set(ours))
+            if (len(overlap), -extra) > (best_overlap, -best_extra):
+                best_overlap = len(overlap)
+                best_extra = extra
+                best_row = (v3_nested, v3_flat, v3_mult)
             if overlap and set(v3_flat) - set(ours):
                 candidates.append({
                     "number_groups": v3_nested,
                     "numbers": v3_flat,
                     "overlap": overlap,
                 })
+        matched_v3_mult: list[str] = best_row[2] if best_row is not None and best_overlap >= 2 else []
+        fallback: dict | None = line.get("fallback_candidate") if isinstance(line.get("fallback_candidate"), dict) else None
+        if candidates:
+            fallback = {
+                "source": "v3_prelabel",
+                "rule": "partial_overlap_only_never_replace",
+                "candidates": candidates[:3],
+            }
+        ours_mult_rules = [_norm_rule(r) for r in (line.get("multiplier_text") or "").split()]
+        mult_diff = [r for r in matched_v3_mult if r not in ours_mult_rules]
+        if ours_mult_rules and mult_diff:
+            line.setdefault("warnings", [])
+            if "cross_pass_multiplier_divergent" not in line["warnings"]:
+                line["warnings"].append("cross_pass_multiplier_divergent")
+            ours_cats = {c for r in ours_mult_rules for c in _rule_categories(r)}
+            if any(set(_rule_categories(r)) - ours_cats for r in mult_diff):
+                if "possible_stacked_category_digit" not in line["warnings"]:
+                    line["warnings"].append("possible_stacked_category_digit")
+            line["uncertain"] = True
+            if not line.get("uncertain_reason"):
+                line["uncertain_reason"] = "cross_pass_multiplier_divergent"
+            if fallback is None:
+                fallback = {}
+            existing = fallback.setdefault("multiplier_candidates", [])
+            for r in mult_diff:
+                if r not in existing:
+                    existing.append(r)
+        if fallback is not None:
+            line["fallback_candidate"] = fallback
         if candidates:
             line.setdefault("warnings", [])
             if "cross_pass_divergent" not in line["warnings"]:
                 line["warnings"].append("cross_pass_divergent")
             line["uncertain"] = True
-            line["uncertain_reason"] = "cross_pass_divergent"
-            line["fallback_candidate"] = {
-                "source": "v3_prelabel",
-                "rule": "partial_overlap_only_never_replace",
-                "candidates": candidates[:3],
-            }
+            if not line.get("uncertain_reason"):
+                line["uncertain_reason"] = "cross_pass_divergent"
             # number_groups intentionally NOT modified.
 
 

@@ -105,7 +105,11 @@ def _apply_roi_to_line(line: dict, pm: dict) -> dict:
     missing: list[str] = []
     if not digits:
         missing.append("玩法數字")
-    mult = mult_raw if re.fullmatch(r"\d+(?:\.\d+)?", mult_raw) else None
+    mult = None
+    if mult_raw:
+        mult_candidate = re.sub(r"^[xX×*]\s*", "", mult_raw).strip()
+        if re.fullmatch(r"\d+(?:\.\d+)?", mult_candidate):
+            mult = mult_candidate
     if mult is None:
         missing.append("倍率")
     if missing:
