@@ -2,13 +2,139 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
+import time
+import uuid
 import urllib.request
+from json.decoder import JSONDecoder
 from pathlib import Path
 
 KEY = os.environ.get("DASHSCOPE_API_KEY", "")
 URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions"
+MODEL = "qwen3-vl-plus"
+PROMPT_VERSION = "combined-bbox-v1"
+PLAY_MARK_PROMPT_VERSION = "play-mark-v2"
+COLUMN_COMBO_PROMPT_VERSION = "column-combo-v1"
+
+
+class QwenClientError(RuntimeError):
+    pass
+
+
+class QwenAPIKeyMissing(QwenClientError):
+    pass
+
+
+class QwenSchemaError(QwenClientError):
+    pass
+
+
+class QwenTimeoutError(QwenClientError):
+    pass
+
+
+def extract_json(text: str) -> dict | None:
+    """JSON extraction WITHOUT greedy regex: json.loads first, then
+    JSONDecoder.raw_decode at the first '{'."""
+    if not text:
+        return None
+    try:
+        obj = json.loads(text)
+        return obj if isinstance(obj, dict) else None
+    except json.JSONDecodeError:
+        pass
+    dec = JSONDecoder()
+    for i, ch in enumerate(text):
+        if ch == "{":
+            try:
+                obj, _ = dec.raw_decode(text[i:])
+                return obj if isinstance(obj, dict) else None
+            except json.JSONDecodeError:
+                continue
+    return None
+
+
+def _qwen_chat(
+    b64: str,
+    mime: str,
+    prompt: str,
+    *,
+    max_tokens: int,
+    image_sha256: str | None = None,
+    crop_box: list[int] | None = None,
+    scale: int | None = None,
+    image_variant: str | None = None,
+    prompt_version: str = PROMPT_VERSION,
+    request_id: str | None = None,
+    retries: int = 2,
+) -> tuple[str, dict]:
+    """Shared Qwen vision client: key guard, bounded retries with backoff,
+    timeout classification, response schema validation, provenance meta."""
+    if not KEY:
+        raise QwenAPIKeyMissing(
+            "DASHSCOPE_API_KEY 未設定；拒絕以空 Bearer token 呼叫。"
+        )
+    rid = request_id or uuid.uuid4().hex[:12]
+    payload = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+            {"type": "text", "text": prompt},
+        ]}],
+        "max_tokens": max_tokens,
+        "temperature": 0.0,
+        "response_format": {"type": "json_object"},
+    }
+    meta = {
+        "request_id": rid,
+        "model": MODEL,
+        "prompt_version": prompt_version,
+        "image_sha256": image_sha256,
+        "crop_box": crop_box,
+        "scale": scale,
+        "image_variant": image_variant,
+        "retries": 0,
+        "latency_s": None,
+    }
+    last_err: Exception | None = None
+    for attempt in range(retries + 1):
+        t0 = time.time()
+        req = urllib.request.Request(
+            URL, data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {KEY}"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=240) as r:
+                data = json.loads(r.read())
+            meta["latency_s"] = round(time.time() - t0, 2)
+            meta["retries"] = attempt
+            try:
+                content = data["choices"][0]["message"]["content"]
+            except (KeyError, IndexError, TypeError) as e:
+                raise QwenSchemaError(
+                    f"Qwen 回應缺少 choices/message/content（request_id={rid}）"
+                ) from e
+            if not isinstance(content, str) or not content.strip():
+                raise QwenSchemaError(
+                    f"Qwen 回傳空 content（request_id={rid}）；raw={str(data)[:300]}"
+                )
+            return content, meta
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")[:300]
+            if 400 <= e.code < 500:
+                raise QwenClientError(
+                    f"Qwen 4xx（request_id={rid} code={e.code}）不重試：{body}"
+                ) from e
+            last_err = e  # 429/5xx -> retry
+        except urllib.error.URLError as e:
+            last_err = e
+        except TimeoutError as e:
+            raise QwenTimeoutError(f"Qwen timeout（request_id={rid}）") from e
+        if attempt < retries:
+            time.sleep(1.0 * (attempt + 1))
+    raise QwenClientError(f"Qwen 重試耗盡（request_id={rid}）：{last_err}")
 
 PROMPT = """This is a handwritten Taiwan 539 (01-39) or 六合彩 (01-49) lottery betting slip.
 Read it and output SECTIONS. CRITICAL: each section is EXACTLY ONE bet. If the slip has N bets, output N sections. NEVER put two bets in one section, and NEVER split one bet across sections.
@@ -30,47 +156,43 @@ Rules:
 - Do NOT expand combinations. Do NOT invent or miss numbers below the top of a column."""
 
 
-def call(image_path: Path) -> str:
-    b64 = base64.b64encode(image_path.read_bytes()).decode()
-    payload = {
-        "model": "qwen3-vl-plus",
-        "messages": [{"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-            {"type": "text", "text": PROMPT},
-        ]}],
-        "max_tokens": 8000,
-        "temperature": 0.0,
-        "response_format": {"type": "json_object"},
-    }
-    req = urllib.request.Request(
-        URL, data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {KEY}"},
+def _image_sha256(image_path: Path) -> str:
+    return hashlib.sha256(image_path.read_bytes()).hexdigest()
+
+
+def call(image_path: Path, *, meta: dict | None = None) -> str:
+    content, m = _qwen_chat(
+        base64.b64encode(image_path.read_bytes()).decode(),
+        "image/jpeg",
+        PROMPT,
+        max_tokens=8000,
+        image_sha256=_image_sha256(image_path),
+        prompt_version=PROMPT_VERSION,
     )
-    with urllib.request.urlopen(req, timeout=240) as r:
-        data = json.loads(r.read())
-    return data["choices"][0]["message"]["content"]
+    if meta is not None:
+        meta.update(m)
+    return content
 
 
-def call_with_prompt(image_path: Path, prompt: str, *, max_tokens: int = 8000) -> str:
+def call_with_prompt(
+    image_path: Path,
+    prompt: str,
+    *,
+    max_tokens: int = 8000,
+    meta: dict | None = None,
+) -> str:
     """Single full-page call with a caller-supplied prompt (for prompt A/B)."""
-    b64 = base64.b64encode(image_path.read_bytes()).decode()
-    payload = {
-        "model": "qwen3-vl-plus",
-        "messages": [{"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-            {"type": "text", "text": prompt},
-        ]}],
-        "max_tokens": max_tokens,
-        "temperature": 0.0,
-        "response_format": {"type": "json_object"},
-    }
-    req = urllib.request.Request(
-        URL, data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {KEY}"},
+    content, m = _qwen_chat(
+        base64.b64encode(image_path.read_bytes()).decode(),
+        "image/jpeg",
+        prompt,
+        max_tokens=max_tokens,
+        image_sha256=_image_sha256(image_path),
+        prompt_version=PROMPT_VERSION,
     )
-    with urllib.request.urlopen(req, timeout=240) as r:
-        data = json.loads(r.read())
-    return data["choices"][0]["message"]["content"]
+    if meta is not None:
+        meta.update(m)
+    return content
 
 
 FOCUSED_PROMPT = (
@@ -164,7 +286,13 @@ COLUMN_COMBO_PROMPT = """你是一個台灣 539／六合彩手寫牌單的「柱
 6. 無法確認任何欄位時，uncertain 設為 true，並在 uncertain_reason 說明。
 
 只輸出 JSON，不要加入其他文字：
-{"columns": [["03"], ["11"], ["29"], ["34"], ["18", "28"], ["27", "37"]], "collision": "2/3", "multiplier": "0.1", "uncertain": false, "uncertain_reason": null}"""
+{"columns": [], "collision": null, "multiplier": null, "uncertain": true, "uncertain_columns": [], "uncertain_reason": null}
+
+若要以範例說明，請使用與任何真實牌單不同的合成號碼，例如：
+{"columns": [["05"], ["12", "17"], ["23"], ["31"]], "collision": "2/3", "multiplier": "0.5", "uncertain": false, "uncertain_reason": null}
+（此範例為合成資料：每欄一個號碼、第二欄有上下堆疊、右下角為二三碰 × 0.5。）
+
+看不清楚、無法確認的欄位放 uncertain_columns，uncertain 設為 true，不得自行補字。"""
 
 
 def call_column_combo_crop(
@@ -176,6 +304,7 @@ def call_column_combo_crop(
     scale: int = 3,
     save_path: Path | None = None,
     box: list[int] | None = None,
+    meta: dict | None = None,
 ) -> str:
     """Stage-2 column-combo read: crop the FULL column grid region (numbers +
     play mark), upscale 3x, PNG, ask the column_combo prompt."""
@@ -211,23 +340,18 @@ def call_column_combo_crop(
     buf = BytesIO()
     crop.save(buf, format="PNG")
     b64 = base64.b64encode(buf.getvalue()).decode()
-    payload = {
-        "model": "qwen3-vl-plus",
-        "messages": [{"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
-            {"type": "text", "text": COLUMN_COMBO_PROMPT},
-        ]}],
-        "max_tokens": 600,
-        "temperature": 0.0,
-        "response_format": {"type": "json_object"},
-    }
-    req = urllib.request.Request(
-        URL, data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {KEY}"},
+    content, m = _qwen_chat(
+        b64, "image/png", COLUMN_COMBO_PROMPT,
+        max_tokens=600,
+        image_sha256=_image_sha256(image_path),
+        crop_box=list(crop_box),
+        scale=scale,
+        image_variant="original_3x",
+        prompt_version=COLUMN_COMBO_PROMPT_VERSION,
     )
-    with urllib.request.urlopen(req, timeout=240) as r:
-        data = json.loads(r.read())
-    return data["choices"][0]["message"]["content"]
+    if meta is not None:
+        meta.update(m)
+    return content
 
 
 def call_play_mark_crop(
@@ -238,6 +362,8 @@ def call_play_mark_crop(
     pad_y: int = 45,
     scale: int = 3,
     save_path: Path | None = None,
+    box: list[int] | None = None,
+    meta: dict | None = None,
 ) -> str:
     """Stage-2 read: crop the right-side play zone with FULL vertical extent
     (stacked digits often extend above/below the main number row), upscale
@@ -246,17 +372,26 @@ def call_play_mark_crop(
     from PIL import Image
 
     img = Image.open(image_path).convert("RGB")
-    x1, y1, x2, y2 = bbox
-    cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-    half_w = max((x2 - x1) // 2 + pad_x, 170)
-    half_h = max((y2 - y1) // 2 + pad_y, 170)
-    box = (
-        max(0, cx - half_w),
-        max(0, cy - half_h),
-        min(img.width, cx + half_w),
-        min(img.height, cy + half_h),
-    )
-    crop = img.crop(box)
+    if box is not None:
+        bx1, by1, bx2, by2 = [int(v) for v in box]
+        crop_box = (
+            max(0, bx1),
+            max(0, by1),
+            min(img.width, bx2),
+            min(img.height, by2),
+        )
+    else:
+        x1, y1, x2, y2 = bbox
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+        half_w = max((x2 - x1) // 2 + pad_x, 170)
+        half_h = max((y2 - y1) // 2 + pad_y, 170)
+        crop_box = (
+            max(0, cx - half_w),
+            max(0, cy - half_h),
+            min(img.width, cx + half_w),
+            min(img.height, cy + half_h),
+        )
+    crop = img.crop(crop_box)
     if scale > 1:
         crop = crop.resize((crop.width * scale, crop.height * scale), Image.LANCZOS)
     if save_path is not None:
@@ -265,23 +400,18 @@ def call_play_mark_crop(
     buf = BytesIO()
     crop.save(buf, format="PNG")
     b64 = base64.b64encode(buf.getvalue()).decode()
-    payload = {
-        "model": "qwen3-vl-plus",
-        "messages": [{"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
-            {"type": "text", "text": PLAY_MARK_PROMPT},
-        ]}],
-        "max_tokens": 400,
-        "temperature": 0.0,
-        "response_format": {"type": "json_object"},
-    }
-    req = urllib.request.Request(
-        URL, data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {KEY}"},
+    content, m = _qwen_chat(
+        b64, "image/png", PLAY_MARK_PROMPT,
+        max_tokens=400,
+        image_sha256=_image_sha256(image_path),
+        crop_box=list(crop_box),
+        scale=scale,
+        image_variant="original_3x",
+        prompt_version=PLAY_MARK_PROMPT_VERSION,
     )
-    with urllib.request.urlopen(req, timeout=240) as r:
-        data = json.loads(r.read())
-    return data["choices"][0]["message"]["content"]
+    if meta is not None:
+        meta.update(m)
+    return content
 
 
 def call_focused_crop(image_path: Path, bbox: list[int], pad: int = 70, min_w: int = 280, min_h: int = 190) -> str:

@@ -33,6 +33,36 @@ def _cx(t: dict) -> float:
     return (t["bbox"][0] + t["bbox"][2]) / 2
 
 
+def check_image_quality(path: Path) -> list[str]:
+    """Pre-OCR quality / orientation gates. Returns issue codes."""
+    from PIL import Image, ImageFilter, ImageOps, ImageStat
+
+    if not path.exists():
+        return ["IMAGE_MISSING"]
+    try:
+        with Image.open(path) as im:
+            exif_im = ImageOps.exif_transpose(im.copy())
+            w, h = exif_im.size
+    except Exception:
+        return ["IMAGE_UNREADABLE"]
+    issues: list[str] = []
+    if min(w, h) < 200:
+        issues.append("IMAGE_LOW_RESOLUTION")
+    gray = exif_im.convert("L")
+    mean = ImageStat.Stat(gray).mean[0]
+    if mean < 45:
+        issues.append("IMAGE_TOO_DARK")
+    elif mean > 225:
+        issues.append("IMAGE_OVEREXPOSED")
+    edge_mean = ImageStat.Stat(gray.filter(ImageFilter.FIND_EDGES)).mean[0]
+    if edge_mean < 3.0:
+        issues.append("IMAGE_BLURRY")
+    rw = max(1, w // 6)
+    if ImageStat.Stat(gray.crop((w - rw, 0, w, h))).stddev[0] < 6:
+        issues.append("PLAY_ZONE_CROPPED")
+    return issues
+
+
 def extract_multiplier(text: str) -> str | None:
     """Reliable multiplier from the model's own section text (last match)."""
     matches = MULT_EXTRACT_RE.findall(text)
@@ -73,10 +103,11 @@ def section_to_lines(
             save_path=CROPS / f"{img_path.stem}-{region_id}-COL.png",
             crop_box=crop_box,
         )
-        if combo is not None and len(combo.get("columns") or []) >= 2:
-            return _column_combo_line(region_id, combo)
+        if combo is not None:
+            if combo.get("status") in ("consensus", "insufficient_evidence", "divergent"):
+                return _column_combo_line(region_id, combo)
     if single_row or len(nums) < 3:
-        return _normal_lines(rows, region_id, img_path=img_path)
+        return _normal_lines(rows, region_id, img_path=img_path, crop_box=crop_box)
     nums_cx_min = min((t["bbox"][0] + t["bbox"][2]) / 2 for t in nums)
     nums_cx_max = max((t["bbox"][0] + t["bbox"][2]) / 2 for t in nums)
     # clean zone: numbers + separators inside the number band; collision digits
@@ -192,7 +223,12 @@ def _car_lines(section: dict, region_id: str) -> list[dict]:
     }]
 
 
-def _normal_lines(rows: list[dict], region_id: str, img_path: Path | None = None) -> list[dict]:
+def _normal_lines(
+    rows: list[dict],
+    region_id: str,
+    img_path: Path | None = None,
+    crop_box: list[int] | None = None,
+) -> list[dict]:
     lines = []
     for i, r in enumerate(rows, 1):
         nums = r.get("numbers") or []
@@ -230,13 +266,13 @@ def _normal_lines(rows: list[dict], region_id: str, img_path: Path | None = None
             if _cx(t) >= max_num_cx + 10
             and not re.fullmatch(r"\d{2}", str(t.get("text") or ""))
         ]
-        first_cats = sorted({
-            c for t in play_toks for c in re.findall(r"[234]", str(t.get("text") or ""))
-        })
-        if play_toks and first_cats and img_path:
+        first_play = _first_pass_play_mark(play_toks)
+        if play_toks and (
+            first_play["upper_digits"] or first_play["lower_digits"] or first_play["other_visible_digits"]
+        ) and img_path:
             save_path = CROPS / f"{img_path.stem}-{region_id}-L{i}.png"
-            roi = _read_play_mark(img_path, play_toks, save_path=save_path)
-            uncertain, uncertain_reason, warn, play_mark = _merge_play_mark(first_cats, roi)
+            roi = _read_play_mark(img_path, play_toks, save_path=save_path, crop_box=crop_box)
+            uncertain, uncertain_reason, warn, play_mark = _merge_play_mark(first_play, roi)
             if warn:
                 warnings.append(warn)
         rt = toktxt or " ".join(flat)
@@ -268,21 +304,27 @@ def _read_column_combo(
     save_path: Path | None = None,
     crop_box: list[int] | None = None,
 ) -> dict | None:
-    """Stage-2 column-combo read: crop the FULL column grid and ask for
-    columns + collision + multiplier (never flatten to a single line)."""
+    """Stage-2 column-combo read with 3-offset CONSENSUS.
+
+    Each attempt shifts BOTH y1 and y2 by dy (crop height unchanged).
+    Signature = (columns, collision, multiplier):
+      - >=2/3 identical  -> consensus (any uncertain attempt still review)
+      - all three differ -> column_combo_divergent
+      - only one valid   -> column_combo_insufficient_evidence
+    Never prefers "more cells"; never trusts uncertain=false alone.
+    """
+    from collections import Counter
     from test_combined_bbox import call_column_combo_crop
 
     x1 = min(t["bbox"][0] for t in toks)
     y1 = min(t["bbox"][1] for t in toks)
     x2 = max(t["bbox"][2] for t in toks)
     y2 = max(t["bbox"][3] for t in toks)
-    best: tuple[dict, list[list[str]]] | None = None
-    best_score = -1
-    for attempt in range(3):
+    attempts: list[dict] = []
+    for dy in (-8, 0, 8):
         box = crop_box
         if box is not None:
-            dy = (-8, 0, 8)[attempt]
-            box = [box[0], box[1] + dy, box[2], box[3]]
+            box = [box[0], box[1] + dy, box[2], box[3] + dy]
         try:
             content = call_column_combo_crop(
                 img_path, [x1, y1, x2, y2],
@@ -291,39 +333,81 @@ def _read_column_combo(
             )
         except Exception:
             continue
-        m = re.search(r"\{.*\}", content, re.S)
-        if not m:
+        parsed = _parse_column_combo(content)
+        if parsed is None:
             continue
-        try:
-            obj = json.loads(m.group(0))
-        except json.JSONDecodeError:
-            continue
-        cols = obj.get("columns")
-        if not isinstance(cols, list) or len(cols) < 3:
-            continue
-        norm: list[list[str]] = []
-        for col in cols:
-            if not isinstance(col, list):
-                norm = []
-                break
-            cells = [str(c).strip() for c in col if str(c).strip()]
-            if not cells or any(not re.fullmatch(r"\d{1,2}", c) for c in cells):
-                norm = []
-                break
-            norm.append(cells)
-        if not norm:
-            continue
-        score = sum(len(c) for c in norm)
-        if score > best_score:
-            best_score = score
-            best = (obj, norm)
-    if best is None:
+        sig = (
+            tuple(tuple(c) for c in parsed["columns"]),
+            parsed.get("collision"),
+            parsed.get("multiplier"),
+        )
+        parsed["signature"] = sig
+        parsed["crop_box"] = box
+        parsed["raw_response"] = content
+        attempts.append(parsed)
+    if not attempts:
         return None
-    obj, norm_cols = best
+    counts = Counter(a["signature"] for a in attempts)
+    sig, n = counts.most_common(1)[0]
+    any_uncertain = any(a["uncertain"] for a in attempts)
+    if n >= 2:
+        chosen = next(a for a in attempts if a["signature"] == sig)
+        status = "consensus"
+        uncertain = chosen["uncertain"] or any_uncertain
+    elif len(attempts) == 1:
+        chosen = attempts[0]
+        status = "insufficient_evidence"
+        uncertain = True
+    else:
+        chosen = None
+        status = "divergent"
+        uncertain = True
+    return {
+        "columns": chosen["columns"] if chosen else [],
+        "collision": chosen.get("collision") if chosen else None,
+        "multiplier": chosen.get("multiplier") if chosen else None,
+        "uncertain": uncertain,
+        "uncertain_reason": None if chosen is None else chosen.get("uncertain_reason"),
+        "status": status,
+        "attempts": [{
+            "signature": a["signature"],
+            "columns": a["columns"],
+            "collision": a.get("collision"),
+            "multiplier": a.get("multiplier"),
+            "uncertain": a["uncertain"],
+            "crop_box": a["crop_box"],
+            "raw_response": a["raw_response"],
+        } for a in attempts],
+    }
+
+
+def _parse_column_combo(content: str) -> dict | None:
+    """Parse + strict-structure validate one column_combo response.
+    Columns: >=2, non-empty, each cell exactly 2 digits (01-49)."""
+    m = re.search(r"\{.*\}", content, re.S)
+    if not m:
+        return None
+    try:
+        obj = json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return None
+    cols = obj.get("columns")
+    if not isinstance(cols, list) or len(cols) < 2:
+        return None
+    norm: list[list[str]] = []
+    for col in cols:
+        if not isinstance(col, list) or not col:
+            return None
+        cells = [str(c).strip() for c in col if str(c).strip()]
+        if not cells or any(
+            not re.fullmatch(r"\d{2}", c) or not (1 <= int(c) <= 49) for c in cells
+        ):
+            return None
+        norm.append(cells)
     mult = obj.get("multiplier")
     coll = obj.get("collision")
     return {
-        "columns": norm_cols,
+        "columns": norm,
         "multiplier": str(mult).strip() if mult not in (None, "") else None,
         "collision": str(coll).strip() if coll not in (None, "") else None,
         "uncertain": bool(obj.get("uncertain")),
@@ -332,9 +416,43 @@ def _read_column_combo(
 
 
 def _column_combo_line(region_id: str, combo: dict) -> list[dict]:
+    from decimal import Decimal
+
     cols = combo["columns"]
     coll = combo.get("collision")
     mult = combo.get("multiplier")
+    warnings = ["column_combo_roi"]
+    uncertain = bool(combo.get("uncertain"))
+    reason = None
+    problems: list[str] = []
+    if len(cols) < 2:
+        problems.append("少於兩欄")
+    for ci, col in enumerate(cols):
+        if not col:
+            problems.append(f"欄{ci + 1}為空")
+        for n in col:
+            if not re.fullmatch(r"\d{2}", n):
+                problems.append(f"非兩位數字 {n}")
+            elif not (1 <= int(n) <= 49):
+                problems.append(f"超出範圍 {n}")
+    if any(len(set(c)) != len(c) for c in cols):
+        problems.append("同欄重複")
+    if coll is None or not re.fullmatch(r"[234](/[234])?", coll):
+        problems.append("碰法缺失/非法")
+    ok_mult = mult is not None and re.fullmatch(r"\d+(?:\.\d+)?", mult) and Decimal(mult) > 0
+    if not ok_mult:
+        problems.append("倍率缺失/非法")
+    status = combo.get("status")
+    if status in ("divergent", "insufficient_evidence"):
+        uncertain = True
+        reason = "column_combo_" + status
+    if problems:
+        uncertain = True
+        reason = "column_combo_invalid_structure"
+    if uncertain and combo.get("uncertain"):
+        warnings.append("column_combo_roi_uncertain")
+    if status in ("divergent", "insufficient_evidence") or problems:
+        warnings.append("column_combo_needs_review")
     if coll and mult:
         mult_txt = f"{coll}X{mult}"
     elif mult:
@@ -344,9 +462,9 @@ def _column_combo_line(region_id: str, combo: dict) -> list[dict]:
     text = " / ".join(" ".join(c) for c in cols)
     if mult_txt:
         text = f"{text} {mult_txt}"
-    warnings = ["column_combo_roi"]
-    if combo.get("uncertain"):
-        warnings.append("column_combo_roi_uncertain")
+    combo_count = 1
+    for c in cols:
+        combo_count *= len(c)
     return [{
         "line_id": f"{region_id}-L1",
         "entry_id": f"{region_id}-E1",
@@ -358,35 +476,116 @@ def _column_combo_line(region_id: str, combo: dict) -> list[dict]:
         "layout_hint": "column_bet",
         "play_text": None,
         "play_type": None,
-        "uncertain": bool(combo.get("uncertain")),
-        "uncertain_reason": "column_combo_uncertain" if combo.get("uncertain") else None,
+        "uncertain": uncertain,
+        "uncertain_reason": reason or ("column_combo_uncertain" if combo.get("uncertain") else None),
         "alternatives": [],
         "play_mark": None,
+        "column_combo_status": status,
+        "expected_combination_count": combo_count,
+        "column_combo_attempts": combo.get("attempts"),
+        "column_combo_problems": problems,
         "warnings": warnings,
         "review_action": "pending",
         "human_added": False,
     }]
 
 
-def _read_play_mark(img_path: Path, play_toks: list[dict], save_path: Path | None = None) -> dict | None:
-    """Stage-2 ROI read: crop the union of the play tokens (full vertical
-    extent), upscale + PNG, ask the structured play_mark prompt."""
-    from test_combined_bbox import call_play_mark_crop
+def _safe_play_digit(value) -> str | None:
+    """Shared rule: a play category digit is ONLY a single 2/3/4 character.
+    Never extract digits from "39"/"24"/"31" etc."""
+    s = str(value).strip()
+    return s if re.fullmatch(r"[234]", s) else None
+
+
+def _play_categories_from_token(text: str) -> list[str]:
+    """Categories from a VALIDATED play token like "3x1" / "34x1" / "3/4x1".
+    The token itself is a play mark (right band), so leading 1-2 category
+    digits are safe; multi-char number tokens are filtered out upstream."""
+    m = re.fullmatch(
+        r"([234]/[234]|[234]{1,2})\s*[xX×]\s*\d+(?:\.\d+)?",
+        str(text).strip(),
+    )
+    if not m:
+        return []
+    return [c for c in m.group(1) if _safe_play_digit(c)]
+
+
+def _first_pass_play_mark(play_toks: list[dict]) -> dict:
+    """Positional play-mark structure from the first-pass tokens:
+    upper/lower by center_y (top vs bottom marks), multiplier, layout."""
+    entries = []
+    for t in play_toks:
+        text = str(t.get("text") or "")
+        cats = _play_categories_from_token(text)
+        vm = re.search(r"[xX×]\s*(\d+(?:\.\d+)?)", text)
+        entries.append({
+            "cats": cats,
+            "mult": vm.group(1) if vm else None,
+            "cy": (t["bbox"][1] + t["bbox"][3]) / 2,
+        })
+    upper: list[str] = []
+    lower: list[str] = []
+    other: list[str] = []
+    if len(entries) >= 2:
+        ys = sorted(e["cy"] for e in entries)
+        mid = (ys[0] + ys[-1]) / 2
+        for e in entries:
+            if e["cy"] < mid - 2:
+                upper.extend(e["cats"])
+            elif e["cy"] > mid + 2:
+                lower.extend(e["cats"])
+            else:
+                other.extend(e["cats"])
+        layout = "vertical_stack" if upper and lower else (
+            "mixed" if len({round(e["cy"]) for e in entries}) > 1 else "horizontal")
+    elif entries:
+        upper.extend(entries[0]["cats"])
+        layout = "horizontal"
+    else:
+        layout = "unknown"
+    mults = [e["mult"] for e in entries if e["mult"]]
+    return {
+        "upper_digits": upper,
+        "lower_digits": lower,
+        "other_visible_digits": other,
+        "multiplier": mults[-1] if mults else None,
+        "layout": layout,
+    }
+
+
+def _read_play_mark(
+    img_path: Path,
+    play_toks: list[dict],
+    save_path: Path | None = None,
+    crop_box: list[int] | None = None,
+) -> dict | None:
+    """Stage-2 ROI read bounded by the section y-band (crop_box), upscale +
+    PNG, structured play_mark prompt. Marks ROI_INCOMPLETE when the band is
+    missing or the crop is clipped by the image edge."""
+    from test_combined_bbox import call_play_mark_crop, extract_json
 
     x1 = min(t["bbox"][0] for t in play_toks)
     y1 = min(t["bbox"][1] for t in play_toks)
     x2 = max(t["bbox"][2] for t in play_toks)
     y2 = max(t["bbox"][3] for t in play_toks)
+    incomplete = crop_box is None
+    if crop_box is not None and (
+        crop_box[0] > x1 - 4
+        or crop_box[1] > y1 - 4
+        or crop_box[2] < x2 + 4
+        or crop_box[3] < y2 + 4
+    ):
+        incomplete = True
     try:
-        content = call_play_mark_crop(img_path, [x1, y1, x2, y2], save_path=save_path)
+        content = call_play_mark_crop(
+            img_path, [x1, y1, x2, y2],
+            save_path=save_path,
+            box=crop_box,
+        )
     except Exception:
         return None
-    m = re.search(r"\{.*\}", content, re.S)
-    if not m:
-        return None
-    try:
-        obj = json.loads(m.group(0))
-    except json.JSONDecodeError:
+    obj = extract_json(content)
+    if obj is None:
         return None
     pm = obj.get("play_mark") if isinstance(obj, dict) else None
     if not isinstance(pm, dict):
@@ -416,14 +615,34 @@ def _read_play_mark(img_path: Path, play_toks: list[dict], save_path: Path | Non
         "uncertain_candidates": [str(x) for x in (pm.get("uncertain_candidates") or [])],
         "uncertain_reason": pm.get("uncertain_reason") or obj.get("overall_uncertain_reason"),
         "crop_path": str(save_path) if save_path else None,
+        "incomplete": incomplete,
+        "crop_box": crop_box,
+        "scale": 3,
+        "image_variant": "original_3x",
     }
 
 
-def _merge_play_mark(first_cats: list[str], roi: dict | None) -> tuple[bool, str | None, str | None, dict | None]:
-    """Three-stage merge. Returns (uncertain, reason, warning, evidence)."""
+def _norm_mult(value) -> str:
+    return re.sub(r"\s+", "", str(value or "")).replace("×", "X").replace("x", "X")
+
+
+def _merge_play_mark(first: dict, roi: dict | None) -> tuple[bool, str | None, str | None, dict | None]:
+    """Three-stage merge. Returns (uncertain, reason, warning, evidence).
+
+    Comparison is POSITIONAL: upper_digits / lower_digits / other_visible_digits
+    / multiplier must match; never sort or dedupe into a category bag.
+    """
     def _evidence():
         return {
-            "first_pass_categories": first_cats,
+            "first_pass_categories": (
+                first.get("upper_digits", []) + first.get("lower_digits", [])
+                + first.get("other_visible_digits", [])
+            ),
+            "first_upper_digits": first.get("upper_digits"),
+            "first_lower_digits": first.get("lower_digits"),
+            "first_other_digits": first.get("other_visible_digits"),
+            "first_multiplier": first.get("multiplier"),
+            "first_layout": first.get("layout"),
             "roi_categories": roi["categories"],
             "roi_upper_digits": roi.get("upper_digits"),
             "roi_lower_digits": roi.get("lower_digits"),
@@ -433,18 +652,40 @@ def _merge_play_mark(first_cats: list[str], roi: dict | None) -> tuple[bool, str
             "roi_uncertain": roi.get("uncertain"),
             "roi_uncertain_candidates": roi.get("uncertain_candidates"),
             "crop_path": roi.get("crop_path"),
+            "roi_incomplete": roi.get("incomplete", False),
+            "crop_box": roi.get("crop_box"),
+            "scale": roi.get("scale"),
+            "image_variant": roi.get("image_variant"),
         }
 
     if roi is None:
         return True, "play_mark_unclear", "play_mark_roi_unreadable", None
+    if roi.get("incomplete"):
+        return True, "play_mark_unclear", "ROI_INCOMPLETE", _evidence()
     if roi["uncertain"]:
         return True, "play_mark_unclear", "play_mark_roi_unclear", _evidence()
-    if sorted(first_cats) != sorted(roi["categories"]):
+    pos_ok = (
+        first.get("upper_digits") == roi.get("upper_digits")
+        and first.get("lower_digits") == roi.get("lower_digits")
+        and first.get("other_visible_digits") == roi.get("other_visible_digits")
+    )
+    mult_ok = _norm_mult(first.get("multiplier")) == _norm_mult(roi.get("multiplier"))
+    if not (pos_ok and mult_ok):
         return True, "play_mark_divergent", "play_mark_divergent", _evidence()
+    fl = first.get("layout")
+    rl = roi.get("layout")
+    if rl not in ("", None, "unknown") and fl not in ("", None, "unknown") and fl != rl:
+        return True, "play_mark_unclear", "play_mark_layout_divergent", _evidence()
     return False, None, None, _evidence()
 
 
-def process_parsed(sid: str, parsed: dict, *, write: bool = True) -> int:
+def process_parsed(
+    sid: str,
+    parsed: dict,
+    *,
+    write: bool = True,
+    quality_issues: list[str] | None = None,
+) -> int:
     """Build + write the review draft from an already-parsed combined output."""
     lines, regions, warnings = [], [], []
     sections = parsed.get("sections") or []
@@ -496,6 +737,9 @@ def process_parsed(sid: str, parsed: dict, *, write: bool = True) -> int:
         "regions": regions, "lines": lines,
         "shared_multiplier_rules": [], "warnings": warnings,
     }
+    if quality_issues:
+        draft["warnings"].append("image_quality_review")
+        draft["image_quality_issues"] = quality_issues
     for line in draft.get("lines", []):
         if line.get("raw_text"):
             line["raw_text"] = line["raw_text"].replace("¾", "3/4").replace("⅔", "2/3")
@@ -519,22 +763,25 @@ def process_sample(sid: str, *, write: bool = True) -> int:
     img = RAW / f"{sid}.jpg"
     if not img.exists():
         return 0
+    quality = check_image_quality(img)
     content = call(img)
     (GEO / f"{sid}-combined.json").write_text(content, encoding="utf-8")
-    m = re.search(r"\{.*\}", content, re.S)
-    if not m:
+    from test_combined_bbox import extract_json
+
+    parsed = extract_json(content)
+    if parsed is None:
         return 0
-    try:
-        parsed = json.loads(m.group(0))
-    except json.JSONDecodeError:
-        return 0
-    return process_parsed(sid, parsed, write=write)
+    return process_parsed(sid, parsed, write=write, quality_issues=quality)
 
 
 def _apply_v3_fallback(sid: str, draft: dict) -> None:
-    """Validity fallback: if a combined line has numbers outside 01-49 (model
-    misread like 58/68), replace its number_groups with the v3 prelabel line
-    that has valid numbers (the v3 read was correct for those cases)."""
+    """Cross-pass divergence guard: NEVER silently replace number_groups.
+
+    When the v3 prelabel overlaps this line but contains extra/different
+    numbers, keep the primary read, save a fallback_candidate and mark
+    cross_pass_divergent (needs_review). Only a verifiable 1:1 region/line
+    identity with a fully consistent structure may auto-merge (not implemented
+    here)."""
     import re as _re
 
     pre_path = PRELABELS / f"{sid}.json"
@@ -563,26 +810,31 @@ def _apply_v3_fallback(sid: str, draft: dict) -> None:
             v3_rows.append((nested, flat))
     for line in draft.get("lines", []):
         groups = line.get("number_groups") or []
-        invalid = any(
-            not _re.fullmatch(r"\d{1,2}", str(n)) or not (1 <= int(str(n)) <= 49)
-            for g in groups for n in (g if isinstance(g, list) else [g])
-        )
-        if invalid:
-            # find a v3 line whose numbers are all valid and overlap this line
-            ours = [str(n) for g in groups for n in (g if isinstance(g, list) else [g])]
-            best = None
-            for v3_nested, v3_flat in v3_rows:
-                valid = all(_re.fullmatch(r"\d{1,2}", str(n)) and 1 <= int(str(n)) <= 49 for n in v3_flat)
-                if not valid:
-                    continue
-                overlap = [n for n in ours if _re.fullmatch(r"\d{1,2}", str(n)) and str(n) in v3_flat]
-                # fall back when combined is invalid OR strictly incomplete vs v3
-                if overlap and set(v3_flat) - set(ours):
-                    best = v3_nested
-                    break
-            if best is not None:
-                line["number_groups"] = best
-                line.setdefault("warnings", []).append("v3_validity_fallback")
+        ours = [str(n) for g in groups for n in (g if isinstance(g, list) else [g])]
+        candidates = []
+        for v3_nested, v3_flat in v3_rows:
+            valid = all(_re.fullmatch(r"\d{1,2}", str(n)) and 1 <= int(str(n)) <= 49 for n in v3_flat)
+            if not valid:
+                continue
+            overlap = [n for n in ours if _re.fullmatch(r"\d{1,2}", str(n)) and str(n) in v3_flat]
+            if overlap and set(v3_flat) - set(ours):
+                candidates.append({
+                    "number_groups": v3_nested,
+                    "numbers": v3_flat,
+                    "overlap": overlap,
+                })
+        if candidates:
+            line.setdefault("warnings", [])
+            if "cross_pass_divergent" not in line["warnings"]:
+                line["warnings"].append("cross_pass_divergent")
+            line["uncertain"] = True
+            line["uncertain_reason"] = "cross_pass_divergent"
+            line["fallback_candidate"] = {
+                "source": "v3_prelabel",
+                "rule": "partial_overlap_only_never_replace",
+                "candidates": candidates[:3],
+            }
+            # number_groups intentionally NOT modified.
 
 
 def main() -> None:
@@ -598,12 +850,15 @@ def main() -> None:
                 if not path.exists():
                     print(f"{sid}: no saved combined json", flush=True)
                     continue
-                m = re.search(r"\{.*\}", path.read_text(encoding="utf-8"), re.S)
-                parsed = json.loads(m.group(0)) if m else None
+                try:
+                    parsed = json.loads(path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    parsed = None
                 if parsed is None:
                     print(f"{sid}: combined parse failed", flush=True)
                     continue
-                process_parsed(sid, parsed, write=write)
+                quality = check_image_quality(RAW / f"{sid}.jpg")
+                process_parsed(sid, parsed, write=write, quality_issues=quality)
             else:
                 process_sample(sid, write=write)
         except Exception as e:

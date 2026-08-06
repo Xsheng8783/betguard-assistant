@@ -317,15 +317,20 @@ def reapply_after_human_edit(
     raw_text: str | None = None,
     multiplier: str | None = None,
     layout_hint: str | None = None,
+    number_groups: list[list[str]] | None = None,
     provenance: dict[str, Any] | None = None,
     game: str = "539",
 ) -> dict[str, Any]:
-    """Human edits re-run ALL downstream stages; never patch the final record."""
+    """Human edits re-run ALL downstream stages; never patch the final record.
+
+    number_groups, when provided, is the structured column/number data that
+    closed-set must validate (instead of re-parsing from an empty list).
+    """
     row = {
         "raw_text": raw_text if raw_text is not None else original.get("raw_text", ""),
         "multiplier": multiplier if multiplier is not None else original.get("multiplier_text"),
         "layout_hint": layout_hint if layout_hint is not None else original.get("layout_hint"),
-        "numbers": [],
+        "numbers": number_groups if number_groups is not None else [],
     }
     return process_row(row, region_bound=True, provenance=provenance, game=game)
 

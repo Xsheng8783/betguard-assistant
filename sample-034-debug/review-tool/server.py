@@ -114,10 +114,10 @@ def _apply_roi_to_line(line: dict, pm: dict) -> dict:
     full = f"{zh}X{mult}"
     applied = (line.get("play_mark") or {}).get("applied_roi")
     if applied and line.get("correction_source") == "roi" and line.get("multiplier_text") == full:
-        # Sync display fields for records applied before this fix.
+        # Sync working text for records applied before this fix; never touch
+        # model_raw_text (immutable first-pass output).
         if line.get("human_raw_text") and line.get("raw_text") != line.get("human_raw_text"):
             line["raw_text"] = line["human_raw_text"]
-            line["model_raw_text"] = line["human_raw_text"]
         return {"ok": True, "idempotent": True, "full": full, "digits": digits}
     groups = line.get("number_groups") or []
     if line.get("layout_hint") == "column_bet":
@@ -135,7 +135,6 @@ def _apply_roi_to_line(line: dict, pm: dict) -> dict:
         "at": now_iso(), "full_text": full, "digits": digits, "correction_source": "roi",
     }
     line["raw_text"] = human
-    line["model_raw_text"] = human
     line["review_action"] = "corrected"
     return {"ok": True, "idempotent": False, "full": full, "digits": digits, "human": human}
 
@@ -158,9 +157,11 @@ def _reapply_pipeline(line: dict) -> dict:
         raw_text=line.get("human_raw_text") or line.get("raw_text") or "",
         multiplier=line.get("multiplier_text"),
         layout_hint=line.get("layout_hint"),
+        number_groups=line.get("number_groups") or None,
     )
     return {
         "decision": rec["decision"],
+        "closed_set": rec["closed_set"],
         "semantic": rec["semantic"],
         "checks": rec["checks"],
         "expected_combination_count": rec.get("expected_combination_count"),
@@ -170,14 +171,103 @@ def _reapply_pipeline(line: dict) -> dict:
     }
 
 
-def save_draft(sid: str, data: dict, edits: list | None = None) -> dict:
+EDIT_REVALIDATE_FIELDS = {
+    "human_raw_text", "multiplier_text", "number_groups", "layout_hint",
+    "play_text", "play_type",
+}
+
+
+def _revalidate_line(line: dict) -> dict:
+    """Human edit -> re-run the whole pipeline; fail-closed on structured/text
+    divergence (STRUCTURED_TEXT_DIVERGENT)."""
+    line["pipeline_review"] = _reapply_pipeline(line)
+    cs = line["pipeline_review"].get("closed_set") or {}
+    sem = line["pipeline_review"].get("semantic") or {}
+
+    def _flatten(value):
+        out = []
+        if isinstance(value, (list, tuple)):
+            for x in value:
+                out.extend(_flatten(x))
+        elif value is not None:
+            out.append(str(value))
+        return out
+
+    cs_nums = sorted(set(_flatten(cs.get("semantics_numbers"))))
+    sem_nums = sorted(set(_flatten(sem.get("numbers"))))
+    if cs_nums != sem_nums:
+        line.setdefault("warnings", [])
+        if "STRUCTURED_TEXT_DIVERGENT" not in line["warnings"]:
+            line["warnings"].append("STRUCTURED_TEXT_DIVERGENT")
+        line["uncertain"] = True
+        line["uncertain_reason"] = "STRUCTURED_TEXT_DIVERGENT"
+    return line
+
+
+def _complete_validation(draft: dict) -> list[dict]:
+    """Fail-closed checks before marking a sample reviewed."""
+    issues: list[dict] = []
+    for line in draft.get("lines", []):
+        lid = line.get("line_id")
+        if line.get("review_action") != "confirmed":
+            issues.append({
+                "line_id": lid, "code": "LINE_NOT_CONFIRMED",
+                "zh": "行尚未人工確認（corrected 需再次確認）",
+            })
+        groups = line.get("number_groups") or []
+        flat = [n for g in groups for n in (g if isinstance(g, list) else [g])]
+        if not flat:
+            issues.append({"line_id": lid, "code": "EMPTY_NUMBER_GROUPS", "zh": "號碼組合為空"})
+        if line.get("layout_hint") == "column_bet":
+            for ci, col in enumerate(groups):
+                if not col:
+                    issues.append({"line_id": lid, "code": "EMPTY_COLUMN", "zh": f"第 {ci + 1} 欄為空"})
+                for n in col:
+                    if not re.fullmatch(r"\d{1,2}", str(n)) or not (1 <= int(str(n)) <= 49):
+                        issues.append({"line_id": lid, "code": "INVALID_NUMBER", "zh": f"非法號碼 {n}"})
+        if not line.get("pipeline_review"):
+            issues.append({
+                "line_id": lid, "code": "PIPELINE_REVIEW_MISSING",
+                "zh": "缺少 pipeline_review（需重新驗證）",
+            })
+        if line.get("uncertain_reason") == "unresolved_region":
+            issues.append({"line_id": lid, "code": "UNRESOLVED_REGION", "zh": "作用域未決，不得完成"})
+    for rule in draft.get("shared_multiplier_rules", []):
+        if not rule.get("scope"):
+            issues.append({
+                "line_id": rule.get("line_id") or rule.get("region_id"),
+                "code": "SHARED_SCOPE_MISSING", "zh": "共用倍率缺少合法 scope",
+            })
+        if not rule.get("applies_to_line_ids"):
+            issues.append({
+                "line_id": rule.get("line_id") or rule.get("region_id"),
+                "code": "SHARED_APPLIES_MISSING", "zh": "共用倍率缺少 applies_to_line_ids",
+            })
+    return issues
+
+
+class RevisionConflict(Exception):
+    pass
+
+
+def save_draft(
+    sid: str,
+    data: dict,
+    edits: list | None = None,
+    expected_revision: int | None = None,
+) -> dict:
     if sid not in SAMPLE_IDS:
         raise ValueError("sample not editable")
     target = draft_path(sid)
+    current = load_json(target) or {}
+    cur_rev = int(current.get("revision") or 0)
+    if expected_revision is not None and cur_rev != expected_revision:
+        raise RevisionConflict(cur_rev)
     if target.exists():
         shutil.copy2(target, target.with_name(target.name + ".bak"))
     data["gt_schema_version"] = GT_SCHEMA
     data["sample_id"] = sid
+    data["revision"] = cur_rev + 1
     if edits:
         data.setdefault("human_edits", []).extend(edits)
     data["last_saved_at"] = now_iso()
@@ -358,8 +448,27 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(draft, dict) or draft.get("sample_id") != sid:
                 self._json(400, {"error": "invalid draft payload"})
                 return
-            saved = save_draft(sid, draft, edits=body.get("edits"))
-            self._json(200, {"ok": True, "saved_at": saved["last_saved_at"], "progress": saved["review_progress"]})
+            try:
+                rev = body.get("expected_revision")
+                # Any edited line is re-run through the full pipeline server-side.
+                edited_ids = {
+                    e.get("line_id") for e in (body.get("edits") or [])
+                    if any(f in EDIT_REVALIDATE_FIELDS for f in (e.get("fields") or []))
+                }
+                for line in draft.get("lines", []):
+                    if line.get("line_id") in edited_ids:
+                        _revalidate_line(line)
+                saved = save_draft(
+                    sid, draft, edits=body.get("edits"),
+                    expected_revision=rev,
+                )
+            except RevisionConflict as e:
+                self._json(409, {"error": "revision_mismatch", "current_revision": int(str(e))})
+                return
+            self._json(200, {
+                "ok": True, "saved_at": saved["last_saved_at"],
+                "progress": saved["review_progress"], "revision": saved.get("revision"),
+            })
         elif p.startswith("/api/sample/") and p.endswith("/complete"):
             sid = p.split("/")[-2]
             if sid not in SAMPLE_IDS:
@@ -371,36 +480,91 @@ class Handler(BaseHTTPRequestHandler):
                 if isinstance(sent, dict) and sent.get("sample_id") == sid
                 else ensure_draft(sid)
             )
+            # Ensure every line carries an up-to-date pipeline review first.
+            for line in draft.get("lines", []):
+                if not line.get("pipeline_review"):
+                    _revalidate_line(line)
+            issues = _complete_validation(draft)
+            if issues:
+                self._json(409, {"error": "complete_validation_failed", "issues": issues})
+                return
             draft["review_status"] = "reviewed"
             draft["reviewed_by"] = str(body.get("reviewer_name") or "local-user").strip()[:64]
             draft["reviewed_at"] = now_iso()
-            saved = save_draft(sid, draft, edits=body.get("edits"))
-            self._json(200, {"ok": True, "review_status": saved["review_status"], "reviewed_at": saved["reviewed_at"]})
+            try:
+                saved = save_draft(
+                    sid, draft, edits=body.get("edits"),
+                    expected_revision=body.get("expected_revision"),
+                )
+            except RevisionConflict as e:
+                self._json(409, {"error": "revision_mismatch", "current_revision": int(str(e))})
+                return
+            self._json(200, {
+                "ok": True, "review_status": saved["review_status"],
+                "reviewed_at": saved["reviewed_at"], "revision": saved.get("revision"),
+            })
         elif p.startswith("/api/sample/") and p.endswith("/apply-roi"):
             sid = p.split("/")[-2]
             if sid not in SAMPLE_IDS:
                 self._json(404, {"error": "sample not editable"})
                 return
             line_id = str(body.get("line_id") or "")
-            pm = body.get("play_mark") or {}
-            draft = load_json(draft_path(sid)) or {}
+            try:
+                draft = load_json(draft_path(sid)) or {}
+            except Exception:
+                draft = {}
             line = next((l for l in draft.get("lines", []) if l.get("line_id") == line_id), None)
             if line is None:
                 self._json(404, {"error": "line not found"})
                 return
+            # Trust only the server-side draft evidence; ignore client-supplied
+            # play_mark to prevent forged ROI content.
+            pm = line.get("play_mark") or {}
             result = _apply_roi_to_line(line, pm)
             if not result["ok"]:
                 self._json(400, {"error": result.get("error"), "missing": result.get("missing")})
                 return
             if not result["idempotent"]:
-                line["pipeline_review"] = _reapply_pipeline(line)
+                _revalidate_line(line)
                 edits = [{
                     "at": now_iso(), "line_id": line_id,
                     "fields": ["multiplier_text", "raw_text", "play_mark", "correction_source"],
                     "source": "roi",
                 }]
-                save_draft(sid, draft, edits=edits)
-            self._json(200, {"ok": True, "idempotent": result["idempotent"], "line": line})
+                try:
+                    save_draft(
+                        sid, draft, edits=edits,
+                        expected_revision=body.get("expected_revision"),
+                    )
+                except RevisionConflict as e:
+                    self._json(409, {"error": "revision_mismatch", "current_revision": int(str(e))})
+                    return
+            self._json(200, {
+                "ok": True, "idempotent": result["idempotent"], "line": line,
+                "revision": draft.get("revision"),
+            })
+        elif p.startswith("/api/sample/") and p.endswith("/revalidate-line"):
+            sid = p.split("/")[-2]
+            if sid not in SAMPLE_IDS:
+                self._json(404, {"error": "sample not editable"})
+                return
+            line_id = str(body.get("line_id") or "")
+            draft = load_json(draft_path(sid)) or {}
+            line = next((l for l in draft.get("lines", []) if l.get("line_id") == line_id), None)
+            if line is None:
+                self._json(404, {"error": "line not found"})
+                return
+            _revalidate_line(line)
+            try:
+                saved = save_draft(
+                    sid, draft,
+                    edits=[{"at": now_iso(), "line_id": line_id, "fields": ["pipeline_review"], "source": "revalidate"}],
+                    expected_revision=body.get("expected_revision"),
+                )
+            except RevisionConflict as e:
+                self._json(409, {"error": "revision_mismatch", "current_revision": int(str(e))})
+                return
+            self._json(200, {"ok": True, "line": line, "revision": saved.get("revision")})
         else:
             self._json(404, {"error": "not found"})
 

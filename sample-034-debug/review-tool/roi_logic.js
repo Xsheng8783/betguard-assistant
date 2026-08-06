@@ -87,15 +87,14 @@
     line.multiplier_text = prep.fullText;
     line.correction_source = "roi";
     line.human_edited = true;
-    // Display fields reflect the final AI reading; the first-pass original is
-    // preserved in play_mark.first_pass_raw_text. ROI evidence and uncertain
-    // history stay untouched.
+    // human_raw_text / raw_text hold the adopted text; model_raw_text is
+    // IMMUTABLE (always the first-pass model output). ROI evidence and
+    // uncertain history stay untouched.
     line.play_mark = Object.assign({}, line.play_mark || {}, {
       first_pass_raw_text: firstPassRaw,
       applied_roi: { at, full_text: prep.fullText, digits: prep.digits, correction_source: "roi" },
     });
     line.raw_text = humanRaw;
-    line.model_raw_text = humanRaw;
     line.review_action = "corrected"; // edited but NOT confirmed
     // Do NOT touch line.uncertain / uncertain_reason (needs_review stays).
 

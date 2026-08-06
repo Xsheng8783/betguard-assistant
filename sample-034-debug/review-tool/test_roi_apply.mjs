@@ -51,7 +51,7 @@ function ok(name) {
   assert.equal(line.multiplier_text, "三四X1");
   assert.equal(line.human_raw_text, "02 30 33 39 三四X1");
   assert.equal(line.raw_text, "02 30 33 39 三四X1", "A: display raw updated");
-  assert.equal(line.model_raw_text, "02 30 33 39 三四X1", "A: display model_raw updated");
+  assert.equal(line.model_raw_text, "02 . 30 . 33 . 39 3x1", "A: model_raw_text IMMUTABLE");
   assert.equal(line.correction_source, "roi");
   assert.equal(line.human_edited, true);
   assert.equal(line.uncertain, true, "A: uncertain history preserved");

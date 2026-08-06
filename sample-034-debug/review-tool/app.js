@@ -494,11 +494,12 @@ async function applyRoiClick(line) {
   const res = await api(`/api/sample/${state.sid}/apply-roi`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ line_id: line.line_id, play_mark: line.play_mark || {} }),
+    body: JSON.stringify({ line_id: line.line_id, expected_revision: state.draft.revision }),
   });
   if (res && res.ok) {
     const idx = state.draft.lines.findIndex((l) => l.line_id === line.line_id);
     if (idx >= 0) state.draft.lines[idx] = res.line;
+    if (res.revision) state.draft.revision = res.revision;
     $("#status").textContent = res.idempotent
       ? "已採用過（未重複建立紀錄）"
       : "已採用 ROI 候選（尚未確認，請再按「確認本行正確」）";
@@ -599,17 +600,32 @@ function renderProgress() {
 async function save(complete = false) {
   const body = { draft: state.draft, edits: state.edits };
   if (complete) body.reviewer_name = $("#reviewer-name").value;
-  const res = await api(`/api/sample/${state.sid}${complete ? "/complete" : "/save"}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  body.expected_revision = state.draft.revision;
+  let res;
+  try {
+    res = await api(`/api/sample/${state.sid}${complete ? "/complete" : "/save"}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    const msg = String(e?.message || e);
+    if (msg.includes("revision_mismatch") || msg.includes("complete_validation_failed")) {
+      $("#status").textContent = msg.includes("revision_mismatch")
+        ? "版本衝突：另一個分頁已儲存，請重新整理（409）"
+        : "完成失敗（409）：" + msg;
+      await selectSample(state.sid);
+      return;
+    }
+    throw e;
+  }
   if (complete) {
     state.draft.review_status = "reviewed";
     state.draft.reviewed_at = res.reviewed_at;
     state.draft.reviewed_by = $("#reviewer-name").value || "local-user";
   }
   state.edits = [];
+  if (res.revision) state.draft.revision = res.revision;
   $("#status").textContent = complete ? `已標記完成審核（${res.reviewed_at || ""}）` : `已儲存（${res.saved_at}）`;
   await loadOverview();
   renderProgress();
