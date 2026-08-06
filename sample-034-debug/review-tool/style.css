@@ -94,6 +94,10 @@ main { flex: 1; display: grid; grid-template-columns: 220px 1fr 1fr; min-height:
 .mult-candidates { margin: 6px 0 6px 24px; padding: 8px 10px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px; font-size: 13px; color: #1e40af; }
 .mult-candidates ul { margin: 4px 0 0 18px; padding: 0; }
 .mult-candidates li { margin: 2px 0; }
+.mult-cand { font-family: Consolas, monospace; font-weight: 600; }
+.mult-merged { background: #f0f9ff; border: 1px dashed #7cb8e8; border-radius: 4px; padding: 2px 6px; }
+.mult-adopt { margin-left: 8px; padding: 1px 8px; font-size: 12px; }
+.mult-adopted { margin-left: 8px; color: #065f46; font-weight: 600; }
 .mult-hint { margin-top: 4px; font-weight: 600; color: #1d4ed8; }
 .line-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
 button {

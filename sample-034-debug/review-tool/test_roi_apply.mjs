@@ -143,6 +143,8 @@ function ok(name) {
 {
   const line = {
     line_id: "R02-L1",
+    number_groups: [["15"], ["24"], ["22", "35", "28"]],
+    layout_hint: "column_bet",
     multiplier_text: "2X1",
     review_action: "pending",
     fallback_candidate: { multiplier_candidates: ["3X1"] },
@@ -151,32 +153,68 @@ function ok(name) {
   const info = R.multiplierCandidatesInfo(line);
   assert.equal(info.hasCandidates, true);
   assert.deepEqual(info.candidates, ["3X1"]);
+  assert.equal(info.merged, "2/3X1");
+  assert.deepEqual(info.displayCandidates, ["3X1", "2/3X1"], "R02: all candidates listed, merged included");
   assert.equal(info.hint, "可能為 2/3X1，請依圖片確認");
   const html = R.multiplierCandidatesHtml(line);
   assert.ok(html.includes("倍率候選（需人工確認）"), "R02: block title shown");
   assert.ok(html.includes("3X1"), "R02: candidate shown");
-  assert.ok(html.includes("可能為 2/3X1，請依圖片確認"), "R02: merged hint shown");
+  assert.ok(html.includes("2/3X1"), "R02: merged candidate shown");
+  assert.ok(html.includes("採用此候選"), "R02: adopt buttons shown");
   assert.equal(JSON.stringify(line), before, "R02: display must not mutate line");
-  assert.equal(line.review_action, "pending", "R02: review_action unchanged");
-  ok("候選 R02 顯示 3X1 與「可能為 2/3X1」提示、不改資料");
+  assert.equal(line.review_action, "pending", "R02: review_action unchanged by display");
+  ok("候選 R02 顯示 3X1＋合併 2/3X1、顯示不改資料");
+}
+
+{
+  const line = {
+    line_id: "R02-L1",
+    number_groups: [["15"], ["24"], ["22", "35", "28"]],
+    layout_hint: "column_bet",
+    multiplier_text: "2X1",
+    review_action: "pending",
+    fallback_candidate: { multiplier_candidates: ["3X1"] },
+  };
+  const res = R.adoptMultiplierCandidate(line, "2/3X1");
+  assert.equal(res.ok, true);
+  assert.equal(line.multiplier_text, "2/3X1", "R02 adopt: merged form, NOT 2X1 3X1");
+  assert.deepEqual(line.multiplier_rules, [{ rule_text: "2/3X1", categories: ["2", "3"], value: "1" }]);
+  assert.equal(line.review_action, "corrected", "R02 adopt: corrected, NOT confirmed");
+  assert.equal(line.uncertain, true, "R02 adopt: uncertain stays true");
+  assert.equal(line.human_raw_text, "15 / 24 / 22 35 28 2/3X1");
+  assert.deepEqual(line.fallback_candidate.multiplier_candidates, ["3X1"], "R02 adopt: original evidence kept");
+  assert.equal(line.fallback_candidate.adopted_multiplier, "2/3X1");
+  assert.ok(R.multiplierCandidatesHtml(line).includes("已採用"), "R02 adopt: adopted marker shown");
+  ok("候選 R02 採用 2/3X1（不寫 2X1 3X1）、corrected、保留證據");
 }
 
 {
   const line = {
     line_id: "R05-L1",
+    number_groups: [["02"], ["17"], ["20"], ["33"]],
+    layout_hint: "normal_row",
     multiplier_text: "3X1",
     review_action: "pending",
     fallback_candidate: { multiplier_candidates: ["3/4X1"] },
   };
   const before = JSON.stringify(line);
   const info = R.multiplierCandidatesInfo(line);
-  assert.deepEqual(info.candidates, ["3/4X1"]);
+  assert.deepEqual(info.displayCandidates, ["3/4X1"]);
   assert.equal(info.hint, "可能為 3/4X1，請依圖片確認");
-  const html = R.multiplierCandidatesHtml(line);
-  assert.ok(html.includes("3/4X1"), "R05: candidate shown");
+  assert.ok(R.multiplierCandidatesHtml(line).includes("3/4X1"));
   assert.equal(JSON.stringify(line), before, "R05: display must not mutate line");
-  assert.equal(line.review_action, "pending", "R05: review_action unchanged");
-  ok("候選 R05 顯示 3/4X1、不改資料");
+  assert.equal(line.review_action, "pending", "R05: review_action unchanged by display");
+
+  const res = R.adoptMultiplierCandidate(line, "3/4X1");
+  assert.equal(res.ok, true);
+  assert.equal(line.multiplier_text, "3/4X1");
+  assert.deepEqual(line.multiplier_rules, [{ rule_text: "3/4X1", categories: ["3", "4"], value: "1" }]);
+  assert.equal(line.review_action, "corrected");
+  assert.equal(line.uncertain, true);
+  assert.equal(line.human_raw_text, "02 17 20 33 3/4X1");
+  assert.deepEqual(line.fallback_candidate.multiplier_candidates, ["3/4X1"], "R05 adopt: original evidence kept");
+  assert.equal(line.fallback_candidate.adopted_multiplier, "3/4X1");
+  ok("候選 R05 顯示並採用 3/4X1、corrected、保留證據");
 }
 
 {
@@ -191,19 +229,36 @@ function ok(name) {
 
 {
   const line = {
-    line_id: "R07-L1",
-    multiplier_text: null,
+    line_id: "R02-L1",
+    number_groups: [["15"], ["24"], ["22", "35", "28"]],
+    layout_hint: "column_bet",
+    multiplier_text: "2X1",
     review_action: "pending",
-    fallback_candidate: { multiplier_candidates: ["3/4X1"] },
+    fallback_candidate: { multiplier_candidates: ["3X1", "3x1", "3 × 1", "3X1"] },
   };
   const before = JSON.stringify(line);
   const info = R.multiplierCandidatesInfo(line);
-  assert.equal(info.hasCandidates, true);
-  assert.deepEqual(info.candidates, ["3/4X1"]);
-  assert.equal(info.hint, "可能為 3/4X1，請依圖片確認");
-  assert.ok(R.multiplierCandidatesHtml(line).includes("3/4X1"));
+  assert.deepEqual(info.candidates, ["3X1"], "normalize + dedupe for display");
+  assert.deepEqual(line.fallback_candidate.multiplier_candidates, ["3X1", "3x1", "3 × 1", "3X1"], "raw evidence untouched");
+  R.multiplierCandidatesHtml(line);
   assert.equal(JSON.stringify(line), before);
-  ok("候選 只有 candidates（目前倍率空白）仍正常顯示");
+  ok("候選 正規化去重顯示、原始證據不刪");
+}
+
+{
+  const line = {
+    line_id: "R02-L1",
+    number_groups: [["15"], ["24"], ["22", "35", "28"]],
+    layout_hint: "column_bet",
+    multiplier_text: "2X1",
+    review_action: "pending",
+    fallback_candidate: { multiplier_candidates: ["3X1"] },
+  };
+  const before = JSON.stringify(line);
+  const res = R.adoptMultiplierCandidate(line, "4X1"); // not offered
+  assert.equal(res.ok, false);
+  assert.equal(JSON.stringify(line), before, "invalid adoption must not mutate");
+  ok("候選 非候選值不可採用、資料不變");
 }
 
 console.log(`\n${passed} tests passed`);

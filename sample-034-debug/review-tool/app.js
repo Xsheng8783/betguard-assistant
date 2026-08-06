@@ -510,6 +510,20 @@ async function applyRoiClick(line) {
   }
 }
 
+async function adoptCandidateClick(lineId, candidate) {
+  const line = (state.draft.lines || []).find((l) => l.line_id === lineId);
+  if (!line) return;
+  const res = ROILogic.adoptMultiplierCandidate(line, candidate);
+  if (!res.ok) {
+    $("#status").textContent = "採用候選失敗：" + (res.error || "未知錯誤");
+    return;
+  }
+  track(lineId, ["multiplier_text", "human_raw_text", "multiplier_rules", "fallback_candidate", "review_action"]);
+  await save(false);
+  $("#status").textContent = "已採用倍率候選（尚未確認，請再按「確認本行正確」）";
+  renderEditor();
+}
+
 function swapOrder(line, delta) {
   const lines = state.draft.lines;
   const same = lines.filter((l) => l.region_id === line.region_id).sort((a, b) => (a.order || 0) - (b.order || 0));

@@ -55,15 +55,28 @@
     return { cats: m[1].match(/[234]/g) || [], value: m[2] };
   }
 
-  // Returns {hasCandidates, candidates, hint}. PURE: never mutates line.
+  function normalizeCandidate(value) {
+    return normRuleText(value);
+  }
+
+  // Returns {hasCandidates, candidates, merged, displayCandidates, adopted,
+  // hint}. PURE: never mutates line. Candidates are normalized + deduped for
+  // DISPLAY ONLY; the original fallback_candidate.multiplier_candidates array
+  // is never modified here.
   function multiplierCandidatesInfo(line) {
     const fb = line && line.fallback_candidate;
-    const candidates = Array.isArray(fb && fb.multiplier_candidates)
-      ? fb.multiplier_candidates.map((c) => String(c).trim()).filter(Boolean)
-      : [];
-    let hint = null;
-    if (candidates.length) {
-      const currentRules = String(line.multiplier_text || "").split(/\s+/).filter(Boolean);
+    const raw = Array.isArray(fb && fb.multiplier_candidates) ? fb.multiplier_candidates : [];
+    const seen = new Set();
+    const candidates = [];
+    for (const c of raw) {
+      const n = normalizeCandidate(c);
+      if (!n || seen.has(n)) continue;
+      seen.add(n);
+      candidates.push(n);
+    }
+    let merged = null;
+    if (line && line.multiplier_text) {
+      const currentRules = String(line.multiplier_text).split(/\s+/).map(normalizeCandidate).filter(Boolean);
       for (const cand of candidates) {
         const cp = ruleParts(cand);
         if (!cp) continue;
@@ -73,19 +86,41 @@
           if (p && p.value === cp.value) p.cats.forEach((c) => cats.add(c));
         }
         if (cats.size >= 2) {
-          hint = `可能為 ${Array.from(cats).sort().join("/")}X${cp.value}，請依圖片確認`;
+          merged = Array.from(cats).sort().join("/") + "X" + cp.value;
           break;
         }
       }
     }
-    return { hasCandidates: candidates.length > 0, candidates, hint };
+    const displayCandidates = merged && !candidates.includes(merged)
+      ? candidates.concat([merged])
+      : candidates.slice();
+    const adopted = fb && fb.adopted_multiplier ? normalizeCandidate(fb.adopted_multiplier) : null;
+    const hint = merged ? `可能為 ${merged}，請依圖片確認` : null;
+    return {
+      hasCandidates: candidates.length > 0,
+      candidates,
+      merged,
+      displayCandidates,
+      adopted,
+      hint,
+    };
   }
 
-  // Display-only HTML; returns "" when there is nothing to show.
+  // Display-only HTML; returns "" when there is nothing to show. Adopting is
+  // an explicit button click; rendering itself never mutates the line.
   function multiplierCandidatesHtml(line) {
     const info = multiplierCandidatesInfo(line);
     if (!info.hasCandidates) return "";
-    const items = info.candidates.map((c) => `<li>${escHtml(c)}</li>`).join("");
+    const lineId = escHtml(line.line_id);
+    const item = (value) => {
+      const isMerged = info.merged === value;
+      const adopted = info.adopted === value;
+      const action = adopted
+        ? '<span class="mult-adopted">已採用</span>'
+        : `<button type="button" class="mult-adopt" onclick="adoptCandidateClick('${lineId}','${escHtml(value)}')">採用此候選</button>`;
+      return `<li class="${isMerged ? "mult-merged" : ""}"><span class="mult-cand">${escHtml(value)}</span>${action}</li>`;
+    };
+    const items = info.displayCandidates.map(item).join("");
     return (
       '<div class="mult-candidates"><b>倍率候選（需人工確認）</b><ul>' +
       items +
@@ -93,6 +128,39 @@
       (info.hint ? `<div class="mult-hint">${escHtml(info.hint)}</div>` : "") +
       "</div>"
     );
+  }
+
+  // Explicit human adoption of one candidate. Mutates line ONLY on adoption:
+  // multiplier_text, multiplier_rules, human_raw_text/raw_text, review_action
+  // -> corrected, uncertain stays true, and fallback_candidate keeps ALL
+  // original candidates plus an adopted_multiplier marker. Never confirms.
+  function adoptMultiplierCandidate(line, candidate) {
+    if (!line) return { ok: false, error: "line missing" };
+    const info = multiplierCandidatesInfo(line);
+    const value = normalizeCandidate(candidate);
+    if (!value || !(info.candidates.includes(value) || info.merged === value)) {
+      return { ok: false, error: "candidate not available" };
+    }
+    const parts = ruleParts(value);
+    if (!parts || parts.cats.length === 0) {
+      return { ok: false, error: "candidate unparseable" };
+    }
+    const groups = line.number_groups || [];
+    const humanRaw =
+      (line.layout_hint === "column_bet"
+        ? groups.map((g) => (g || []).join(" ")).join(" / ")
+        : groups.flat().join(" ")) + " " + value;
+    line.multiplier_text = value;
+    line.multiplier_rules = [{ rule_text: value, categories: parts.cats, value: parts.value }];
+    line.human_raw_text = humanRaw;
+    line.raw_text = humanRaw;
+    line.review_action = "corrected"; // edited but NOT confirmed
+    line.uncertain = true; // stays until human unchecks or confirms
+    line.correction_source = "multiplier_candidate";
+    line.human_edited = true;
+    line.fallback_candidate = Object.assign({}, line.fallback_candidate || {});
+    line.fallback_candidate.adopted_multiplier = value; // original candidates untouched
+    return { ok: true, value, line };
   }
 
   // Returns {ok, missing[], digits, multiplier, playText, fullText}.
@@ -156,5 +224,15 @@
     return { ok: true, idempotent: false, edit, missing: [], error: null };
   }
 
-  return { roiDigits, playText, canApplyRoi, applyRoiToLine, ZH, multiplierCandidatesInfo, multiplierCandidatesHtml };
+  return {
+    roiDigits,
+    playText,
+    canApplyRoi,
+    applyRoiToLine,
+    ZH,
+    multiplierCandidatesInfo,
+    multiplierCandidatesHtml,
+    adoptMultiplierCandidate,
+    normalizeCandidate,
+  };
 });
