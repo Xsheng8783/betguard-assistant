@@ -331,6 +331,7 @@ def call_column_combo_crop(
     box: list[int] | None = None,
     meta: dict | None = None,
     variant: str = "original_3x",
+    request_id: str | None = None,
 ) -> str:
     """Stage-2 column-combo read: crop the FULL column grid region (numbers +
     play mark), upscale 3x, PNG, ask the column_combo prompt."""
@@ -366,15 +367,17 @@ def call_column_combo_crop(
         crop.save(save_path, format="PNG")
     buf = BytesIO()
     crop.save(buf, format="PNG")
-    b64 = base64.b64encode(buf.getvalue()).decode()
+    crop_bytes = buf.getvalue()
+    b64 = base64.b64encode(crop_bytes).decode()
     content, m = _qwen_chat(
         b64, "image/png", COLUMN_COMBO_PROMPT,
         max_tokens=600,
-        image_sha256=hashlib.sha256(png_bytes).hexdigest(),
+        image_sha256=hashlib.sha256(crop_bytes).hexdigest(),
         crop_box=list(crop_box),
         scale=scale,
         image_variant=variant,
         prompt_version=COLUMN_COMBO_PROMPT_VERSION,
+        request_id=request_id,
     )
     if meta is not None:
         meta.update(m)
@@ -392,6 +395,7 @@ def call_play_mark_crop(
     box: list[int] | None = None,
     meta: dict | None = None,
     variant: str = "original_3x",
+    request_id: str | None = None,
 ) -> str:
     """Stage-2 read: crop the right-side play zone with FULL vertical extent
     (stacked digits often extend above/below the main number row), upscale
@@ -428,15 +432,17 @@ def call_play_mark_crop(
         crop.save(save_path, format="PNG")
     buf = BytesIO()
     crop.save(buf, format="PNG")
-    b64 = base64.b64encode(buf.getvalue()).decode()
+    crop_bytes = buf.getvalue()
+    b64 = base64.b64encode(crop_bytes).decode()
     content, m = _qwen_chat(
         b64, "image/png", PLAY_MARK_PROMPT,
         max_tokens=400,
-        image_sha256=hashlib.sha256(png_bytes).hexdigest(),
+        image_sha256=hashlib.sha256(crop_bytes).hexdigest(),
         crop_box=list(crop_box),
         scale=scale,
         image_variant=variant,
         prompt_version=PLAY_MARK_PROMPT_VERSION,
+        request_id=request_id,
     )
     if meta is not None:
         meta.update(m)

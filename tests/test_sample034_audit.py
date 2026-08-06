@@ -6,6 +6,7 @@ Dataset-dependent tests skip when BETGUARD_DATASET is not configured.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import sys
 import tempfile
@@ -171,8 +172,10 @@ def _toks():
 def _run_combo(monkeypatch, responses):
     calls = []
 
-    def fake(img, bbox, *, save_path=None, box=None, variant="original_3x", meta=None):
+    def fake(img, bbox, *, save_path=None, box=None, variant="original_3x", meta=None, request_id=None):
         calls.append(list(box) if box else None)
+        if meta is not None:
+            meta["request_id"] = request_id or "rid"
         return responses.pop(0)
 
     monkeypatch.setattr("test_combined_bbox.call_column_combo_crop", fake)
@@ -392,6 +395,10 @@ def test_qwen_429_retries_400_does_not(monkeypatch):
     import urllib.error
     import test_combined_bbox as tcb
 
+    # CI has no DASHSCOPE_API_KEY; the retry/backoff logic must be tested
+    # without the real key guard (urlopen is fully mocked below).
+    monkeypatch.setattr(tcb, "KEY", "sk-test-fake-key")
+
     calls = {"n": 0}
 
     def fake_urlopen(req, timeout=240):
@@ -517,3 +524,169 @@ def test_structured_divergence_exact_columns():
     cs = {"semantics_numbers": [["03", "18"], ["11", "28"]]}
     sem = {"columns": [["03", "28"], ["11", "18"]], "multipliers": ["1"], "stars": [2]}
     assert S._structured_divergence(cs, sem) is True  # same numbers, different columns
+
+
+# --- third-round fixes: ROI hash, crop evidence, no_attempts fail-closed ---
+
+def test_roi_hash_is_crop_bytes_not_full_page(tmp_path, monkeypatch):
+    """The image_sha256 sent with a ROI request must hash the EXACT crop bytes
+    (buf.getvalue()), never the full-page normalized PNG bytes."""
+    from PIL import Image
+    import base64
+    import test_combined_bbox as tcb
+
+    p = tmp_path / "sample.jpg"
+    Image.new("RGB", (800, 800), "white").save(p)
+    _, png_bytes = tcb.load_normalized(p)
+    full_hash = hashlib.sha256(png_bytes).hexdigest()
+    captured = {}
+
+    def fake_qwen(b64, mime, prompt, **kw):
+        captured["b64"] = b64
+        captured["sha"] = kw.get("image_sha256")
+        captured["request_id"] = kw.get("request_id")
+        return "{}", {"request_id": kw.get("request_id") or "rid"}
+
+    monkeypatch.setattr(tcb, "_qwen_chat", fake_qwen)
+
+    tcb.call_column_combo_crop(
+        p, [0, 0, 100, 60], box=[10, 10, 120, 80],
+        variant="original_3x", request_id="rid-combo",
+    )
+    crop_bytes = base64.b64decode(captured["b64"])
+    assert captured["sha"] == hashlib.sha256(crop_bytes).hexdigest()
+    assert captured["sha"] != full_hash
+    assert crop_bytes != png_bytes
+    assert captured["request_id"] == "rid-combo"
+
+    tcb.call_play_mark_crop(
+        p, [0, 0, 100, 60], box=[10, 10, 120, 80],
+        variant="original_3x", request_id="rid-play",
+    )
+    crop_bytes = base64.b64decode(captured["b64"])
+    assert captured["sha"] == hashlib.sha256(crop_bytes).hexdigest()
+    assert captured["sha"] != full_hash
+    assert crop_bytes != png_bytes
+    assert captured["request_id"] == "rid-play"
+
+
+def test_column_combo_unique_crop_evidence(tmp_path, monkeypatch):
+    """All 6 ROI attempts (2 variants x 3 dy) must keep their own crop file and
+    per-attempt evidence: crop_path / crop_box / image_sha256 / variant / dy /
+    raw_response / request_id."""
+    from PIL import Image
+    import test_combined_bbox as tcb
+
+    p = tmp_path / "sample.jpg"
+    Image.new("RGB", (800, 800), "white").save(p)
+    good = json.dumps({
+        "columns": [["03"], ["11"]], "collision": "2", "multiplier": "1",
+        "uncertain": False, "uncertain_reason": None,
+    })
+
+    def fake_qwen(b64, mime, prompt, **kw):
+        rid = kw.get("request_id") or "rid"
+        return good, {"request_id": rid, "image_sha256": kw.get("image_sha256")}
+
+    monkeypatch.setattr(tcb, "_qwen_chat", fake_qwen)
+    crops = tmp_path / "crops"
+    toks = [
+        {"text": "03", "bbox": [85, 665, 135, 705]},
+        {"text": "x", "bbox": [145, 665, 165, 705]},
+        {"text": "11", "bbox": [175, 665, 225, 705]},
+        {"text": "x", "bbox": [235, 665, 255, 705]},
+    ]
+    res = pg._read_column_combo(
+        p, toks,
+        save_path=crops / "sample-034-R06-COL.png",
+        crop_box=[45, 640, 720, 748],
+    )
+    files = sorted(crops.glob("*.png"))
+    assert len(files) == 6
+    assert len({f.name for f in files}) == 6  # unique names, nothing overwritten
+    assert res["status"] == "consensus"
+    assert len(res["attempts"]) == 6
+    for a in res["attempts"]:
+        assert a["crop_path"] and Path(a["crop_path"]).exists()
+        assert a["variant"] in ("original_3x", "gray_enhanced_3x")
+        assert a["dy"] in (-8, 0, 8)
+        assert a["request_id"]
+        assert a["raw_response"] == good
+        assert a["image_sha256"] == hashlib.sha256(Path(a["crop_path"]).read_bytes()).hexdigest()
+        assert a["crop_box"][1] == 640 + a["dy"]
+
+
+def test_play_mark_unique_crop_evidence(tmp_path, monkeypatch):
+    """Both play-mark ROI variants keep their own crop file + evidence."""
+    from PIL import Image
+    import test_combined_bbox as tcb
+
+    p = tmp_path / "sample.jpg"
+    Image.new("RGB", (800, 800), "white").save(p)
+    good = json.dumps({
+        "raw_text": "34x1", "main_numbers": [],
+        "play_mark": {
+            "upper_digits": ["3"], "lower_digits": ["4"], "other_visible_digits": [],
+            "multiplier": "1", "layout": "vertical_stack", "raw_play_text": "34x1",
+            "uncertain": False, "uncertain_candidates": [], "uncertain_reason": None,
+        },
+        "overall_uncertain": False, "overall_uncertain_reason": None,
+    })
+
+    def fake_qwen(b64, mime, prompt, **kw):
+        rid = kw.get("request_id") or "rid"
+        return good, {"request_id": rid, "image_sha256": kw.get("image_sha256")}
+
+    monkeypatch.setattr(tcb, "_qwen_chat", fake_qwen)
+    crops = tmp_path / "crops"
+    toks = [{"text": "3x1", "bbox": [500, 660, 560, 700]}]
+    roi = pg._read_play_mark(
+        p, toks,
+        save_path=crops / "sample-034-R06-L1.png",
+        crop_box=[490, 650, 580, 710],
+    )
+    assert roi is not None
+    files = sorted(crops.glob("*.png"))
+    assert len(files) == 2
+    assert len({f.name for f in files}) == 2
+    assert len(roi["variant_results"]) == 2
+    for v in roi["variant_results"]:
+        assert v["crop_path"] and Path(v["crop_path"]).exists()
+        assert v["variant"] in ("original_3x", "gray_enhanced_3x")
+        assert v["request_id"]
+        assert v["dy"] == 0
+        assert v["raw_response"] == good
+        assert v["image_sha256"] == hashlib.sha256(Path(v["crop_path"]).read_bytes()).hexdigest()
+
+
+def test_combo_no_attempts_fail_closed(monkeypatch):
+    """Both variants / all six returns invalid -> no_attempts must fail closed:
+    the fallback line stays uncertain, never executable/exportable, and
+    complete validation rejects it."""
+    res, _ = _run_combo(monkeypatch, ["not json"] * 6)
+    assert res["status"] == "no_attempts"
+    assert res["uncertain"] is True
+    assert len(res["attempts"]) == 6
+    for a in res["attempts"]:
+        assert a["parsed"] is None
+        assert a["raw_response"] == "not json"
+        assert a["variant"] in ("original_3x", "gray_enhanced_3x")
+        assert a["dy"] in (-8, 0, 8)
+        assert a["request_id"]
+
+    monkeypatch.setattr(pg, "_read_column_combo", lambda *a, **k: res)
+    sec = {"rows": [{"tokens": _toks() + [
+        {"text": "2", "bbox": [605, 665, 625, 695]},
+        {"text": "x", "bbox": [635, 665, 655, 705]},
+        {"text": "0.1", "bbox": [665, 665, 715, 705]},
+    ]}]}
+    lines = pg.section_to_lines(sec, "R06", img_path=Path("x.jpg"), crop_box=[45, 640, 720, 748])
+    assert lines and lines[0]["uncertain"] is True
+    assert lines[0]["uncertain_reason"] == "column_combo_insufficient_evidence"
+    assert "column_combo_needs_review" in lines[0]["warnings"]
+    assert lines[0]["review_action"] == "pending"  # never auto-confirmed
+
+    import server as S
+    issues = [i["code"] for i in S._complete_validation(
+        {"lines": lines, "shared_multiplier_rules": [], "game": "539"})]
+    assert "LINE_NOT_CONFIRMED" in issues  # complete endpoint -> 409

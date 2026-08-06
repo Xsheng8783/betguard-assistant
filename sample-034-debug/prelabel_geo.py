@@ -8,6 +8,7 @@ import re
 import shutil
 import statistics
 import sys
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -109,6 +110,8 @@ def section_to_lines(
         if combo is not None:
             if combo.get("status") in ("consensus", "insufficient_evidence", "divergent"):
                 return _column_combo_line(region_id, combo, game=game)
+            if combo.get("status") == "no_attempts":
+                combo_status = "insufficient_evidence"
         else:
             combo_status = "insufficient_evidence"
     if single_row or len(nums) < 3:
@@ -360,23 +363,68 @@ def _read_column_combo(
     y1 = min(t["bbox"][1] for t in toks)
     x2 = max(t["bbox"][2] for t in toks)
     y2 = max(t["bbox"][3] for t in toks)
+
+    def _attempt_path(variant: str, dy: int, rid: str) -> Path | None:
+        if save_path is None:
+            return None
+        return save_path.with_name(f"{save_path.stem}-{variant}-dy{dy:+d}-{rid[:8]}.png")
+
     def _run_variant(variant: str):
-        attempts: list[dict] = []
+        parsed_attempts: list[dict] = []
+        evidence: list[dict] = []
         for dy in (-8, 0, 8):
             box = crop_box
             if box is not None:
                 box = [box[0], box[1] + dy, box[2], box[3] + dy]
+            rid = uuid.uuid4().hex[:12]
+            attempt_meta: dict = {}
+            attempt_path = _attempt_path(variant, dy, rid)
             try:
                 content = call_column_combo_crop(
                     img_path, [x1, y1, x2, y2],
-                    save_path=save_path,
+                    save_path=attempt_path,
                     box=box,
                     variant=variant,
+                    request_id=rid,
+                    meta=attempt_meta,
                 )
-            except Exception:
+            except Exception as e:
+                evidence.append({
+                    "signature": None,
+                    "columns": [],
+                    "collision": None,
+                    "multiplier": None,
+                    "uncertain": True,
+                    "parsed": None,
+                    "error": f"{type(e).__name__}: {e}",
+                    "crop_path": str(attempt_path) if attempt_path else None,
+                    "crop_box": box,
+                    "image_sha256": attempt_meta.get("image_sha256"),
+                    "variant": variant,
+                    "dy": dy,
+                    "raw_response": None,
+                    "request_id": attempt_meta.get("request_id") or rid,
+                })
                 continue
             parsed = _parse_column_combo(content, game=game)
+            rec = {
+                "signature": None,
+                "columns": [],
+                "collision": None,
+                "multiplier": None,
+                "uncertain": True,
+                "parsed": parsed,
+                "error": None,
+                "crop_path": str(attempt_path) if attempt_path else None,
+                "crop_box": box,
+                "image_sha256": attempt_meta.get("image_sha256"),
+                "variant": variant,
+                "dy": dy,
+                "raw_response": content,
+                "request_id": attempt_meta.get("request_id") or rid,
+            }
             if parsed is None:
+                evidence.append(rec)
                 continue
             sig = (
                 tuple(tuple(c) for c in parsed["columns"]),
@@ -387,18 +435,30 @@ def _read_column_combo(
             parsed["crop_box"] = box
             parsed["raw_response"] = content
             parsed["variant"] = variant
-            attempts.append(parsed)
-        if not attempts:
-            return None, attempts, "no_attempts", True
-        counts = Counter(a["signature"] for a in attempts)
+            parsed["dy"] = dy
+            parsed["request_id"] = rec["request_id"]
+            parsed["image_sha256"] = rec["image_sha256"]
+            parsed["crop_path"] = rec["crop_path"]
+            parsed_attempts.append(parsed)
+            rec.update({
+                "signature": sig,
+                "columns": parsed["columns"],
+                "collision": parsed.get("collision"),
+                "multiplier": parsed.get("multiplier"),
+                "uncertain": parsed["uncertain"],
+            })
+            evidence.append(rec)
+        if not parsed_attempts:
+            return None, evidence, "no_attempts", True
+        counts = Counter(a["signature"] for a in parsed_attempts)
         sig, n = counts.most_common(1)[0]
-        any_uncertain = any(a["uncertain"] for a in attempts)
+        any_uncertain = any(a["uncertain"] for a in parsed_attempts)
         if n >= 2:
-            chosen = next(a for a in attempts if a["signature"] == sig)
-            return chosen, attempts, "consensus", chosen["uncertain"] or any_uncertain
-        if len(attempts) == 1:
-            return attempts[0], attempts, "insufficient_evidence", True
-        return None, attempts, "divergent", True
+            chosen = next(a for a in parsed_attempts if a["signature"] == sig)
+            return chosen, evidence, "consensus", chosen["uncertain"] or any_uncertain
+        if len(parsed_attempts) == 1:
+            return parsed_attempts[0], evidence, "insufficient_evidence", True
+        return None, evidence, "divergent", True
 
     orig_chosen, orig_attempts, orig_status, orig_unc = _run_variant("original_3x")
     gray_chosen, gray_attempts, gray_status, gray_unc = _run_variant("gray_enhanced_3x")
@@ -427,19 +487,7 @@ def _read_column_combo(
         "uncertain_reason": primary.get("uncertain_reason"),
         "status": status,
         "roi_variant_divergent": variant_divergent,
-        "attempts": [
-            {
-                "signature": a["signature"],
-                "columns": a["columns"],
-                "collision": a.get("collision"),
-                "multiplier": a.get("multiplier"),
-                "uncertain": a["uncertain"],
-                "crop_box": a["crop_box"],
-                "raw_response": a["raw_response"],
-                "variant": a["variant"],
-            }
-            for a in attempts
-        ],
+        "attempts": attempts,
     }
 
 
@@ -645,12 +693,19 @@ def _read_play_mark(
     variant_results = []
     parsed_obj = None
     for variant in ("original_3x", "gray_enhanced_3x"):
+        rid = uuid.uuid4().hex[:12]
+        attempt_meta: dict = {}
+        attempt_path = None
+        if save_path is not None:
+            attempt_path = save_path.with_name(f"{save_path.stem}-{variant}-{rid[:8]}.png")
         try:
             content = call_play_mark_crop(
                 img_path, [x1, y1, x2, y2],
-                save_path=save_path,
+                save_path=attempt_path,
                 box=crop_box,
                 variant=variant,
+                request_id=rid,
+                meta=attempt_meta,
             )
         except Exception:
             continue
@@ -660,6 +715,12 @@ def _read_play_mark(
             "variant": variant,
             "content": content,
             "parsed": pm if isinstance(pm, dict) else None,
+            "raw_response": content,
+            "crop_path": str(attempt_path) if attempt_path else None,
+            "crop_box": crop_box,
+            "image_sha256": attempt_meta.get("image_sha256"),
+            "request_id": attempt_meta.get("request_id") or rid,
+            "dy": 0,
         })
         if parsed_obj is None and isinstance(pm, dict):
             parsed_obj = obj
@@ -702,7 +763,7 @@ def _read_play_mark(
         "uncertain": bool(pm.get("uncertain")) or bool(obj.get("overall_uncertain")),
         "uncertain_candidates": [str(x) for x in (pm.get("uncertain_candidates") or [])],
         "uncertain_reason": pm.get("uncertain_reason") or obj.get("overall_uncertain_reason"),
-        "crop_path": str(save_path) if save_path else None,
+        "crop_path": variant_results[0].get("crop_path") if variant_results else (str(save_path) if save_path else None),
         "incomplete": incomplete,
         "variant_divergent": variant_divergent,
         "variant_results": variant_results,
