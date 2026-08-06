@@ -76,6 +76,7 @@ def section_to_lines(
     region_id: str,
     img_path: Path | None = None,
     crop_box: list[int] | None = None,
+    game: str = "539",
 ) -> list[dict]:
     rows = section.get("rows") or []
     toks = []
@@ -97,17 +98,24 @@ def section_to_lines(
     x_seps = [t for t in toks if str(t.get("text") or "") in "xX×"]
     has_slash = any("/" in str(t.get("text") or "") for t in toks)
     column_like = len(nums) >= 3 and (len(x_seps) >= 2 or has_slash)
+    combo_status: str | None = None
     if column_like and img_path:
         combo = _read_column_combo(
             img_path, toks,
             save_path=CROPS / f"{img_path.stem}-{region_id}-COL.png",
             crop_box=crop_box,
+            game=game,
         )
         if combo is not None:
             if combo.get("status") in ("consensus", "insufficient_evidence", "divergent"):
-                return _column_combo_line(region_id, combo)
+                return _column_combo_line(region_id, combo, game=game)
+        else:
+            combo_status = "insufficient_evidence"
     if single_row or len(nums) < 3:
-        return _normal_lines(rows, region_id, img_path=img_path, crop_box=crop_box)
+        return _mark_combo_fallback(
+            _normal_lines(rows, region_id, img_path=img_path, crop_box=crop_box),
+            combo_status,
+        )
     nums_cx_min = min((t["bbox"][0] + t["bbox"][2]) / 2 for t in nums)
     nums_cx_max = max((t["bbox"][0] + t["bbox"][2]) / 2 for t in nums)
     # clean zone: numbers + separators inside the number band; collision digits
@@ -145,7 +153,7 @@ def section_to_lines(
         text = " / ".join(" ".join(v) for v in cols.values())
         if mult_txt:
             text = f"{text} {mult_txt}"
-        return [{
+        out = [{
             "line_id": f"{region_id}-L1",
             "entry_id": f"{region_id}-E1",
             "region_id": region_id,
@@ -164,6 +172,7 @@ def section_to_lines(
             "review_action": "pending",
             "human_added": False,
         }]
+        return _mark_combo_fallback(out, combo_status)
     # normal row: use model row numbers
     lines = []
     for i, r in enumerate(rows, 1):
@@ -188,7 +197,7 @@ def section_to_lines(
             "review_action": "pending",
             "human_added": False,
         })
-    return lines
+    return _mark_combo_fallback(lines, combo_status)
 
 
 def _car_lines(section: dict, region_id: str) -> list[dict]:
@@ -275,6 +284,20 @@ def _normal_lines(
             uncertain, uncertain_reason, warn, play_mark = _merge_play_mark(first_play, roi)
             if warn:
                 warnings.append(warn)
+        # bbox-height guard: a play token much taller than the row's numbers
+        # means a stacked digit may have been missed by BOTH passes; such a row
+        # must never be treated as consistent/confirmed.
+        num_hs = [t["bbox"][3] - t["bbox"][1] for t in num_toks]
+        if num_hs:
+            med_h = statistics.median(num_hs)
+            for t in play_toks:
+                if (t["bbox"][3] - t["bbox"][1]) >= 1.2 * med_h:
+                    if not uncertain:
+                        uncertain = True
+                        uncertain_reason = "possible_stacked_category_digit"
+                    if "possible_stacked_category_digit" not in warnings:
+                        warnings.append("possible_stacked_category_digit")
+                    break
         rt = toktxt or " ".join(flat)
         lines.append({
             "line_id": f"{region_id}-L{i}",
@@ -298,15 +321,32 @@ def _normal_lines(
             "human_added": False,
         })
     return lines
+def _mark_combo_fallback(lines: list[dict], status: str | None) -> list[dict]:
+    """column_like detected but no usable consensus -> the legacy fallback must
+    stay needs_review (never uncertain=false / executable)."""
+    if not status:
+        return lines
+    for line in lines:
+        line["uncertain"] = True
+        line["uncertain_reason"] = f"column_combo_{status}"
+        line.setdefault("warnings", [])
+        if "column_combo_needs_review" not in line["warnings"]:
+            line["warnings"].append("column_combo_needs_review")
+    return lines
+
+
 def _read_column_combo(
     img_path: Path,
     toks: list[dict],
     save_path: Path | None = None,
     crop_box: list[int] | None = None,
+    game: str = "539",
 ) -> dict | None:
     """Stage-2 column-combo read with 3-offset CONSENSUS.
 
-    Each attempt shifts BOTH y1 and y2 by dy (crop height unchanged).
+    Each attempt shifts BOTH y1 and y2 by dy (crop height unchanged) and runs
+    two image variants (original + grayscale-enhanced); variant divergence is
+    recorded as roi_variant_divergent (never vote to fill digits).
     Signature = (columns, collision, multiplier):
       - >=2/3 identical  -> consensus (any uncertain attempt still review)
       - all three differ -> column_combo_divergent
@@ -320,76 +360,96 @@ def _read_column_combo(
     y1 = min(t["bbox"][1] for t in toks)
     x2 = max(t["bbox"][2] for t in toks)
     y2 = max(t["bbox"][3] for t in toks)
-    attempts: list[dict] = []
-    for dy in (-8, 0, 8):
-        box = crop_box
-        if box is not None:
-            box = [box[0], box[1] + dy, box[2], box[3] + dy]
-        try:
-            content = call_column_combo_crop(
-                img_path, [x1, y1, x2, y2],
-                save_path=save_path,
-                box=box,
+    def _run_variant(variant: str):
+        attempts: list[dict] = []
+        for dy in (-8, 0, 8):
+            box = crop_box
+            if box is not None:
+                box = [box[0], box[1] + dy, box[2], box[3] + dy]
+            try:
+                content = call_column_combo_crop(
+                    img_path, [x1, y1, x2, y2],
+                    save_path=save_path,
+                    box=box,
+                    variant=variant,
+                )
+            except Exception:
+                continue
+            parsed = _parse_column_combo(content, game=game)
+            if parsed is None:
+                continue
+            sig = (
+                tuple(tuple(c) for c in parsed["columns"]),
+                parsed.get("collision"),
+                parsed.get("multiplier"),
             )
-        except Exception:
-            continue
-        parsed = _parse_column_combo(content)
-        if parsed is None:
-            continue
-        sig = (
-            tuple(tuple(c) for c in parsed["columns"]),
-            parsed.get("collision"),
-            parsed.get("multiplier"),
-        )
-        parsed["signature"] = sig
-        parsed["crop_box"] = box
-        parsed["raw_response"] = content
-        attempts.append(parsed)
-    if not attempts:
-        return None
-    counts = Counter(a["signature"] for a in attempts)
-    sig, n = counts.most_common(1)[0]
-    any_uncertain = any(a["uncertain"] for a in attempts)
-    if n >= 2:
-        chosen = next(a for a in attempts if a["signature"] == sig)
-        status = "consensus"
-        uncertain = chosen["uncertain"] or any_uncertain
-    elif len(attempts) == 1:
-        chosen = attempts[0]
-        status = "insufficient_evidence"
-        uncertain = True
-    else:
-        chosen = None
-        status = "divergent"
-        uncertain = True
+            parsed["signature"] = sig
+            parsed["crop_box"] = box
+            parsed["raw_response"] = content
+            parsed["variant"] = variant
+            attempts.append(parsed)
+        if not attempts:
+            return None, attempts, "no_attempts", True
+        counts = Counter(a["signature"] for a in attempts)
+        sig, n = counts.most_common(1)[0]
+        any_uncertain = any(a["uncertain"] for a in attempts)
+        if n >= 2:
+            chosen = next(a for a in attempts if a["signature"] == sig)
+            return chosen, attempts, "consensus", chosen["uncertain"] or any_uncertain
+        if len(attempts) == 1:
+            return attempts[0], attempts, "insufficient_evidence", True
+        return None, attempts, "divergent", True
+
+    orig_chosen, orig_attempts, orig_status, orig_unc = _run_variant("original_3x")
+    gray_chosen, gray_attempts, gray_status, gray_unc = _run_variant("gray_enhanced_3x")
+    attempts = orig_attempts + gray_attempts
+    if orig_chosen is None and gray_chosen is None:
+        status = orig_status if orig_status != "no_attempts" else gray_status
+        return {
+            "columns": [], "collision": None, "multiplier": None,
+            "uncertain": True, "uncertain_reason": None,
+            "status": status, "roi_variant_divergent": False,
+            "attempts": attempts,
+        }
+    primary = orig_chosen if orig_chosen is not None else gray_chosen
+    status = orig_status if orig_chosen is not None else gray_status
+    variant_divergent = (
+        orig_chosen is not None
+        and gray_chosen is not None
+        and orig_chosen["signature"] != gray_chosen["signature"]
+    )
+    uncertain = orig_unc or gray_unc or variant_divergent or status != "consensus"
     return {
-        "columns": chosen["columns"] if chosen else [],
-        "collision": chosen.get("collision") if chosen else None,
-        "multiplier": chosen.get("multiplier") if chosen else None,
+        "columns": primary["columns"],
+        "collision": primary.get("collision"),
+        "multiplier": primary.get("multiplier"),
         "uncertain": uncertain,
-        "uncertain_reason": None if chosen is None else chosen.get("uncertain_reason"),
+        "uncertain_reason": primary.get("uncertain_reason"),
         "status": status,
-        "attempts": [{
-            "signature": a["signature"],
-            "columns": a["columns"],
-            "collision": a.get("collision"),
-            "multiplier": a.get("multiplier"),
-            "uncertain": a["uncertain"],
-            "crop_box": a["crop_box"],
-            "raw_response": a["raw_response"],
-        } for a in attempts],
+        "roi_variant_divergent": variant_divergent,
+        "attempts": [
+            {
+                "signature": a["signature"],
+                "columns": a["columns"],
+                "collision": a.get("collision"),
+                "multiplier": a.get("multiplier"),
+                "uncertain": a["uncertain"],
+                "crop_box": a["crop_box"],
+                "raw_response": a["raw_response"],
+                "variant": a["variant"],
+            }
+            for a in attempts
+        ],
     }
 
 
-def _parse_column_combo(content: str) -> dict | None:
+def _parse_column_combo(content: str, game: str = "539") -> dict | None:
     """Parse + strict-structure validate one column_combo response.
-    Columns: >=2, non-empty, each cell exactly 2 digits (01-49)."""
-    m = re.search(r"\{.*\}", content, re.S)
-    if not m:
-        return None
-    try:
-        obj = json.loads(m.group(0))
-    except json.JSONDecodeError:
+    Columns: >=2, non-empty, each cell exactly 2 digits, in game range."""
+    from test_combined_bbox import extract_json
+
+    obj = extract_json(content)
+    if obj is None:
         return None
     cols = obj.get("columns")
     if not isinstance(cols, list) or len(cols) < 2:
@@ -399,8 +459,9 @@ def _parse_column_combo(content: str) -> dict | None:
         if not isinstance(col, list) or not col:
             return None
         cells = [str(c).strip() for c in col if str(c).strip()]
+        max_n = 39 if game == "539" else 49
         if not cells or any(
-            not re.fullmatch(r"\d{2}", c) or not (1 <= int(c) <= 49) for c in cells
+            not re.fullmatch(r"\d{2}", c) or not (1 <= int(c) <= max_n) for c in cells
         ):
             return None
         norm.append(cells)
@@ -415,7 +476,7 @@ def _parse_column_combo(content: str) -> dict | None:
     }
 
 
-def _column_combo_line(region_id: str, combo: dict) -> list[dict]:
+def _column_combo_line(region_id: str, combo: dict, game: str = "539") -> list[dict]:
     from decimal import Decimal
 
     cols = combo["columns"]
@@ -425,6 +486,7 @@ def _column_combo_line(region_id: str, combo: dict) -> list[dict]:
     uncertain = bool(combo.get("uncertain"))
     reason = None
     problems: list[str] = []
+    max_n = 39 if game == "539" else 49
     if len(cols) < 2:
         problems.append("少於兩欄")
     for ci, col in enumerate(cols):
@@ -433,7 +495,7 @@ def _column_combo_line(region_id: str, combo: dict) -> list[dict]:
         for n in col:
             if not re.fullmatch(r"\d{2}", n):
                 problems.append(f"非兩位數字 {n}")
-            elif not (1 <= int(n) <= 49):
+            elif not (1 <= int(n) <= max_n):
                 problems.append(f"超出範圍 {n}")
     if any(len(set(c)) != len(c) for c in cols):
         problems.append("同欄重複")
@@ -453,6 +515,10 @@ def _column_combo_line(region_id: str, combo: dict) -> list[dict]:
         warnings.append("column_combo_roi_uncertain")
     if status in ("divergent", "insufficient_evidence") or problems:
         warnings.append("column_combo_needs_review")
+    if combo.get("roi_variant_divergent"):
+        uncertain = True
+        reason = "roi_variant_divergent"
+        warnings.append("roi_variant_divergent")
     if coll and mult:
         mult_txt = f"{coll}X{mult}"
     elif mult:
@@ -576,23 +642,32 @@ def _read_play_mark(
         or crop_box[3] < y2 + 4
     ):
         incomplete = True
-    try:
-        content = call_play_mark_crop(
-            img_path, [x1, y1, x2, y2],
-            save_path=save_path,
-            box=crop_box,
-        )
-    except Exception:
+    variant_results = []
+    parsed_obj = None
+    for variant in ("original_3x", "gray_enhanced_3x"):
+        try:
+            content = call_play_mark_crop(
+                img_path, [x1, y1, x2, y2],
+                save_path=save_path,
+                box=crop_box,
+                variant=variant,
+            )
+        except Exception:
+            continue
+        obj = extract_json(content)
+        pm = obj.get("play_mark") if isinstance(obj, dict) else None
+        variant_results.append({
+            "variant": variant,
+            "content": content,
+            "parsed": pm if isinstance(pm, dict) else None,
+        })
+        if parsed_obj is None and isinstance(pm, dict):
+            parsed_obj = obj
+    if parsed_obj is None:
         return None
-    obj = extract_json(content)
-    if obj is None:
-        return None
-    pm = obj.get("play_mark") if isinstance(obj, dict) else None
-    if not isinstance(pm, dict):
-        return None
-    # New user schema: upper/lower/other slots. Keep only single category
-    # digits 2/3/4; multi-char junk like "31"/"39" from neighboring rows must
-    # not count as category digits.
+    obj = parsed_obj
+    pm = obj.get("play_mark")
+
     def _digits(value):
         return [c for raw in (value or []) for c in re.findall(r"[234]", str(raw))]
 
@@ -603,6 +678,19 @@ def _read_play_mark(
     seen: set[str] = set()
     uniq = [c for c in cats if not (c in seen or seen.add(c))]
     mult = pm.get("multiplier")
+    variant_divergent = False
+    parsed_variants = [v["parsed"] for v in variant_results if v["parsed"] is not None]
+    if len(parsed_variants) >= 2:
+        def _sig(p):
+            return (
+                tuple(str(d) for d in (p.get("upper_digits") or [])),
+                tuple(str(d) for d in (p.get("lower_digits") or [])),
+                tuple(str(d) for d in (p.get("other_visible_digits") or [])),
+                str(p.get("multiplier") or ""),
+                str(p.get("layout") or ""),
+                bool(p.get("uncertain")),
+            )
+        variant_divergent = _sig(parsed_variants[0]) != _sig(parsed_variants[1])
     return {
         "layout": str(pm.get("layout") or ""),
         "categories": uniq,
@@ -616,6 +704,8 @@ def _read_play_mark(
         "uncertain_reason": pm.get("uncertain_reason") or obj.get("overall_uncertain_reason"),
         "crop_path": str(save_path) if save_path else None,
         "incomplete": incomplete,
+        "variant_divergent": variant_divergent,
+        "variant_results": variant_results,
         "crop_box": crop_box,
         "scale": 3,
         "image_variant": "original_3x",
@@ -653,6 +743,8 @@ def _merge_play_mark(first: dict, roi: dict | None) -> tuple[bool, str | None, s
             "roi_uncertain_candidates": roi.get("uncertain_candidates"),
             "crop_path": roi.get("crop_path"),
             "roi_incomplete": roi.get("incomplete", False),
+            "roi_variant_divergent": roi.get("variant_divergent", False),
+            "roi_variant_results": roi.get("variant_results"),
             "crop_box": roi.get("crop_box"),
             "scale": roi.get("scale"),
             "image_variant": roi.get("image_variant"),
@@ -662,6 +754,8 @@ def _merge_play_mark(first: dict, roi: dict | None) -> tuple[bool, str | None, s
         return True, "play_mark_unclear", "play_mark_roi_unreadable", None
     if roi.get("incomplete"):
         return True, "play_mark_unclear", "ROI_INCOMPLETE", _evidence()
+    if roi.get("variant_divergent"):
+        return True, "play_mark_unclear", "roi_variant_divergent", _evidence()
     if roi["uncertain"]:
         return True, "play_mark_unclear", "play_mark_roi_unclear", _evidence()
     pos_ok = (
@@ -685,6 +779,7 @@ def process_parsed(
     *,
     write: bool = True,
     quality_issues: list[str] | None = None,
+    game: str = "539",
 ) -> int:
     """Build + write the review draft from an already-parsed combined output."""
     lines, regions, warnings = [], [], []
@@ -720,7 +815,7 @@ def process_parsed(
                     xs.extend((t["bbox"][0], t["bbox"][2]))
         band = bands[si - 1]
         crop_box = [min(xs) - 40, band[0], max(xs) + 80, band[1]] if band and xs else None
-        sec_lines = section_to_lines(sec, rid, img_path=img_path, crop_box=crop_box)
+        sec_lines = section_to_lines(sec, rid, img_path=img_path, crop_box=crop_box, game=game)
         lines.extend(sec_lines)
         regions.append({
             "region_id": rid, "order": si, "column": "unknown",
@@ -734,6 +829,7 @@ def process_parsed(
         "review_status": "pending_human_review",
         "reviewed_by": None, "reviewed_at": None,
         "source": "model_prelabel_not_ground_truth",
+        "game": game,
         "regions": regions, "lines": lines,
         "shared_multiplier_rules": [], "warnings": warnings,
     }
@@ -759,7 +855,7 @@ def process_parsed(
     return 1
 
 
-def process_sample(sid: str, *, write: bool = True) -> int:
+def process_sample(sid: str, *, write: bool = True, game: str = "539") -> int:
     img = RAW / f"{sid}.jpg"
     if not img.exists():
         return 0
@@ -771,7 +867,7 @@ def process_sample(sid: str, *, write: bool = True) -> int:
     parsed = extract_json(content)
     if parsed is None:
         return 0
-    return process_parsed(sid, parsed, write=write, quality_issues=quality)
+    return process_parsed(sid, parsed, write=write, quality_issues=quality, game=game)
 
 
 def _apply_v3_fallback(sid: str, draft: dict) -> None:
@@ -841,7 +937,11 @@ def main() -> None:
     GEO.mkdir(parents=True, exist_ok=True)
     write = "--dry" not in sys.argv
     reprocess = "--reprocess" in sys.argv[1:]
-    args = [a for a in sys.argv[1:] if a not in ("--dry", "--reprocess")]
+    game = "539"
+    if "--game" in sys.argv[1:]:
+        gi = sys.argv[1:].index("--game")
+        game = sys.argv[gi + 1] if gi + 1 < len(sys.argv) else "539"
+    args = [a for a in sys.argv[1:] if a not in ("--dry", "--reprocess", "--game", game)]
     samples = args or [f"sample-{i:03d}" for i in range(8, 34)]
     for sid in samples:
         try:
@@ -858,9 +958,9 @@ def main() -> None:
                     print(f"{sid}: combined parse failed", flush=True)
                     continue
                 quality = check_image_quality(RAW / f"{sid}.jpg")
-                process_parsed(sid, parsed, write=write, quality_issues=quality)
+                process_parsed(sid, parsed, write=write, quality_issues=quality, game=game)
             else:
-                process_sample(sid, write=write)
+                process_sample(sid, write=write, game=game)
         except Exception as e:
             print(f"{sid}: ERROR {type(e).__name__} {str(e)[:120]}", flush=True)
 

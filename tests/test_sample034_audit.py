@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -17,7 +18,7 @@ REVIEW = DEBUG / "review-tool"
 sys.path.insert(0, str(DEBUG))
 sys.path.insert(0, str(REVIEW))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-os.environ.setdefault("BETGUARD_DATASET", r"C:\BetguardOCRDataset")
+os.environ.setdefault("BETGUARD_DATASET", tempfile.gettempdir())
 
 from migration_backfill_multipliers import (  # noqa: E402
     extract_normal_multiplier,
@@ -170,7 +171,7 @@ def _toks():
 def _run_combo(monkeypatch, responses):
     calls = []
 
-    def fake(img, bbox, *, save_path=None, box=None):
+    def fake(img, bbox, *, save_path=None, box=None, variant="original_3x", meta=None):
         calls.append(list(box) if box else None)
         return responses.pop(0)
 
@@ -179,19 +180,20 @@ def _run_combo(monkeypatch, responses):
 
 
 def test_combo_consensus_2of3(monkeypatch):
-    res, _ = _run_combo(monkeypatch, [GOOD, GOOD, BAD1])
+    res, _ = _run_combo(monkeypatch, [GOOD, GOOD, BAD1, GOOD, GOOD, BAD1])
     assert res["status"] == "consensus"
     assert res["columns"] == [["03"], ["11"], ["29"], ["34"], ["18", "28"], ["27", "37"]]
+    assert res["roi_variant_divergent"] is False
 
 
 def test_combo_all_different_divergent(monkeypatch):
-    res, _ = _run_combo(monkeypatch, [GOOD, BAD1, BAD2])
+    res, _ = _run_combo(monkeypatch, [GOOD, BAD1, BAD2, GOOD, BAD1, BAD2])
     assert res["status"] == "divergent"
     assert res["uncertain"] is True
 
 
 def test_combo_single_valid_insufficient(monkeypatch):
-    res, _ = _run_combo(monkeypatch, [GOOD, "not json", BAD2])
+    res, _ = _run_combo(monkeypatch, [GOOD, "not json", BAD2, GOOD, "not json", BAD2])
     assert res["status"] == "insufficient_evidence"
     assert res["uncertain"] is True
 
@@ -201,16 +203,23 @@ def test_combo_hallucinated_extra_cells_do_not_win(monkeypatch):
         "columns": [["03"], ["11"], ["29"], ["34"], ["18", "28", "99"], ["27", "37"]],
         "collision": "2/3", "multiplier": "0.1", "uncertain": False,
     })
-    res, _ = _run_combo(monkeypatch, [GOOD, GOOD, hallucinated])
+    res, _ = _run_combo(monkeypatch, [GOOD, GOOD, hallucinated, GOOD, GOOD, hallucinated])
     assert res["status"] == "consensus"
     assert res["columns"][4] == ["18", "28"]  # NOT the 3-cell hallucination
 
 
 # 17: dy shifts BOTH y1 and y2
 def test_combo_dy_moves_both_y1_y2(monkeypatch):
-    _, calls = _run_combo(monkeypatch, [GOOD, GOOD, GOOD])
+    _, calls = _run_combo(monkeypatch, [GOOD, GOOD, GOOD, GOOD, GOOD, GOOD])
     assert calls[0][1] == calls[1][1] - 8 and calls[0][3] == calls[1][3] - 8
     assert calls[1][1] == calls[2][1] - 8 and calls[1][3] == calls[2][3] - 8
+
+
+def test_combo_variant_divergent_needs_review(monkeypatch):
+    res, _ = _run_combo(monkeypatch, [GOOD, GOOD, GOOD, BAD1, BAD1, BAD1])
+    assert res["status"] == "consensus"
+    assert res["roi_variant_divergent"] is True
+    assert res["uncertain"] is True
 
 
 # 18: prompt must not contain sample-034 GT answers
@@ -374,3 +383,137 @@ def test_image_quality_sample034():
     if not img.exists():
         pytest.skip("sample-034 image missing")
     assert pg.check_image_quality(img) == []
+
+
+# --- second-round static-review additions ---
+
+def test_qwen_429_retries_400_does_not(monkeypatch):
+    import io
+    import urllib.error
+    import test_combined_bbox as tcb
+
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout=240):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise urllib.error.HTTPError(req.full_url, 429, "rate", {}, io.BytesIO(b"{}"))
+        return io.BytesIO(json.dumps({"choices": [{"message": {"content": '{"ok": 1}'}}]}).encode())
+
+    monkeypatch.setattr(tcb.urllib.request, "urlopen", fake_urlopen)
+    content, meta = tcb._qwen_chat("AAAA", "image/png", "p", max_tokens=10)
+    assert content == '{"ok": 1}'
+    assert calls["n"] == 3  # 2 retries + final success
+    assert meta["retries"] == 2
+
+    calls["n"] = 0
+
+    def fake_400(req, timeout=240):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(req.full_url, 400, "bad", {}, io.BytesIO(b"{}"))
+
+    monkeypatch.setattr(tcb.urllib.request, "urlopen", fake_400)
+    with pytest.raises(tcb.QwenClientError):
+        tcb._qwen_chat("AAAA", "image/png", "p", max_tokens=10)
+    assert calls["n"] == 1  # 4xx: no retry
+
+
+def test_no_greedy_json_regex_in_pipeline():
+    src = (DEBUG / "prelabel_geo.py").read_text(encoding="utf-8")
+    brace = chr(123)
+    assert ("re.search(r" + '"' + brace + ".*" + chr(125) + '"') not in src
+
+
+def test_exif_rotation_applied_to_actual_bytes(tmp_path):
+    from PIL import Image
+    import test_combined_bbox as tcb
+
+    img = Image.new("RGB", (400, 200), "white")
+    img.save(tmp_path / "rot.jpg", exif=img.getexif())
+    # inject orientation=6 (90° CW) via piexif-free approach: use Image.Exif
+    ex = Image.Exif()
+    ex[274] = 6
+    img.save(tmp_path / "rot.jpg", exif=ex)
+    norm, png_bytes = tcb.load_normalized(tmp_path / "rot.jpg")
+    assert norm.size == (200, 400)  # rotated 90°
+    from PIL import Image as I2
+    loaded = I2.open(__import__("io").BytesIO(png_bytes))
+    assert loaded.size == (200, 400)  # actual sent bytes are rotated too
+
+
+def test_combo_no_consensus_geometry_fallback_needs_review(monkeypatch):
+    monkeypatch.setattr(pg, "_read_column_combo", lambda *a, **k: None)
+    sec = {"rows": [{"tokens": [
+        {"text": "03", "bbox": [85, 665, 135, 705]},
+        {"text": "x", "bbox": [145, 665, 165, 705]},
+        {"text": "11", "bbox": [175, 665, 225, 705]},
+        {"text": "x", "bbox": [235, 665, 255, 705]},
+        {"text": "29", "bbox": [265, 665, 315, 705]},
+        {"text": "x", "bbox": [325, 665, 345, 705]},
+        {"text": "34", "bbox": [355, 665, 405, 705]},
+        {"text": "x", "bbox": [415, 665, 435, 705]},
+        {"text": "18", "bbox": [445, 665, 495, 705]},
+        {"text": "x", "bbox": [505, 665, 525, 705]},
+        {"text": "27", "bbox": [535, 665, 585, 705]},
+        {"text": "2", "bbox": [605, 665, 625, 695]},
+        {"text": "x", "bbox": [635, 665, 655, 705]},
+        {"text": "0.1", "bbox": [665, 665, 715, 705]},
+    ]}]}
+    lines = pg.section_to_lines(sec, "R06", img_path=Path("x.jpg"), crop_box=[45, 640, 720, 748])
+    assert lines[0]["uncertain"] is True
+    assert lines[0]["uncertain_reason"] == "column_combo_insufficient_evidence"
+    assert "column_combo_needs_review" in lines[0]["warnings"]
+
+
+def test_complete_blocked_pipeline_review_conflict():
+    import server as S
+    line = _confirmed_line("R02-L1", [["02", "30", "33", "39"]])
+    line["pipeline_review"] = {
+        "decision": {"block_reasons": ["MISSING_MULTIPLIER"]},
+        "checks": {"blocked": True},
+        "parse_error": None,
+    }
+    codes = [i["code"] for i in S._complete_validation(
+        {"lines": [line], "shared_multiplier_rules": [], "game": "539"})]
+    assert "BLOCKED" in codes
+
+
+def test_complete_parse_error_conflict():
+    import server as S
+    line = _confirmed_line("R02-L1", [["02", "30", "33", "39"]])
+    line["pipeline_review"] = {
+        "decision": {"block_reasons": []},
+        "checks": {"blocked": False},
+        "parse_error": "boom",
+    }
+    codes = [i["code"] for i in S._complete_validation(
+        {"lines": [line], "shared_multiplier_rules": [], "game": "539"})]
+    assert "PARSE_ERROR" in codes
+
+
+def test_complete_stale_pipeline_review_conflict():
+    import server as S
+    line = _confirmed_line("R02-L1", [["02", "30", "33", "39"]])
+    line["pipeline_review"] = {"decision": {"block_reasons": []}, "checks": {"blocked": False}, "parse_error": None}
+    line["pipeline_review_revision"] = 1
+    codes = [i["code"] for i in S._complete_validation(
+        {"lines": [line], "shared_multiplier_rules": [], "game": "539"}, expected_revision=2)]
+    assert "PIPELINE_REVIEW_STALE" in codes
+
+
+def test_game_range_539_vs_hk():
+    hk = json.dumps({"columns": [["40"], ["41"]], "collision": "2", "multiplier": "1", "uncertain": False})
+    assert pg._parse_column_combo(hk, game="539") is None      # 40-49 rejected for 539
+    assert pg._parse_column_combo(hk, game="hk") is not None   # accepted for 六合彩
+    line539 = pg._column_combo_line("R01", {
+        "columns": [["40"], ["41"]], "collision": "2", "multiplier": "1",
+        "uncertain": False, "status": "consensus", "attempts": [],
+    }, game="539")
+    assert "column_combo_invalid_structure" in line539[0]["uncertain_reason"]
+
+
+def test_structured_divergence_exact_columns():
+    import server as S
+    cs = {"semantics_numbers": [["03", "18"], ["11", "28"]]}
+    sem = {"columns": [["03", "28"], ["11", "18"]], "multipliers": ["1"], "stars": [2]}
+    assert S._structured_divergence(cs, sem) is True  # same numbers, different columns

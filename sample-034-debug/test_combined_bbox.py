@@ -123,11 +123,14 @@ def _qwen_chat(
             return content, meta
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")[:300]
-            if 400 <= e.code < 500:
+            if e.code == 429:
+                last_err = e  # rate limit -> retry with backoff
+            elif 400 <= e.code < 500:
                 raise QwenClientError(
                     f"Qwen 4xx（request_id={rid} code={e.code}）不重試：{body}"
                 ) from e
-            last_err = e  # 429/5xx -> retry
+            else:
+                last_err = e  # 5xx -> retry
         except urllib.error.URLError as e:
             last_err = e
         except TimeoutError as e:
@@ -160,13 +163,34 @@ def _image_sha256(image_path: Path) -> str:
     return hashlib.sha256(image_path.read_bytes()).hexdigest()
 
 
+def load_normalized(image_path: Path):
+    """EXIF-transposed RGB image + PNG bytes of the ACTUAL image sent to the
+    model (full page), so hash/orientation always match the request."""
+    from io import BytesIO
+    from PIL import Image, ImageOps
+
+    with Image.open(image_path) as im:
+        norm = ImageOps.exif_transpose(im.copy()).convert("RGB")
+    buf = BytesIO()
+    norm.save(buf, format="PNG")
+    return norm, buf.getvalue()
+
+
+def _gray_enhanced(img):
+    from PIL import Image, ImageEnhance, ImageOps
+
+    gray = ImageOps.grayscale(img).convert("RGB")
+    return ImageEnhance.Contrast(gray).enhance(1.3)
+
+
 def call(image_path: Path, *, meta: dict | None = None) -> str:
+    norm, png_bytes = load_normalized(image_path)
     content, m = _qwen_chat(
-        base64.b64encode(image_path.read_bytes()).decode(),
-        "image/jpeg",
+        base64.b64encode(png_bytes).decode(),
+        "image/png",
         PROMPT,
         max_tokens=8000,
-        image_sha256=_image_sha256(image_path),
+        image_sha256=hashlib.sha256(png_bytes).hexdigest(),
         prompt_version=PROMPT_VERSION,
     )
     if meta is not None:
@@ -182,12 +206,13 @@ def call_with_prompt(
     meta: dict | None = None,
 ) -> str:
     """Single full-page call with a caller-supplied prompt (for prompt A/B)."""
+    norm, png_bytes = load_normalized(image_path)
     content, m = _qwen_chat(
-        base64.b64encode(image_path.read_bytes()).decode(),
-        "image/jpeg",
+        base64.b64encode(png_bytes).decode(),
+        "image/png",
         prompt,
         max_tokens=max_tokens,
-        image_sha256=_image_sha256(image_path),
+        image_sha256=hashlib.sha256(png_bytes).hexdigest(),
         prompt_version=PROMPT_VERSION,
     )
     if meta is not None:
@@ -305,13 +330,14 @@ def call_column_combo_crop(
     save_path: Path | None = None,
     box: list[int] | None = None,
     meta: dict | None = None,
+    variant: str = "original_3x",
 ) -> str:
     """Stage-2 column-combo read: crop the FULL column grid region (numbers +
     play mark), upscale 3x, PNG, ask the column_combo prompt."""
     from io import BytesIO
     from PIL import Image
 
-    img = Image.open(image_path).convert("RGB")
+    img, png_bytes = load_normalized(image_path)
     if box is not None:
         bx1, by1, bx2, by2 = [int(v) for v in box]
         crop_box = (
@@ -331,7 +357,8 @@ def call_column_combo_crop(
             min(img.width, cx + half_w),
             min(img.height, cy + half_h),
         )
-    crop = img.crop(crop_box)
+    base = _gray_enhanced(img) if variant == "gray_enhanced_3x" else img
+    crop = base.crop(crop_box)
     if scale > 1:
         crop = crop.resize((crop.width * scale, crop.height * scale), Image.LANCZOS)
     if save_path is not None:
@@ -343,10 +370,10 @@ def call_column_combo_crop(
     content, m = _qwen_chat(
         b64, "image/png", COLUMN_COMBO_PROMPT,
         max_tokens=600,
-        image_sha256=_image_sha256(image_path),
+        image_sha256=hashlib.sha256(png_bytes).hexdigest(),
         crop_box=list(crop_box),
         scale=scale,
-        image_variant="original_3x",
+        image_variant=variant,
         prompt_version=COLUMN_COMBO_PROMPT_VERSION,
     )
     if meta is not None:
@@ -364,6 +391,7 @@ def call_play_mark_crop(
     save_path: Path | None = None,
     box: list[int] | None = None,
     meta: dict | None = None,
+    variant: str = "original_3x",
 ) -> str:
     """Stage-2 read: crop the right-side play zone with FULL vertical extent
     (stacked digits often extend above/below the main number row), upscale
@@ -371,7 +399,7 @@ def call_play_mark_crop(
     from io import BytesIO
     from PIL import Image
 
-    img = Image.open(image_path).convert("RGB")
+    img, png_bytes = load_normalized(image_path)
     if box is not None:
         bx1, by1, bx2, by2 = [int(v) for v in box]
         crop_box = (
@@ -391,7 +419,8 @@ def call_play_mark_crop(
             min(img.width, cx + half_w),
             min(img.height, cy + half_h),
         )
-    crop = img.crop(crop_box)
+    base = _gray_enhanced(img) if variant == "gray_enhanced_3x" else img
+    crop = base.crop(crop_box)
     if scale > 1:
         crop = crop.resize((crop.width * scale, crop.height * scale), Image.LANCZOS)
     if save_path is not None:
@@ -403,10 +432,10 @@ def call_play_mark_crop(
     content, m = _qwen_chat(
         b64, "image/png", PLAY_MARK_PROMPT,
         max_tokens=400,
-        image_sha256=_image_sha256(image_path),
+        image_sha256=hashlib.sha256(png_bytes).hexdigest(),
         crop_box=list(crop_box),
         scale=scale,
-        image_variant="original_3x",
+        image_variant=variant,
         prompt_version=PLAY_MARK_PROMPT_VERSION,
     )
     if meta is not None:

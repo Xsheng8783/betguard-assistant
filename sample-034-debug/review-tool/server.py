@@ -139,7 +139,7 @@ def _apply_roi_to_line(line: dict, pm: dict) -> dict:
     return {"ok": True, "idempotent": False, "full": full, "digits": digits, "human": human}
 
 
-def _reapply_pipeline(line: dict) -> dict:
+def _reapply_pipeline(line: dict, game: str = "539") -> dict:
     import sys
 
     src = str(Path(__file__).resolve().parents[2] / "src")
@@ -158,6 +158,7 @@ def _reapply_pipeline(line: dict) -> dict:
         multiplier=line.get("multiplier_text"),
         layout_hint=line.get("layout_hint"),
         number_groups=line.get("number_groups") or None,
+        game=game,
     )
     return {
         "decision": rec["decision"],
@@ -177,25 +178,51 @@ EDIT_REVALIDATE_FIELDS = {
 }
 
 
-def _revalidate_line(line: dict) -> dict:
+def _norm_mult_text(value) -> str:
+    return re.sub(r"\s+", "", str(value or "")).replace("×", "X").replace("x", "X")
+
+
+def _groups_exact(value):
+    """Exact structural groups: list of tuples preserving column order,
+    per-column order and duplicates."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        if value and isinstance(value[0], list):
+            return [tuple(str(x) for x in g) for g in value]
+        return [tuple(str(x) for x in value)]
+    return []
+
+
+def _structured_divergence(cs: dict, sem: dict) -> bool:
+    """Full-structure comparison: column order, per-column order, duplicates,
+    multiplier and collision/stars. Never a sorted(set(...)) bag compare."""
+    cs_groups = _groups_exact(cs.get("semantics_numbers"))
+    sem_groups = _groups_exact(sem.get("columns")) or _groups_exact(sem.get("numbers"))
+    if cs_groups != sem_groups:
+        return True
+
+    def _mults(value):
+        return [_norm_mult_text(x) for x in (value or [])]
+
+    if _mults(cs.get("semantics_multipliers")) != _mults(sem.get("multipliers")):
+        return True
+    cs_stars = sorted(str(x) for x in (cs.get("semantics_stars") or []))
+    sem_stars = sorted(str(x) for x in (sem.get("stars") or []))
+    if cs_stars and sem_stars and cs_stars != sem_stars:
+        return True
+    return False
+
+
+def _revalidate_line(line: dict, revision: int | None = None, game: str = "539") -> dict:
     """Human edit -> re-run the whole pipeline; fail-closed on structured/text
     divergence (STRUCTURED_TEXT_DIVERGENT)."""
-    line["pipeline_review"] = _reapply_pipeline(line)
+    line["pipeline_review"] = _reapply_pipeline(line, game=game)
+    if revision is not None:
+        line["pipeline_review_revision"] = revision
     cs = line["pipeline_review"].get("closed_set") or {}
     sem = line["pipeline_review"].get("semantic") or {}
-
-    def _flatten(value):
-        out = []
-        if isinstance(value, (list, tuple)):
-            for x in value:
-                out.extend(_flatten(x))
-        elif value is not None:
-            out.append(str(value))
-        return out
-
-    cs_nums = sorted(set(_flatten(cs.get("semantics_numbers"))))
-    sem_nums = sorted(set(_flatten(sem.get("numbers"))))
-    if cs_nums != sem_nums:
+    if _structured_divergence(cs, sem):
         line.setdefault("warnings", [])
         if "STRUCTURED_TEXT_DIVERGENT" not in line["warnings"]:
             line["warnings"].append("STRUCTURED_TEXT_DIVERGENT")
@@ -204,9 +231,11 @@ def _revalidate_line(line: dict) -> dict:
     return line
 
 
-def _complete_validation(draft: dict) -> list[dict]:
+def _complete_validation(draft: dict, expected_revision: int | None = None) -> list[dict]:
     """Fail-closed checks before marking a sample reviewed."""
     issues: list[dict] = []
+    game = str(draft.get("game") or "539")
+    max_n = 39 if game == "539" else 49
     for line in draft.get("lines", []):
         lid = line.get("line_id")
         if line.get("review_action") != "confirmed":
@@ -223,12 +252,37 @@ def _complete_validation(draft: dict) -> list[dict]:
                 if not col:
                     issues.append({"line_id": lid, "code": "EMPTY_COLUMN", "zh": f"第 {ci + 1} 欄為空"})
                 for n in col:
-                    if not re.fullmatch(r"\d{1,2}", str(n)) or not (1 <= int(str(n)) <= 49):
+                    if not re.fullmatch(r"\d{1,2}", str(n)) or not (1 <= int(str(n)) <= max_n):
                         issues.append({"line_id": lid, "code": "INVALID_NUMBER", "zh": f"非法號碼 {n}"})
         if not line.get("pipeline_review"):
             issues.append({
                 "line_id": lid, "code": "PIPELINE_REVIEW_MISSING",
                 "zh": "缺少 pipeline_review（需重新驗證）",
+            })
+        pr = line.get("pipeline_review") or {}
+        decision = pr.get("decision") or {}
+        checks = pr.get("checks") or {}
+        if decision.get("block_reasons"):
+            issues.append({
+                "line_id": lid, "code": "BLOCKED",
+                "zh": "pipeline 判定 blocked：" + "、".join(decision["block_reasons"]),
+            })
+        if checks.get("blocked"):
+            issues.append({"line_id": lid, "code": "BLOCKED", "zh": "deterministic checks blocked"})
+        if pr.get("parse_error"):
+            issues.append({
+                "line_id": lid, "code": "PARSE_ERROR",
+                "zh": f"semantic parse error：{pr.get('parse_error')}",
+            })
+        if "STRUCTURED_TEXT_DIVERGENT" in (line.get("warnings") or []):
+            issues.append({
+                "line_id": lid, "code": "STRUCTURED_TEXT_DIVERGENT",
+                "zh": "結構化資料與文字不一致",
+            })
+        if expected_revision is not None and line.get("pipeline_review_revision") != expected_revision:
+            issues.append({
+                "line_id": lid, "code": "PIPELINE_REVIEW_STALE",
+                "zh": "pipeline_review 不是目前 revision 的最新結果",
             })
         if line.get("uncertain_reason") == "unresolved_region":
             issues.append({"line_id": lid, "code": "UNRESOLVED_REGION", "zh": "作用域未決，不得完成"})
@@ -450,6 +504,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 rev = body.get("expected_revision")
+                cur_rev = int((load_json(draft_path(sid)) or {}).get("revision") or 0)
+                game = str(draft.get("game") or "539")
                 # Any edited line is re-run through the full pipeline server-side.
                 edited_ids = {
                     e.get("line_id") for e in (body.get("edits") or [])
@@ -457,7 +513,7 @@ class Handler(BaseHTTPRequestHandler):
                 }
                 for line in draft.get("lines", []):
                     if line.get("line_id") in edited_ids:
-                        _revalidate_line(line)
+                        _revalidate_line(line, revision=cur_rev + 1, game=game)
                 saved = save_draft(
                     sid, draft, edits=body.get("edits"),
                     expected_revision=rev,
@@ -480,11 +536,14 @@ class Handler(BaseHTTPRequestHandler):
                 if isinstance(sent, dict) and sent.get("sample_id") == sid
                 else ensure_draft(sid)
             )
-            # Ensure every line carries an up-to-date pipeline review first.
+            cur_rev = int((load_json(draft_path(sid)) or {}).get("revision") or 0)
+            expected_new = cur_rev + 1
+            game = str(draft.get("game") or "539")
+            # Re-run the FULL pipeline for every line so the review is fresh
+            # at the revision about to be written (stale stamps -> 409).
             for line in draft.get("lines", []):
-                if not line.get("pipeline_review"):
-                    _revalidate_line(line)
-            issues = _complete_validation(draft)
+                _revalidate_line(line, revision=expected_new, game=game)
+            issues = _complete_validation(draft, expected_revision=expected_new)
             if issues:
                 self._json(409, {"error": "complete_validation_failed", "issues": issues})
                 return
@@ -525,7 +584,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(400, {"error": result.get("error"), "missing": result.get("missing")})
                 return
             if not result["idempotent"]:
-                _revalidate_line(line)
+                cur_rev = int((load_json(draft_path(sid)) or {}).get("revision") or 0)
+                _revalidate_line(
+                    line,
+                    revision=cur_rev + 1,
+                    game=str(draft.get("game") or "539"),
+                )
                 edits = [{
                     "at": now_iso(), "line_id": line_id,
                     "fields": ["multiplier_text", "raw_text", "play_mark", "correction_source"],
@@ -554,7 +618,12 @@ class Handler(BaseHTTPRequestHandler):
             if line is None:
                 self._json(404, {"error": "line not found"})
                 return
-            _revalidate_line(line)
+            cur_rev = int((load_json(draft_path(sid)) or {}).get("revision") or 0)
+            _revalidate_line(
+                line,
+                revision=cur_rev + 1,
+                game=str(draft.get("game") or "539"),
+            )
             try:
                 saved = save_draft(
                     sid, draft,
