@@ -12,6 +12,7 @@ def render_vision_ui_section() -> str:
   <p class="muted" style="font-size:13px;margin-bottom:8px;color:#475569">
     專門辨識數字、x 與二／三／四。AI 結果必須逐行人工確認，<br>
     確認後只會帶回文字 Review，不會自動送出或操作網站。<br>
+    「Qwen 看圖」只在人工按下按鈕後呼叫 DashScope，結果只作視覺輔助證據。<br>
     付費 Vision 啟用時，圖片會傳送到設定的 OpenAI API。
   </p>
   <div id="vision-provider-status" style="font-size:12px;margin-bottom:8px;color:#64748b">正在檢查辨識環境...</div>
@@ -53,6 +54,7 @@ def render_vision_ui_section() -> str:
 
   <!-- Run job button -->
   <button id="vision-run-btn" class="btn-primary" style="display:none;margin-bottom:8px" onclick="visionRunJob()">開始 AI 辨識</button>
+  <button id="vision-qwen-run-btn" class="btn-primary" style="display:none;margin-bottom:8px;background:#7c3aed" onclick="visionRunQwenJob()">Qwen 看圖</button>
 
   <!-- Results -->
   <div id="vision-results" style="display:none;margin-top:8px">
@@ -68,16 +70,26 @@ def render_vision_ui_section() -> str:
   var uploadedImageId = null;
   var uploadedAidImageId = null;
   var visionQualityPassed = false;
+  var qwenConfigured = false;
+  var qwenEvidenceResult = null;
 
   fetch("/api/vision/v1/providers").then(function(r) { return r.json(); }).then(function(data) {
     var providers = (data && data.providers) || [];
     var paid = providers.filter(function(p) { return p.id === "openai-vision-paid"; })[0];
+    var qwen = providers.filter(function(p) { return p.id === "qwen-dashscope"; })[0];
     var status = document.getElementById("vision-provider-status");
-    if (paid && paid.configured) {
-      status.textContent = "付費 Vision 已設定；辨識後仍需逐行人工確認。";
+    qwenConfigured = !!(qwen && qwen.configured);
+    document.getElementById("vision-qwen-run-btn").disabled = !qwenConfigured;
+    var qwenStatus = qwenConfigured
+      ? "Qwen 看圖已設定，只會在按下按鈕後呼叫。"
+      : "Qwen 看圖尚未設定。";
+    var paidStatus = paid && paid.configured
+      ? "付費 Vision 已設定；辨識後仍需逐行人工確認。"
+      : "付費 Vision 尚未設定。";
+    status.textContent = qwenStatus + "｜" + paidStatus;
+    if (qwenConfigured) {
       status.style.color = "#15803d";
     } else {
-      status.textContent = "付費 Vision 尚未設定，會安全退回本機 OCR。";
       status.style.color = "#b45309";
     }
   }).catch(function() {
@@ -151,6 +163,8 @@ def render_vision_ui_section() -> str:
         document.getElementById("vision-preview-img").src = "/api/vision/v1/images/" + data.image.image_id;
         document.getElementById("vision-preview").style.display = "block";
         document.getElementById("vision-delete-btn").style.display = "inline-block";
+        document.getElementById("vision-qwen-run-btn").style.display = "inline-block";
+        document.getElementById("vision-qwen-run-btn").disabled = !qwenConfigured;
         _createVisionAidImage(file, data.image).then(function(aidId) {
           uploadedAidImageId = aidId;
           if (aidId) {
@@ -262,8 +276,10 @@ def render_vision_ui_section() -> str:
         uploadedAidImageId = null;
         document.getElementById("vision-preview").style.display = "none";
         document.getElementById("vision-run-btn").style.display = "none";
+        document.getElementById("vision-qwen-run-btn").style.display = "none";
         document.getElementById("vision-results").style.display = "none";
         document.getElementById("vision-upload-status").textContent = "";
+        qwenEvidenceResult = null;
         fileInput.value = "";
       });
   };
@@ -302,6 +318,189 @@ def render_vision_ui_section() -> str:
       btn.textContent = "開始 AI 辨識";
       document.getElementById("vision-results-body").innerHTML = "<div style='color:#ef4444'>辨識失敗，請稍後重試。</div>";
       document.getElementById("vision-results").style.display = "block";
+    });
+  };
+
+  // Explicit Gate 1B Qwen evidence request.  Uploading an image or detecting
+  // an API key never calls this function; only the "Qwen 看圖" button does.
+  window.visionRunQwenJob = function() {
+    if (!uploadedImageId) return;
+    var btn = document.getElementById("vision-qwen-run-btn");
+    btn.disabled = true;
+    btn.textContent = "Qwen 辨識中...";
+    fetch("/api/vision/v1/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        image_id: uploadedImageId,
+        provider_id: "qwen-dashscope"
+      })
+    }).then(function(r) { return r.json(); })
+    .then(function(data) {
+      btn.disabled = !qwenConfigured;
+      btn.textContent = "Qwen 看圖";
+      if (!data.ok || !data.result) {
+        _renderQwenFailure((data.error && data.error.message) || "Qwen 回應無效");
+        return;
+      }
+      _renderQwenEvidence(data.result);
+    }).catch(function() {
+      btn.disabled = !qwenConfigured;
+      btn.textContent = "Qwen 看圖";
+      _renderQwenFailure("Qwen 辨識失敗，請稍後重試。");
+    });
+  };
+
+  function _renderQwenFailure(message) {
+    qwenEvidenceResult = null;
+    document.getElementById("vision-results-body").innerHTML =
+      '<div id="qwen-evidence-status" style="color:#b91c1c;font-weight:700">Qwen 辨識失敗</div>' +
+      '<div style="color:#ef4444;margin-top:4px">' + esc(message || "invalid response") + '</div>' +
+      '<div style="font-size:11px;color:#64748b;margin-top:6px">needs_review｜auto_confirm=false｜auto_submit=false</div>';
+    document.getElementById("vision-results").style.display = "block";
+  }
+
+  function _flattenQwenRows(qwenResponse) {
+    var flattened = [];
+    var sections = qwenResponse && Array.isArray(qwenResponse.sections)
+      ? qwenResponse.sections : [];
+    for (var s = 0; s < sections.length; s++) {
+      var section = sections[s] || {};
+      var rows = Array.isArray(section.rows) ? section.rows : [];
+      for (var r = 0; r < rows.length; r++) {
+        flattened.push({
+          row: rows[r] || {},
+          shared_multiplier: section.shared_multiplier
+        });
+      }
+    }
+    return flattened;
+  }
+
+  // RecognitionStatus.COMPLETED means only that the provider job finished.
+  // Every Qwen result remains review-only evidence until the human explicitly
+  // presses the manual reparse button below.
+  function _renderQwenEvidence(result) {
+    var provider = result.provider || {};
+    var preprocessing = result.preprocessing || {};
+    var requestMeta = preprocessing.qwen_request || {};
+    var qwenResponse = preprocessing.qwen_response || {};
+    var lines = Array.isArray(result.lines) ? result.lines : [];
+    var evidenceRows = _flattenQwenRows(qwenResponse);
+    var sections = Array.isArray(qwenResponse.sections) ? qwenResponse.sections : [];
+
+    if (result.status !== "completed" || provider.id !== "qwen-dashscope" ||
+        !sections.length || !lines.length) {
+      var providerError = result.provider_error || {};
+      _renderQwenFailure(providerError.message || "invalid Qwen response schema");
+      return;
+    }
+
+    qwenEvidenceResult = result;
+    var html = '<div id="qwen-evidence-status" style="padding:7px 9px;background:#fff7ed;border-left:4px solid #f59e0b;color:#9a3412;font-weight:700">' +
+      'AI 辨識完成，待人工核對</div>';
+    html += '<div style="font-size:11px;color:#64748b;margin:6px 0">' +
+      'needs_review｜provider job status=completed（僅代表 provider job 完成，不代表人工確認）' +
+      '｜auto_confirm=false｜auto_submit=false</div>';
+    html += '<div class="qwen-evidence-metadata" style="font-size:11px;color:#475569;padding:6px;background:#f1f5f9;border-radius:4px">' +
+      'provider=' + esc(provider.id || '-') +
+      '｜model=' + esc(provider.model_name || requestMeta.model || '-') +
+      '｜prompt_version=' + esc(preprocessing.prompt_version || '-') +
+      '｜prompt_sha256=' + esc(preprocessing.prompt_sha256 || '-') +
+      '｜image_sha256=' + esc(requestMeta.image_sha256 || (result.source_image && result.source_image.sha256) || '-') +
+      '｜cache_hit=' + esc(String(requestMeta.cache_hit === true)) +
+      '｜request_id=' + esc(requestMeta.request_id || result.request_id || '-') +
+      '</div>';
+    html += '<div style="margin-top:8px"><strong>RecognitionResult.raw_text</strong>' +
+      '<pre id="qwen-raw-text" style="white-space:pre-wrap;background:#fff;border:1px solid #e2e8f0;padding:6px">' +
+      esc(result.raw_text || '') + '</pre></div>';
+
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i] || {};
+      var rowEvidence = evidenceRows[i] || {};
+      var row = rowEvidence.row || {};
+      var tokens = Array.isArray(line.tokens) ? line.tokens : [];
+      html += '<div class="qwen-evidence-line" data-line-index="' + i + '" style="padding:9px 0;border-bottom:1px solid #cbd5e1">';
+      html += '<div><strong>Line.text：</strong><span class="qwen-model-line-text">' + esc(line.text || '') + '</span></div>';
+      html += '<label style="display:block;margin-top:5px;font-size:12px">手動修改：' +
+        '<input class="qwen-line-edit" value="' + esc(line.text || '') + '" style="width:70%;font-family:monospace;padding:4px;border:1px solid #cbd5e1;border-radius:4px"></label>';
+      html += '<div style="margin-top:5px">' +
+        '<button type="button" class="qwen-copy-line" onclick="qwenCopyLine(' + i + ')">複製</button> ' +
+        '<button type="button" class="qwen-stage-line" onclick="qwenStageLine(' + i + ')">帶入修正欄</button></div>';
+      html += '<div class="qwen-row-structure" style="font-size:11px;color:#475569;margin-top:5px">' +
+        'numbers=' + esc(JSON.stringify(row.numbers == null ? null : row.numbers)) +
+        '｜multiplier=' + esc(JSON.stringify(row.multiplier == null ? null : row.multiplier)) +
+        '｜layout_hint=' + esc(row.layout_hint == null ? 'null' : row.layout_hint) +
+        '｜shared_multiplier=' + esc(JSON.stringify(rowEvidence.shared_multiplier == null ? null : rowEvidence.shared_multiplier)) +
+        '</div>';
+      html += '<div class="qwen-token-bboxes" style="font-size:11px;color:#64748b;margin-top:4px"><strong>token bbox：</strong>';
+      if (!tokens.length) {
+        html += '無';
+      }
+      for (var t = 0; t < tokens.length; t++) {
+        html += '<div>' + esc(tokens[t].text || '') + ' bbox=' +
+          esc(JSON.stringify(tokens[t].bounding_box || null)) + '</div>';
+      }
+      html += '</div></div>';
+    }
+
+    html += '<div id="qwen-correction-panel" style="margin-top:10px;padding:8px;background:#f8fafc;border:1px solid #cbd5e1;border-radius:4px">' +
+      '<label for="qwen-review-editable" style="display:block;font-weight:700;margin-bottom:4px">前端修正暫存（可手動修改）</label>' +
+      '<textarea id="qwen-review-editable" style="width:100%;min-height:70px;font-family:monospace;padding:6px" placeholder="先按某行的「帶入修正欄」，再人工修改"></textarea>' +
+      '<button type="button" id="qwen-manual-reparse-btn" class="btn-primary" style="margin-top:6px" onclick="qwenManualReparse()">人工確認並重新解析</button>' +
+      '<div id="qwen-manual-reparse-result" style="font-size:12px;margin-top:6px;color:#64748b">尚未人工確認；未呼叫 /manual-reparse。</div>' +
+      '</div>';
+    document.getElementById("vision-results-body").innerHTML = html;
+    document.getElementById("vision-results").style.display = "block";
+  }
+
+  window.qwenCopyLine = function(index) {
+    var inputs = document.querySelectorAll(".qwen-line-edit");
+    var value = inputs[index] ? inputs[index].value : "";
+    if (!value || !navigator.clipboard) return;
+    navigator.clipboard.writeText(value);
+  };
+
+  // This action changes only the browser-local editable textarea.  It does
+  // not mutate qwenEvidenceResult, model_raw_text, a draft, or any queue.
+  window.qwenStageLine = function(index) {
+    var inputs = document.querySelectorAll(".qwen-line-edit");
+    var target = document.getElementById("qwen-review-editable");
+    if (!target || !inputs[index]) return;
+    target.value = inputs[index].value;
+    document.getElementById("qwen-manual-reparse-result").textContent =
+      "已帶入前端修正暫存；仍未呼叫 /manual-reparse。";
+  };
+
+  window.qwenManualReparse = function() {
+    var target = document.getElementById("qwen-review-editable");
+    var output = document.getElementById("qwen-manual-reparse-result");
+    var btn = document.getElementById("qwen-manual-reparse-btn");
+    var text = target ? target.value.trim() : "";
+    if (!text) {
+      output.textContent = "needs_review：請先帶入並人工修改文字。";
+      output.style.color = "#b91c1c";
+      return;
+    }
+    btn.disabled = true;
+    output.textContent = "依既有 parser／validator 重新解析中...";
+    fetch("/manual-reparse", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: text, game: "auto" })
+    }).then(function(r) { return r.json(); }).then(function(data) {
+      btn.disabled = false;
+      if (!data.ok) {
+        output.textContent = "needs_review：" + (data.error || data.reason || "parser／validator 未通過");
+        output.style.color = "#b91c1c";
+        return;
+      }
+      output.textContent = "人工重新解析完成；結果已經過既有 parser／validator，未自動寫入 queue 或 draft。";
+      output.style.color = "#166534";
+    }).catch(function() {
+      btn.disabled = false;
+      output.textContent = "needs_review：人工重新解析請求失敗。";
+      output.style.color = "#b91c1c";
     });
   };
 
