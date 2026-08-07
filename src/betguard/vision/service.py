@@ -28,6 +28,12 @@ from betguard.vision.providers.openai_paid import (
     get_config_from_env,
     has_api_key,
 )
+from betguard.vision.providers.qwen_dashscope import (
+    API_KEY_ENV as QWEN_API_KEY_ENV,
+    PROVIDER_ID as QWEN_PROVIDER_ID,
+    QwenDashScopeProvider,
+    has_api_key as has_qwen_api_key,
+)
 
 
 # ── Error helpers ────────────────────────────────────────────────────────────
@@ -60,7 +66,22 @@ def list_providers() -> dict[str, Any]:
                 "mode": "fake",
                 "real_ocr": False,
                 "external_network": False,
+                "configured": True,
+                "human_confirmation_required": True,
+                "auto_submit": False,
+                "auto_confirm": False,
                 "fixtures": ["bet_slip", "no_confidence", "multi_line"],
+            },
+            {
+                "id": QWEN_PROVIDER_ID,
+                "mode": "paid_api",
+                "real_ocr": True,
+                "external_network": True,
+                "requires_env": [QWEN_API_KEY_ENV],
+                "configured": has_qwen_api_key(),
+                "human_confirmation_required": True,
+                "auto_submit": False,
+                "auto_confirm": False,
             },
             {
                 "id": OPENAI_PAID_PROVIDER_ID,
@@ -159,7 +180,7 @@ def run_job(
             document_mode=normalized_document_mode,
         )
 
-    if provider_id != "fake":
+    if provider_id not in {"fake", QWEN_PROVIDER_ID}:
         return _error("PROVIDER_NOT_SUPPORTED", f"不支援的 provider: {provider_id}")
 
     # Build request
@@ -168,7 +189,24 @@ def run_job(
         image_id=image_id,
         image_path=str(meta.storage_path),  # internal, not exposed
         mime_type=meta.mime_type,
+        metadata={
+            "sha256": meta.sha256,
+            "width": meta.width,
+            "height": meta.height,
+            "size_bytes": meta.byte_size,
+        },
     )
+
+    if provider_id == QWEN_PROVIDER_ID:
+        try:
+            result = QwenDashScopeProvider().recognize(request)
+            return _ok({"result": result.to_dict()})
+        except Exception:
+            return _error(
+                "VISION_JOB_FAILED",
+                "辨識工作發生錯誤",
+                retryable=False,
+            )
 
     # Run fake provider
     mode_map = {

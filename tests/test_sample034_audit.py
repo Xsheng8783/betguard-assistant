@@ -395,10 +395,12 @@ def test_qwen_429_retries_400_does_not(monkeypatch):
     import io
     import urllib.error
     import test_combined_bbox as tcb
+    import betguard.vision.providers.qwen_dashscope as qwen
 
     # CI has no DASHSCOPE_API_KEY; the retry/backoff logic must be tested
     # without the real key guard (urlopen is fully mocked below).
-    monkeypatch.setattr(tcb, "KEY", "sk-test-fake-key")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-test-fake-key")
+    monkeypatch.setattr(qwen, "_default_client", None)
 
     calls = {"n": 0}
 
@@ -408,7 +410,7 @@ def test_qwen_429_retries_400_does_not(monkeypatch):
             raise urllib.error.HTTPError(req.full_url, 429, "rate", {}, io.BytesIO(b"{}"))
         return io.BytesIO(json.dumps({"choices": [{"message": {"content": '{"ok": 1}'}}]}).encode())
 
-    monkeypatch.setattr(tcb.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(qwen.urllib.request, "urlopen", fake_urlopen)
     content, meta = tcb._qwen_chat("AAAA", "image/png", "p", max_tokens=10)
     assert content == '{"ok": 1}'
     assert calls["n"] == 3  # 2 retries + final success
@@ -420,7 +422,7 @@ def test_qwen_429_retries_400_does_not(monkeypatch):
         calls["n"] += 1
         raise urllib.error.HTTPError(req.full_url, 400, "bad", {}, io.BytesIO(b"{}"))
 
-    monkeypatch.setattr(tcb.urllib.request, "urlopen", fake_400)
+    monkeypatch.setattr(qwen.urllib.request, "urlopen", fake_400)
     with pytest.raises(tcb.QwenClientError):
         tcb._qwen_chat("AAAA", "image/png", "p", max_tokens=10)
     assert calls["n"] == 1  # 4xx: no retry
