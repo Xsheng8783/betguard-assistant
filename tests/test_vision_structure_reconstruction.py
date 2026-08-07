@@ -183,6 +183,150 @@ def test_stacked_three_four_remains_collision_play_evidence() -> None:
     assert result["status"] == "incomplete"
 
 
+@pytest.mark.parametrize(
+    ("category_tokens", "value", "expected_rule"),
+    [
+        (("3", "4"), "X1", "3/4X1"),
+        (("2", "3"), "X0.1", "2/3X0.1"),
+    ],
+)
+def test_stacked_collision_and_single_nearby_value_form_complete_rule(
+    category_tokens: tuple[str, str],
+    value: str,
+    expected_rule: str,
+) -> None:
+    first, second = category_tokens
+    tokens = [
+        _token("01", 10, 10),
+        _token("x", 65, 10),
+        _token("02", 120, 10),
+        _token(first, 760, 10),
+        _token(second, 760, 35),
+        _token(value, 800, 35),
+    ]
+    collision = "/".join(category_tokens)
+    result = _one(_result(
+        tokens,
+        numbers=[["01"], ["02"]],
+        layout="column_bet",
+        multiplier=expected_rule,
+        extra_row={"collision": collision},
+    ))
+
+    reconstructed = result["reconstructed_candidate"]
+    assert reconstructed["number_groups"] == [["01"], ["02"]]
+    assert reconstructed["collision"] == collision
+    assert reconstructed["multiplier_rules"] == [expected_rule]
+    assert result["status"] == "consistent"
+    stacked = result["evidence"]["bbox_debug"]["stacked_collision_categories"]
+    assert len(stacked) == 1
+    assert stacked[0]["text"] == collision
+    assert stacked[0]["geometry"] == "stacked_bbox"
+    classifications = {
+        item["text"]: item["classification"]
+        for item in result["evidence"]["tokens"]
+    }
+    assert classifications[first] == "collision_or_partial_multiplier_evidence"
+    assert classifications[second] == "collision_or_partial_multiplier_evidence"
+
+
+def test_stacked_collision_with_two_nearby_values_is_incomplete() -> None:
+    tokens = [
+        _token("01", 10, 10),
+        _token("x", 65, 10),
+        _token("02", 120, 10),
+        _token("3", 760, 10),
+        _token("4", 760, 35),
+        _token("X1", 800, 35),
+        _token("X2", 830, 35),
+    ]
+    result = _one(_result(
+        tokens,
+        numbers=[["01"], ["02"]],
+        layout="column_bet",
+        multiplier="3/4X1",
+        extra_row={"collision": "3/4"},
+    ))
+
+    assert result["reconstructed_candidate"]["multiplier_rules"] == []
+    assert result["status"] == "incomplete"
+    assert any(
+        warning.startswith("collision_multiplier_value_ambiguous:")
+        for warning in result["warnings"]
+    )
+    partial_values = [
+        item for item in result["evidence"]["tokens"]
+        if item["text"] in {"X1", "X2"}
+    ]
+    assert all(
+        item["classification"] == "partial_multiplier_evidence"
+        for item in partial_values
+    )
+
+
+def test_stacked_collision_value_too_far_is_incomplete() -> None:
+    tokens = [
+        _token("01", 10, 10),
+        _token("x", 65, 10),
+        _token("02", 120, 10),
+        _token("3", 760, 10),
+        _token("4", 760, 35),
+        _token("X1", 900, 35),
+    ]
+    result = _one(_result(
+        tokens,
+        numbers=[["01"], ["02"]],
+        layout="column_bet",
+        multiplier="3/4X1",
+        extra_row={"collision": "3/4"},
+    ))
+
+    assert result["reconstructed_candidate"]["multiplier_rules"] == []
+    assert result["status"] == "incomplete"
+    assert any(
+        warning.startswith("stacked_collision_value_missing:")
+        for warning in result["warnings"]
+    )
+
+
+def test_stacked_collision_never_pairs_value_from_different_line() -> None:
+    source = _result(
+        [
+            _token("01", 10, 10),
+            _token("x", 65, 10),
+            _token("02", 120, 10),
+            _token("3", 760, 10),
+            _token("4", 760, 35),
+        ],
+        numbers=[["01"], ["02"]],
+        layout="column_bet",
+        extra_row={"collision": "3/4"},
+    )
+    value = _token("X1", 800, 35, token_id="S01-L02-T01")
+    source["lines"].append({
+        "line_id": "S01-L02",
+        "text": "X1",
+        "tokens": [value],
+    })
+    source["preprocessing"]["qwen_response"]["sections"][0]["rows"].append({
+        "tokens": [{"text": "X1", "bbox": _polygon_to_xyxy(value["bounding_box"])}],
+        "numbers": [],
+        "multiplier": "X1",
+        "layout_hint": "column_bet",
+    })
+
+    primary = next(
+        item for item in reconstruct_structure(source, game="539")
+        if item["line_role"] == "primary"
+    )
+    assert primary["reconstructed_candidate"]["multiplier_rules"] == []
+    assert primary["status"] == "incomplete"
+    assert any(
+        warning.startswith("stacked_collision_value_missing:")
+        for warning in primary["warnings"]
+    )
+
+
 def test_collision_comparison_is_structural_not_raw_category_order() -> None:
     tokens = [
         _token("01", 10, 10),
@@ -250,6 +394,78 @@ def test_missing_or_nonfinite_bbox_is_incomplete() -> None:
     nonfinite = _result([_token("01", 10, 10)], numbers=[["01"]])
     nonfinite["lines"][0]["tokens"][0]["bounding_box"]["polygon"][0][0] = float("nan")
     assert _one(nonfinite)["status"] == "incomplete"
+
+
+def test_unsupported_bbox_coordinate_space_fails_closed() -> None:
+    source = _result([_token("01", 10, 10)], numbers=[["01"]])
+    source["lines"][0]["tokens"][0]["bounding_box"]["coordinate_space"] = "banana"
+
+    evidence = _one(source)
+    assert evidence["status"] == "incomplete"
+    assert "bbox_coordinate_space_unsupported" in evidence["warnings"]
+    assert "bbox_coordinate_space_unsupported:S01-L01-T01" in evidence["warnings"]
+    assert evidence["reconstructed_candidate"]["number_groups"] == []
+
+
+def test_normalized_bbox_out_of_range_fails_closed() -> None:
+    source = _result([_token("01", 10, 10)], numbers=[["01"]])
+    source["lines"][0]["tokens"][0]["bounding_box"] = {
+        "coordinate_space": "normalized",
+        "polygon": [[0.1, 0.1], [1.5, 0.1], [1.5, 0.2], [0.1, 0.2]],
+    }
+
+    evidence = _one(source)
+    assert evidence["status"] == "incomplete"
+    assert "bbox_normalized_out_of_range" in evidence["warnings"]
+    assert "bbox_normalized_out_of_range:S01-L01-T01" in evidence["warnings"]
+    assert evidence["reconstructed_candidate"]["number_groups"] == []
+
+
+def test_valid_pixel_bbox_records_zone_provenance() -> None:
+    evidence = _one(_result([_token("01", 10, 10)], numbers=[["01"]]))
+    debug = evidence["evidence"]["bbox_debug"]
+
+    assert evidence["status"] == "consistent"
+    assert debug["zone_rule"] == "bbox_center_x_gte_play_zone_boundary_x"
+    assert debug["play_zone_ratio"] == 0.68
+    assert debug["play_zone_boundary_x"] == 680.0
+    assert debug["image_width"] == 1000.0
+
+
+def test_valid_normalized_bbox_records_zone_provenance() -> None:
+    source = _result([_token("01", 10, 10)], numbers=[["01"]])
+    source["lines"][0]["tokens"][0]["bounding_box"] = {
+        "coordinate_space": "normalized",
+        "polygon": [[0.1, 0.1], [0.2, 0.1], [0.2, 0.2], [0.1, 0.2]],
+    }
+
+    evidence = _one(source)
+    debug = evidence["evidence"]["bbox_debug"]
+    assert evidence["status"] == "consistent"
+    assert debug["coordinate_spaces"] == ["normalized"]
+    assert debug["play_zone_boundary_x"] == 0.68
+    assert debug["play_zone_ratio"] == 0.68
+
+
+@pytest.mark.parametrize("line_id_mode", ["blank", "missing"])
+def test_blank_or_missing_line_id_produces_explicit_safe_incomplete_evidence(
+    line_id_mode: str,
+) -> None:
+    source = _result([_token("01", 10, 10)], numbers=[["01"]], line_id="")
+    if line_id_mode == "missing":
+        source["lines"][0].pop("line_id")
+
+    evidence = _one(source)
+    assert evidence["line_id"] == ""
+    assert evidence["line_role"] == "unlinked"
+    assert evidence["status"] == "incomplete"
+    assert evidence["warnings"] == ["line_id_evidence_missing"]
+    assert "model_candidate" not in evidence
+    assert "reconstructed_candidate" not in evidence
+    assert evidence["human_confirmation_required"] is True
+    assert evidence["auto_apply"] is False
+    assert evidence["auto_confirm"] is False
+    assert evidence["auto_submit"] is False
 
 
 def test_missing_exact_line_id_is_incomplete_and_never_borrows_other_row() -> None:

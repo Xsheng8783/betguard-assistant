@@ -380,7 +380,8 @@ def test_qwen_evidence_keeps_required_provenance_and_structure() -> None:
         "multiplier=",
         "layout_hint=",
         "shared_multiplier=",
-        "AI 結構",
+        "原始該列 Qwen 證據",
+        "AI 結構（比較基準）",
         "規則重建",
         "number_groups=",
         "multiplier_rules=",
@@ -885,9 +886,27 @@ def test_browser_multi_row_section_renders_one_reconstructed_structure(page) -> 
         _qwen_line("S01-L03", "37 35"),
     ]
     result["preprocessing"]["qwen_response"]["sections"][0]["rows"] = [
-        _qwen_row("24 03 17 20"),
-        _qwen_row("34 23 27 30"),
-        _qwen_row("37 35"),
+        {
+            "tokens": [],
+            "numbers": [["24"], ["03"], ["17"], ["20"]],
+            "multiplier": None,
+            "layout_hint": "column_bet",
+        },
+        {
+            "tokens": [],
+            "numbers": [["34"], ["23"], ["27"], ["30"]],
+            "multiplier": None,
+            "layout_hint": "column_bet",
+        },
+        {
+            "tokens": [],
+            "numbers": [["37"], ["35"]],
+            "multiplier": None,
+            "layout_hint": "column_bet",
+        },
+    ]
+    columns = [
+        ["24", "34"], ["03", "23"], ["17", "27", "37"], ["20", "30", "35"],
     ]
     primary = _structure_evidence("S01-L01", "24")
     primary.update({
@@ -897,9 +916,14 @@ def test_browser_multi_row_section_renders_one_reconstructed_structure(page) -> 
         "line_role": "primary",
         "game": "539",
     })
-    primary["reconstructed_candidate"]["number_groups"] = [
-        ["24", "34"], ["03", "23"], ["17", "27", "37"], ["20", "30", "35"],
-    ]
+    primary["model_candidate"].update({
+        "numbers": columns,
+        "layout_hint": "column_bet",
+    })
+    primary["reconstructed_candidate"].update({
+        "number_groups": columns,
+        "layout": "column_bet",
+    })
     structures = [primary]
     for line_id in ("S01-L02", "S01-L03"):
         structures.append({
@@ -922,12 +946,25 @@ def test_browser_multi_row_section_renders_one_reconstructed_structure(page) -> 
     page.click("#vision-qwen-run-btn")
     page.wait_for_selector("#qwen-evidence-status")
 
+    assert page.locator(".qwen-model-comparison-structure").count() == 1
     assert page.locator(".qwen-reconstructed-structure").count() == 1
     assert page.locator(".qwen-reconstruction-continuation").count() == 2
-    rendered = page.text_content(".qwen-reconstructed-structure")
-    assert "primary_line_id=S01-L01" in rendered
-    assert 'member_line_ids=["S01-L01","S01-L02","S01-L03"]' in rendered
-    assert 'number_groups=[["24","34"],["03","23"],["17","27","37"],["20","30","35"]]' in rendered
+    model_rendered = page.text_content(".qwen-model-comparison-structure")
+    reconstructed_rendered = page.text_content(".qwen-reconstructed-structure")
+    comparison = page.text_content(".qwen-structure-comparison")
+    raw_primary_row = page.text_content(
+        '.qwen-evidence-line[data-line-id="S01-L01"] .qwen-row-structure'
+    )
+    expected_columns = '[["24","34"],["03","23"],["17","27","37"],["20","30","35"]]'
+    assert "AI 結構（比較基準）" in model_rendered
+    assert f"numbers={expected_columns}" in model_rendered
+    assert f"number_groups={expected_columns}" in reconstructed_rendered
+    assert 'numbers=[["24"],["03"],["17"],["20"]]' not in model_rendered
+    assert "原始該列 Qwen 證據" in raw_primary_row
+    assert 'numbers=[["24"],["03"],["17"],["20"]]' in raw_primary_row
+    assert "結構一致（consistent）" in comparison
+    assert "primary_line_id=S01-L01" in reconstructed_rendered
+    assert 'member_line_ids=["S01-L01","S01-L02","S01-L03"]' in reconstructed_rendered
     assert all(
         "不建立獨立投注結構" in text
         for text in page.locator(".qwen-reconstruction-continuation").all_text_contents()

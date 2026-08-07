@@ -470,6 +470,8 @@ def render_vision_ui_section() -> str:
         Object.prototype.hasOwnProperty.call(reconstructionByLineId, lineId);
       var reconstruction = hasReconstruction ? reconstructionByLineId[lineId] : null;
       var isContinuation = !!(reconstruction && reconstruction.line_role === "continuation");
+      var modelCandidate = reconstruction && reconstruction.model_candidate
+        ? reconstruction.model_candidate : {};
       var reconstructed = reconstruction && reconstruction.reconstructed_candidate
         ? reconstruction.reconstructed_candidate : {};
       var tokens = Array.isArray(line.tokens) ? line.tokens : [];
@@ -481,7 +483,7 @@ def render_vision_ui_section() -> str:
         '<button type="button" class="qwen-copy-line" onclick="qwenCopyLine(' + i + ')">複製</button> ' +
         '<button type="button" class="qwen-stage-line" onclick="qwenStageLine(' + i + ')">帶入修正欄</button></div>';
       if (hasStructureEvidence) {
-        html += '<div class="qwen-row-structure" style="font-size:11px;color:#475569;margin-top:5px"><strong>AI 結構：</strong>' +
+        html += '<div class="qwen-row-structure" style="font-size:11px;color:#475569;margin-top:5px"><strong>原始該列 Qwen 證據：</strong>' +
           'numbers=' + esc(JSON.stringify(row.numbers == null ? null : row.numbers)) +
           '｜multiplier=' + esc(JSON.stringify(row.multiplier == null ? null : row.multiplier)) +
           '｜layout_hint=' + esc(row.layout_hint == null ? 'null' : row.layout_hint) +
@@ -492,6 +494,13 @@ def render_vision_ui_section() -> str:
           'structure evidence unavailable｜needs_review</div>';
       }
       if (hasReconstruction && !isContinuation) {
+        html += '<div class="qwen-structure-comparison-pair">';
+        html += '<div class="qwen-model-comparison-structure" style="font-size:11px;color:#475569;margin-top:5px"><strong>AI 結構（比較基準）：</strong>' +
+          'numbers=' + esc(JSON.stringify(modelCandidate.numbers == null ? [] : modelCandidate.numbers)) +
+          '｜multiplier=' + esc(JSON.stringify(modelCandidate.multiplier == null ? null : modelCandidate.multiplier)) +
+          '｜layout_hint=' + esc(modelCandidate.layout_hint == null ? 'unknown' : modelCandidate.layout_hint) +
+          '｜shared_multiplier=' + esc(JSON.stringify(modelCandidate.shared_multiplier == null ? null : modelCandidate.shared_multiplier)) +
+          '</div>';
         html += '<div class="qwen-reconstructed-structure" style="font-size:11px;color:#475569;margin-top:5px"><strong>規則重建：</strong>' +
           'structure_id=' + esc(reconstruction.structure_id || '-') +
           '｜primary_line_id=' + esc(reconstruction.primary_line_id || lineId) +
@@ -504,9 +513,16 @@ def render_vision_ui_section() -> str:
           '｜collision=' + esc(JSON.stringify(reconstructed.collision == null ? null : reconstructed.collision)) +
           '｜shared_multiplier=' + esc(JSON.stringify(reconstructed.shared_multiplier == null ? null : reconstructed.shared_multiplier)) +
           '</div>';
-        html += '<div class="qwen-structure-comparison" data-structure-status="' + esc(reconstruction.status || 'incomplete') + '" style="font-size:11px;color:#9a3412;margin-top:4px"><strong>比較狀態：</strong>' +
-          esc(_qwenComparisonLabel(reconstruction.status)) + '（' + esc(reconstruction.status || 'incomplete') + '）｜needs_review' +
-          '｜human_confirmation_required=true｜auto_apply=false｜auto_confirm=false｜auto_submit=false</div>';
+        if (reconstruction.status === "consistent" || reconstruction.status === "divergent") {
+          html += '<div class="qwen-structure-comparison" data-structure-status="' + esc(reconstruction.status) + '" style="font-size:11px;color:#9a3412;margin-top:4px"><strong>比較狀態：</strong>' +
+            esc(_qwenComparisonLabel(reconstruction.status)) + '（' + esc(reconstruction.status) + '）｜needs_review' +
+            '｜human_confirmation_required=true｜auto_apply=false｜auto_confirm=false｜auto_submit=false</div>';
+        } else {
+          html += '<div class="qwen-reconstruction-status" data-structure-status="' + esc(reconstruction.status || 'incomplete') + '" style="font-size:11px;color:#9a3412;margin-top:4px"><strong>證據狀態：</strong>' +
+            esc(_qwenComparisonLabel(reconstruction.status)) + '（' + esc(reconstruction.status || 'incomplete') + '）｜needs_review' +
+            '｜human_confirmation_required=true｜auto_apply=false｜auto_confirm=false｜auto_submit=false</div>';
+        }
+        html += '</div>';
         html += '<div class="qwen-reconstruction-warnings" style="font-size:11px;color:#64748b;margin-top:4px"><strong>warnings：</strong>' +
           esc(JSON.stringify(Array.isArray(reconstruction.warnings) ? reconstruction.warnings : [])) + '</div>';
         html += '<details class="qwen-reconstruction-evidence" style="font-size:11px;color:#64748b;margin-top:4px"><summary>evidence</summary><pre style="white-space:pre-wrap">' +

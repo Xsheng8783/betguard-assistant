@@ -44,6 +44,10 @@ _COLLISION_RE = re.compile(r"234|[234](?:[/\.][234])*")
 _PLAY_CATEGORY_RE = re.compile(r"(?:23|24|34|234|[234](?:[/\.][234])*)")
 _TWO_DIGIT_RE = re.compile(r"\d{2}")
 _NUMBER_LIKE_RE = re.compile(r"[0-9?]+")
+_MULTIPLIER_VALUE_RE = re.compile(r"[xX×]\d+(?:\.\d+)?")
+_ALLOWED_COORDINATE_SPACES = frozenset({"pixel", "normalized"})
+_PLAY_ZONE_RATIO = 0.68
+_ZONE_RULE = "bbox_center_x_gte_play_zone_boundary_x"
 
 
 def reconstruct_structure(
@@ -80,7 +84,11 @@ def reconstruct_structure(
         if line_id and line_id not in line_by_id:
             line_by_id[line_id] = line
 
-    output: list[dict[str, Any]] = []
+    output: list[dict[str, Any]] = [
+        _line_id_missing_evidence(line, game=game, image_width=image_width)
+        for line in lines
+        if isinstance(line, Mapping) and not str(line.get("line_id") or "")
+    ]
     handled_line_ids: set[str] = set()
     for section in model_sections:
         member_line_ids = section["member_line_ids"]
@@ -236,6 +244,7 @@ def _reconstruct_line(
         token = raw_token if isinstance(raw_token, Mapping) else {}
         token_id = str(token.get("token_id") or f"{line_id}-T{index:02d}")
         text = str(token.get("text") or "")
+        source_line_id = str(token.get("_source_line_id") or line_id)
         bbox, coordinate_space, bbox_issue = _bbox_xyxy(token.get("bounding_box"))
         zone = _bbox_zone(
             bbox,
@@ -285,6 +294,9 @@ def _reconstruct_line(
                         "token_id": token_id,
                         "text": text,
                         "bbox": bbox,
+                        "coordinate_space": coordinate_space,
+                        "source_line_id": source_line_id,
+                        "zone": zone,
                     })
                 else:
                     invalid_multiplier_texts.extend(text_partials or [text])
@@ -300,7 +312,8 @@ def _reconstruct_line(
                 _warn(warnings, blocking, f"unknown_token:{token_id}")
 
         if bbox_issue is not None:
-            _warn(warnings, blocking, f"{bbox_issue}:{token_id}")
+            _warn(warnings, blocking, bbox_issue)
+            warnings.append(f"{bbox_issue}:{token_id}")
 
         evidence_item: dict[str, Any] = {
             "token_id": token_id,
@@ -309,6 +322,7 @@ def _reconstruct_line(
             "coordinate_space": coordinate_space,
             "bbox": bbox,
             "zone": zone,
+            "source_line_id": source_line_id,
         }
         if multiplier_classification is not None:
             evidence_item["multiplier_classification"] = multiplier_classification
@@ -316,7 +330,14 @@ def _reconstruct_line(
 
         if bbox is None:
             continue
-        geometry_token = {"text": text, "bbox": bbox, "token_id": token_id}
+        geometry_token = {
+            "text": text,
+            "bbox": bbox,
+            "token_id": token_id,
+            "coordinate_space": coordinate_space,
+            "source_line_id": source_line_id,
+            "zone": zone,
+        }
         if number_valid:
             number_tokens.append(geometry_token)
             geometry_tokens.append(geometry_token)
@@ -392,10 +413,18 @@ def _reconstruct_line(
     if _number_in_play_area(number_tokens, collision_tokens, complete_multiplier_texts, token_evidence):
         _warn(warnings, blocking, "number_token_in_play_area")
 
-    derived_play_rules, resolved_partial_token_ids = _complete_play_rules(
-        play_category_tokens,
+    stacked_categories, stacked_category_issues = _stacked_collision_categories(
+        collision_tokens,
+    )
+    for issue in stacked_category_issues:
+        _warn(warnings, blocking, issue)
+
+    derived_play_rules, resolved_partial_token_ids, play_rule_issues = _complete_play_rules(
+        play_category_tokens + stacked_categories,
         partial_multiplier_records,
     )
+    for issue in play_rule_issues:
+        _warn(warnings, blocking, issue)
     if derived_play_rules:
         complete_multiplier_texts.extend(derived_play_rules)
         warnings.append("play_rule_reconstructed:" + "/".join(derived_play_rules))
@@ -463,6 +492,14 @@ def _reconstruct_line(
 
     bbox_debug = {
         "coordinate_spaces": sorted(coordinate_spaces),
+        "zone_rule": _ZONE_RULE,
+        "play_zone_ratio": _PLAY_ZONE_RATIO,
+        "play_zone_boundary_x": _play_zone_boundary_x(
+            coordinate_spaces,
+            image_width=image_width,
+        ),
+        "image_width": image_width,
+        "stacked_collision_categories": stacked_categories,
         "row_first": grid,
         "x_clustered": bbox_columns,
         "separator_between_numbers": separator_between_numbers,
@@ -596,7 +633,11 @@ def _combined_section_line(
     for line in member_lines:
         raw_tokens = line.get("tokens")
         if isinstance(raw_tokens, list):
-            tokens.extend(raw_tokens)
+            source_line_id = str(line.get("line_id") or "")
+            for raw_token in raw_tokens:
+                token = dict(_mapping(raw_token))
+                token["_source_line_id"] = source_line_id
+                tokens.append(token)
     return {
         "line_id": primary_line_id,
         "text": "\n".join(str(line.get("text") or "") for line in member_lines),
@@ -653,6 +694,54 @@ def _continuation_evidence(
                 for token in tokens
             ],
             "bbox_debug": {},
+            "rules_used": [],
+        },
+        "human_confirmation_required": True,
+        "auto_apply": False,
+        "auto_confirm": False,
+        "auto_submit": False,
+    }
+
+
+def _line_id_missing_evidence(
+    line: Mapping[str, Any],
+    *,
+    game: str,
+    image_width: float | None,
+) -> dict[str, Any]:
+    raw_tokens = line.get("tokens")
+    tokens = raw_tokens if isinstance(raw_tokens, list) else []
+    warnings = ["line_id_evidence_missing"]
+    if game not in {"539", "六合"}:
+        warnings.append("game_invalid")
+    return {
+        "line_id": "",
+        "structure_id": None,
+        "primary_line_id": None,
+        "member_line_ids": [],
+        "line_role": "unlinked",
+        "source": SOURCE,
+        "game": game,
+        "status": "incomplete",
+        "warnings": warnings,
+        "evidence": {
+            "tokens": [
+                {
+                    "token_id": str(_mapping(token).get("token_id") or ""),
+                    "text": str(_mapping(token).get("text") or ""),
+                    "bounding_box": _mapping(token).get("bounding_box"),
+                }
+                for token in tokens
+            ],
+            "bbox_debug": {
+                "coordinate_spaces": [],
+                "zone_rule": _ZONE_RULE,
+                "play_zone_ratio": _PLAY_ZONE_RATIO,
+                "play_zone_boundary_x": (
+                    image_width * _PLAY_ZONE_RATIO if image_width is not None else None
+                ),
+                "image_width": image_width,
+            },
             "rules_used": [],
         },
         "human_confirmation_required": True,
@@ -740,6 +829,8 @@ def _bbox_xyxy(value: Any) -> tuple[list[float] | None, str | None, str | None]:
     if not isinstance(coordinate_space, str) or not coordinate_space.strip():
         return None, None, "bbox_coordinate_space_invalid"
     coordinate_space = coordinate_space.strip()
+    if coordinate_space not in _ALLOWED_COORDINATE_SPACES:
+        return None, coordinate_space, "bbox_coordinate_space_unsupported"
     polygon = bbox.get("polygon")
     if not isinstance(polygon, list) or len(polygon) < 4:
         return None, coordinate_space, "bbox_polygon_invalid"
@@ -758,6 +849,12 @@ def _bbox_xyxy(value: Any) -> tuple[list[float] | None, str | None, str | None]:
         ):
             return None, coordinate_space, "bbox_coordinate_invalid"
         points.append((float(x), float(y)))
+    if coordinate_space == "normalized" and any(
+        coordinate < 0.0 or coordinate > 1.0
+        for point in points
+        for coordinate in point
+    ):
+        return None, coordinate_space, "bbox_normalized_out_of_range"
     x1 = min(point[0] for point in points)
     y1 = min(point[1] for point in points)
     x2 = max(point[0] for point in points)
@@ -777,48 +874,57 @@ def _bbox_zone(
         return "unknown"
     center_x = _center(bbox)[0]
     if coordinate_space == "normalized":
-        return "play" if center_x >= 0.68 else "main"
+        return "play" if center_x >= _PLAY_ZONE_RATIO else "main"
     if image_width is not None:
-        return "play" if center_x >= image_width * 0.68 else "main"
+        return "play" if center_x >= image_width * _PLAY_ZONE_RATIO else "main"
     return "unknown"
 
 
 def _complete_play_rules(
     categories: list[dict[str, Any]],
     partials: list[dict[str, Any]],
-) -> tuple[list[str], set[str]]:
+) -> tuple[list[str], set[str], list[str]]:
     rules: list[str] = []
     resolved: set[str] = set()
+    issues: list[str] = []
     value_tokens = [
         token for token in partials
-        if re.fullmatch(r"[xX×]\d+(?:\.\d+)?", str(token.get("text") or ""))
+        if _MULTIPLIER_VALUE_RE.fullmatch(str(token.get("text") or ""))
         and token.get("bbox") is not None
     ]
+    category_matches: list[tuple[dict[str, Any], list[tuple[float, dict[str, Any]]]]] = []
     for category in categories:
         category_bbox = category.get("bbox")
         if category_bbox is None:
             continue
-        category_center = _center(category_bbox)
         nearby: list[tuple[float, dict[str, Any]]] = []
         for value in value_tokens:
-            if value["token_id"] in resolved:
-                continue
-            value_bbox = value["bbox"]
-            value_center = _center(value_bbox)
-            horizontal_gap = value_bbox[0] - category_bbox[2]
-            height = max(
-                category_bbox[3] - category_bbox[1],
-                value_bbox[3] - value_bbox[1],
-            )
-            if (
-                value_center[0] > category_center[0]
-                and -height <= horizontal_gap <= max(100.0, height * 4)
-                and abs(value_center[1] - category_center[1]) <= height * 1.5
-            ):
+            if _value_matches_category(category, value):
+                horizontal_gap = value["bbox"][0] - category_bbox[2]
                 nearby.append((abs(horizontal_gap), value))
+        category_matches.append((category, nearby))
+
+    value_match_counts = Counter(
+        str(value.get("token_id") or "")
+        for _, nearby in category_matches
+        for _, value in nearby
+    )
+    for category, nearby in category_matches:
         if not nearby:
+            if category.get("geometry") == "stacked_bbox":
+                issues.append(
+                    f"stacked_collision_value_missing:{category.get('token_id') or ''}"
+                )
             continue
-        value = min(nearby, key=lambda item: item[0])[1]
+        value = nearby[0][1]
+        if (
+            len(nearby) != 1
+            or value_match_counts[str(value.get("token_id") or "")] != 1
+        ):
+            issues.append(
+                f"collision_multiplier_value_ambiguous:{category.get('token_id') or ''}"
+            )
+            continue
         category_text = canonical_category(str(category.get("text") or ""))
         value_text = normalize_rule(str(value.get("text") or ""))
         rule = f"{category_text}{value_text}"
@@ -826,9 +932,163 @@ def _complete_play_rules(
         if not complete:
             continue
         rules.extend(complete)
-        resolved.add(str(category["token_id"]))
+        member_token_ids = category.get("member_token_ids")
+        if isinstance(member_token_ids, list):
+            resolved.update(str(token_id) for token_id in member_token_ids)
+        else:
+            resolved.add(str(category["token_id"]))
         resolved.add(str(value["token_id"]))
-    return merge_complete_rules(rules), resolved
+    return merge_complete_rules(rules), resolved, issues
+
+
+def _stacked_collision_categories(
+    collision_tokens: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    single_digits = [
+        token for token in collision_tokens
+        if re.fullmatch(r"[234]", str(token.get("text") or ""))
+        and token.get("bbox") is not None
+    ]
+    clusters: list[list[dict[str, Any]]] = []
+    for token in sorted(single_digits, key=lambda item: (_center(item["bbox"])[0], _center(item["bbox"])[1])):
+        for cluster in clusters:
+            if all(_horizontally_stacked(token, member) for member in cluster):
+                cluster.append(token)
+                break
+        else:
+            clusters.append([token])
+
+    categories: list[dict[str, Any]] = []
+    issues: list[str] = []
+    for cluster in clusters:
+        if len(cluster) < 2:
+            continue
+        token_ids = [str(token.get("token_id") or "") for token in cluster]
+        category_id = "stacked:" + "+".join(token_ids)
+        if len(cluster) > 3 or len({str(token.get("text") or "") for token in cluster}) != len(cluster):
+            issues.append(f"stacked_collision_geometry_ambiguous:{category_id}")
+            continue
+        ordered = sorted(cluster, key=lambda token: _center(token["bbox"])[1])
+        if not all(
+            _vertically_stacked(first, second)
+            for first, second in zip(ordered, ordered[1:])
+        ):
+            issues.append(f"stacked_collision_geometry_ambiguous:{category_id}")
+            continue
+        coordinate_spaces = {str(token.get("coordinate_space") or "") for token in cluster}
+        if len(coordinate_spaces) != 1:
+            issues.append(f"stacked_collision_geometry_ambiguous:{category_id}")
+            continue
+        bboxes = [token["bbox"] for token in ordered]
+        category_text = canonical_category("/".join(str(token["text"]) for token in ordered))
+        if not category_text:
+            issues.append(f"stacked_collision_geometry_ambiguous:{category_id}")
+            continue
+        categories.append({
+            "token_id": category_id,
+            "text": category_text,
+            "bbox": [
+                min(bbox[0] for bbox in bboxes),
+                min(bbox[1] for bbox in bboxes),
+                max(bbox[2] for bbox in bboxes),
+                max(bbox[3] for bbox in bboxes),
+            ],
+            "coordinate_space": next(iter(coordinate_spaces)),
+            "source_line_ids": _unique([
+                str(token.get("source_line_id") or "") for token in ordered
+            ]),
+            "member_token_ids": token_ids,
+            "member_bboxes": bboxes,
+            "reference_height": max(bbox[3] - bbox[1] for bbox in bboxes),
+            "geometry": "stacked_bbox",
+        })
+    return categories, issues
+
+
+def _value_matches_category(
+    category: Mapping[str, Any],
+    value: Mapping[str, Any],
+) -> bool:
+    category_bbox = category.get("bbox")
+    value_bbox = value.get("bbox")
+    if not isinstance(category_bbox, list) or not isinstance(value_bbox, list):
+        return False
+    category_space = str(category.get("coordinate_space") or "")
+    value_space = str(value.get("coordinate_space") or "")
+    if category_space and value_space and category_space != value_space:
+        return False
+
+    source_line_ids = category.get("source_line_ids")
+    value_line_id = str(value.get("source_line_id") or "")
+    if (
+        isinstance(source_line_ids, list)
+        and source_line_ids
+        and value_line_id
+        and value_line_id not in source_line_ids
+    ):
+        return False
+
+    category_center = _center(category_bbox)
+    value_center = _center(value_bbox)
+    category_height = float(category.get("reference_height") or (
+        category_bbox[3] - category_bbox[1]
+    ))
+    value_height = value_bbox[3] - value_bbox[1]
+    geometry_unit = max(category_height, value_height)
+    if geometry_unit <= 0:
+        return False
+    horizontal_gap = value_bbox[0] - category_bbox[2]
+    if not (
+        value_center[0] > category_center[0]
+        and -geometry_unit <= horizontal_gap <= geometry_unit * 4
+    ):
+        return False
+
+    member_bboxes = category.get("member_bboxes")
+    if isinstance(member_bboxes, list) and member_bboxes:
+        return min(
+            abs(value_center[1] - _center(member_bbox)[1])
+            for member_bbox in member_bboxes
+            if isinstance(member_bbox, list)
+        ) <= geometry_unit * 1.5
+    return abs(value_center[1] - category_center[1]) <= geometry_unit * 1.5
+
+
+def _horizontally_stacked(
+    first: Mapping[str, Any],
+    second: Mapping[str, Any],
+) -> bool:
+    first_bbox = first["bbox"]
+    second_bbox = second["bbox"]
+    overlap = min(first_bbox[2], second_bbox[2]) - max(first_bbox[0], second_bbox[0])
+    min_width = min(first_bbox[2] - first_bbox[0], second_bbox[2] - second_bbox[0])
+    return overlap >= min_width * 0.5
+
+
+def _vertically_stacked(
+    first: Mapping[str, Any],
+    second: Mapping[str, Any],
+) -> bool:
+    first_bbox = first["bbox"]
+    second_bbox = second["bbox"]
+    center_gap = _center(second_bbox)[1] - _center(first_bbox)[1]
+    reference_height = max(
+        first_bbox[3] - first_bbox[1],
+        second_bbox[3] - second_bbox[1],
+    )
+    return reference_height * 0.5 <= center_gap <= reference_height * 3
+
+
+def _play_zone_boundary_x(
+    coordinate_spaces: set[str],
+    *,
+    image_width: float | None,
+) -> float | None:
+    if coordinate_spaces == {"normalized"}:
+        return _PLAY_ZONE_RATIO
+    if coordinate_spaces == {"pixel"} and image_width is not None:
+        return image_width * _PLAY_ZONE_RATIO
+    return None
 
 
 def _number_is_valid(text: str, *, game: str) -> bool:
