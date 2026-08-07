@@ -1599,3 +1599,62 @@ def test_repair_sample013_rules():
     bad = line("R01-L1", [["99"]], None, "normal_row", "x", "x")
     with pytest.raises(AssertionError):
         R13.run_repair({"lines": [bad, r03, r04]}, apply=True)
+
+
+def test_r09_geometry_last_column_continuation():
+    from betguard.vision.column_geometry import build_grid_from_rows
+    res = build_grid_from_rows([
+        {"text": "13", "bbox": [60, 100, 110, 140]},
+        {"text": "x", "bbox": [120, 105, 140, 135]},
+        {"text": "34", "bbox": [150, 100, 200, 140]},
+        {"text": "x", "bbox": [210, 105, 230, 135]},
+        {"text": "20", "bbox": [240, 100, 290, 140]},
+        {"text": "x", "bbox": [300, 105, 320, 135]},
+        {"text": "08", "bbox": [330, 100, 380, 140]},
+        {"text": "38", "bbox": [330, 145, 380, 185]},
+    ])
+    assert [v for v in res["columns"].values()] == [["13"], ["34"], ["20"], ["08", "38"]]
+
+
+def test_repair_sample014_rules():
+    import repair_sample014_rules as R14
+
+    def line(lid, groups, mult, layout, raw, model_raw):
+        return {
+            "line_id": lid,
+            "number_groups": groups,
+            "multiplier_text": mult,
+            "multiplier_rules": [],
+            "layout_hint": layout,
+            "raw_text": raw,
+            "human_raw_text": None,
+            "model_raw_text": model_raw,
+            "review_action": "confirmed",
+            "uncertain": False,
+            "warnings": [],
+            "fallback_candidate": {},
+        }
+
+    r01 = line("R01-L1", [["05", "06", "10", "28"]], "3X1 3/4X1", "normal_row", "05 06 10 28 3X1 3/4X1", "05.06.10.28 ¾×1")
+    r05 = line("R05-L1", [["24", "34"], ["08", "38"], ["16", "36"], ["03", "13"]], "2/3", "column_bet", "24 34 / 08 38 / 16 36 / 03 13 2/3", None)
+    r09 = line("R09-L1", [["13"], ["34"], ["20"], ["08", "38"]], "2X1", "column_bet", "13 / 34 / 20 08 38 2X1", None)
+    r11 = line("R11-L1", [["12"], ["15"], ["34"], ["13", "20"]], "2X3 3X1", "column_bet", "12 / 15 / 34 13 20 2/3X1.0 2X3", None)
+    r12 = line("R12-L1", [["12"], ["15"], ["06", "16"]], "2/3", "column_bet", "12 / 15 / 06 16 2/3", None)
+    draft = {"lines": [r01, r05, r09, r11, r12]}
+    R14.run_repair(draft, apply=True)
+    assert r01["multiplier_text"] == "3/4X1"
+    assert r01["raw_text"] == "05 06 10 28 3/4X1"
+    assert r01["fallback_candidate"]["multiplier_candidates"][0]["replaces_current_rules"] == ["3X1"]
+    assert r05["multiplier_text"] == "2/3/4X0.1"
+    assert r09["raw_text"] == "13 / 34 / 20 08 38 2X1", "already-fixed line raw must NOT be overwritten"
+    assert r09.get("correction_source") is None
+    assert r11["multiplier_text"] == "2X3 3X1"
+    assert r11["fallback_candidate"]["multiplier_candidates"][1]["replaces_current_rules"] == ["2/3X1.0"]
+    assert r12["multiplier_text"] == "2X3 3X1"
+    assert r12["fallback_candidate"]["multiplier_candidates"][0]["candidate_mode"] == "additional_rule"
+    assert r01["model_raw_text"] == "05.06.10.28 ¾×1"
+    assert r01["review_action"] == "confirmed", "repair must not auto-change review_action"
+    assert R14.run_repair(draft, apply=False)["changed_lines"] == 0
+    bad = line("R05-L1", [["99"]], "2/3", "column_bet", "x", None)
+    with pytest.raises(AssertionError):
+        R14.run_repair({"lines": [r01, bad, r09, r11, r12]}, apply=True)

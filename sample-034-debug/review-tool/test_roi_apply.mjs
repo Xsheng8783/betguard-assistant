@@ -389,8 +389,8 @@ function ok(name) {
     },
   };
   R.adoptMultiplierCandidate(line, { rule_text: "2X2", candidate_mode: "additional_rule", candidate_group_id: "slot1" });
-  assert.equal(line.multiplier_text, "3X5 2X2", "stable order: existing rules first, added rule appended");
-  ok("additional_rule 由 3X5 加入 2X2 → 3X5 2X2");
+  assert.equal(line.multiplier_text, "2X2 3X5", "deterministic canonical order (category then value)");
+  ok("additional_rule 由 3X5 加入 2X2 → canonical 2X2 3X5");
 }
 
 {
@@ -468,7 +468,7 @@ function ok(name) {
     },
   };
   R.adoptMultiplierCandidate(line, { rule_text: "3X1", candidate_mode: "alternative_reading", candidate_group_id: "C" });
-  assert.equal(line.multiplier_text, "2X2 3X5 3X1");
+  assert.equal(line.multiplier_text, "2X2 3X1 3X5", "B: no replace evidence -> additive, canonical order");
   R.adoptMultiplierCandidate(line, { rule_text: "4X1", candidate_mode: "alternative_reading", candidate_group_id: "C" });
   assert.equal(line.multiplier_text, "2X2 3X5 4X1", "B: 4X1 replaces only 3X1");
   ok("B 同 group 4X1 只替換 3X1");
@@ -534,6 +534,77 @@ function ok(name) {
   R.adoptMultiplierCandidate(line, "3X1");
   assert.equal(line.multiplier_text, "2X1 3X1", "E: legacy adopt is additive");
   ok("E legacy 無 group 同 value 不自動破壞既有規則");
+}
+
+// ---- baseline replacement (explicit replaces_current_rules) ----
+{
+  // R01 family: baseline 3X1, candidate 3/4X1 (same slot, explicit replace)
+  const line = {
+    line_id: "R01-L1",
+    number_groups: [["05", "06", "10", "28"]],
+    layout_hint: "normal_row",
+    multiplier_text: "3X1",
+    review_action: "pending",
+    fallback_candidate: {
+      multiplier_candidates: [
+        { rule_text: "3/4X1", candidate_mode: "alternative_reading", candidate_group_id: "slot1", replaces_current_rules: ["3X1"] },
+      ],
+    },
+  };
+  R.adoptMultiplierCandidate(line, { rule_text: "3/4X1", candidate_mode: "alternative_reading", candidate_group_id: "slot1", replaces_current_rules: ["3X1"] });
+  assert.equal(line.multiplier_text, "3/4X1", "R01: 3/4X1 replaces baseline 3X1, NOT appended");
+  assert.equal(line.fallback_candidate.adopted_entries[0].removed_baseline.join(","), "3X1");
+  R.removeAdoptedCandidate(line, "3/4X1");
+  assert.equal(line.multiplier_text, "3X1", "R01: cancel restores baseline 3X1");
+  ok("R01 family 採用替代 baseline、取消可逆恢復");
+}
+
+{
+  // R11 family: baseline "2/3X1.0 2X3"; candidate 3X1 replaces 2/3X1.0 only
+  const line = {
+    line_id: "R11-L1",
+    number_groups: [["12"], ["15"], ["34"], ["13", "20"]],
+    layout_hint: "column_bet",
+    multiplier_text: "2/3X1.0 2X3",
+    review_action: "pending",
+    fallback_candidate: {
+      multiplier_candidates: [
+        { rule_text: "2X3", candidate_mode: "additional_rule", candidate_group_id: "slotA" },
+        { rule_text: "3X1", candidate_mode: "alternative_reading", candidate_group_id: "slotB", replaces_current_rules: ["2/3X1.0"] },
+      ],
+    },
+  };
+  R.adoptMultiplierCandidate(line, { rule_text: "3X1", candidate_mode: "alternative_reading", candidate_group_id: "slotB", replaces_current_rules: ["2/3X1.0"] });
+  assert.equal(line.multiplier_text, "2X3 3X1", "R11: 2X3 kept, 2/3X1.0 replaced");
+  ok("R11 family 3X1 只替換 2/3X1.0、保留 2X3");
+}
+
+{
+  // R12 family: two independent additional slots, any order -> same canonical
+  const mk = () => ({
+    line_id: "R12-L1",
+    number_groups: [["12"], ["15"], ["06", "16"]],
+    layout_hint: "column_bet",
+    multiplier_text: null,
+    review_action: "pending",
+    fallback_candidate: {
+      multiplier_candidates: [
+        { rule_text: "2X3", candidate_mode: "additional_rule", candidate_group_id: "slotA" },
+        { rule_text: "3X1", candidate_mode: "additional_rule", candidate_group_id: "slotB" },
+      ],
+    },
+  });
+  const a = mk();
+  R.adoptMultiplierCandidate(a, { rule_text: "2X3", candidate_mode: "additional_rule", candidate_group_id: "slotA" });
+  R.adoptMultiplierCandidate(a, { rule_text: "3X1", candidate_mode: "additional_rule", candidate_group_id: "slotB" });
+  const b = mk();
+  R.adoptMultiplierCandidate(b, { rule_text: "3X1", candidate_mode: "additional_rule", candidate_group_id: "slotB" });
+  R.adoptMultiplierCandidate(b, { rule_text: "2X3", candidate_mode: "additional_rule", candidate_group_id: "slotA" });
+  assert.equal(a.multiplier_text, "2X3 3X1");
+  assert.equal(b.multiplier_text, "2X3 3X1", "order-independent canonical result");
+  R.removeAdoptedCandidate(a, "3X1");
+  assert.equal(a.multiplier_text, "2X3", "cancel one slot keeps the other");
+  ok("R12 family 兩筆 additional 可同時採用、順序無關、取消只移除該筆");
 }
 
 // ---- car bet canonical keeps full play text ----

@@ -113,6 +113,22 @@
     return out;
   }
 
+  // Deterministic canonical rule ordering: category string first, then
+  // numeric value. (2X3 3X1, 2X2 3X5, 2X1 3X0.2 4X0.5)
+  function ruleSortKey(rule) {
+    const p = ruleParts(rule) || { cats: [], value: "0" };
+    return { cats: p.cats.join("/"), val: Number(p.value) || 0 };
+  }
+
+  function canonicalRuleOrder(rules) {
+    return rules.slice().sort((a, b) => {
+      const ka = ruleSortKey(a);
+      const kb = ruleSortKey(b);
+      if (ka.cats !== kb.cats) return ka.cats < kb.cats ? -1 : 1;
+      return ka.val - kb.val;
+    });
+  }
+
   function candidateMeta(c) {
     return c && typeof c === "object" ? c : {};
   }
@@ -151,6 +167,9 @@
         group: meta.candidate_group_id || null,
         source: meta.source || null,
         composable: meta.composable === true || evidence.composable === true,
+        replaces_current_rules: Array.isArray(meta.replaces_current_rules)
+          ? meta.replaces_current_rules.map(normalizeCandidate).filter(Boolean)
+          : [],
         merged: false,
       });
     }
@@ -287,6 +306,8 @@
     const before = current.slice();
     let after;
     let replacedRules = [];
+    let baselineRemoved = [];
+    let usedMode = mode;
     if (mode === "alternative_reading") {
       // Remove ONLY the candidate-system-managed alternatives of the SAME
       // physical slot (candidate_group_id); keep other groups' adopted rules
@@ -297,24 +318,48 @@
       replacedRules = entries
         .filter((e) => e.group && group && e.group === group && !e.removed_at && normalizeCandidate(e.rule_text || "") !== value)
         .map((e) => normalizeCandidate(e.rule_text || ""));
-      after = current.filter((r) => !replacedRules.includes(r));
-      if (!after.includes(value)) after.push(value);
-      const nowIso = new Date().toISOString();
-      entries.forEach((e) => {
-        if (replacedRules.includes(normalizeCandidate(e.rule_text || "")) && !e.removed_at) e.removed_at = nowIso;
-      });
-      line.fallback_candidate = Object.assign({}, line.fallback_candidate || {}, { adopted_entries: entries });
-      const am = Array.isArray(line.fallback_candidate.adopted_multipliers)
-        ? line.fallback_candidate.adopted_multipliers.map(normalizeCandidate).filter(Boolean)
+      const replacesBaseline = (found.replaces_current_rules || []).map(normalizeCandidate).filter(Boolean);
+      baselineRemoved = replacesBaseline.length
+        ? current.filter((r) => replacesBaseline.includes(r))
         : [];
-      line.fallback_candidate.adopted_multipliers = am.filter((r) => !replacedRules.includes(r));
+      replacedRules = replacedRules.concat(baselineRemoved);
+      if (replacedRules.length === 0) {
+        // No explicit same-slot binding (no group-managed adoption, no
+        // replaces_current_rules evidence): must NOT delete a baseline rule.
+        usedMode = "unknown_requires_review";
+      }
+      if (usedMode === "alternative_reading") {
+        after = current.filter((r) => !replacedRules.includes(r));
+        if (!after.includes(value)) after.push(value);
+        const nowIso = new Date().toISOString();
+        entries.forEach((e) => {
+          if (replacedRules.includes(normalizeCandidate(e.rule_text || "")) && !e.removed_at) e.removed_at = nowIso;
+        });
+        line.fallback_candidate = Object.assign({}, line.fallback_candidate || {}, { adopted_entries: entries });
+        const am = Array.isArray(line.fallback_candidate.adopted_multipliers)
+          ? line.fallback_candidate.adopted_multipliers.map(normalizeCandidate).filter(Boolean)
+          : [];
+        line.fallback_candidate.adopted_multipliers = am.filter((r) => !replacedRules.includes(r));
+      }
     } else {
+      usedMode = mode;
+    }
+    if (!after) {
       after = current.includes(value) ? current.slice() : current.concat([value]);
     }
+    after = canonicalRuleOrder(after);
     const addedRules = after.filter((r) => !before.includes(r));
     const removedRules = before.filter((r) => !after.includes(r));
-    _applyAdoption(line, after.join(" "), value, { mode, group, added_rules: addedRules, removed_rules: removedRules, replaced_rules: replacedRules });
-    return { ok: true, value, mode, line };
+    _applyAdoption(line, after.join(" "), value, {
+      mode: usedMode,
+      group,
+      added_rules: addedRules,
+      removed_rules: removedRules,
+      replaced_rules: replacedRules,
+      removed_baseline: baselineRemoved,
+      replaces_current_rules: (found.replaces_current_rules || []).map(normalizeCandidate).filter(Boolean),
+    });
+    return { ok: true, value, mode: usedMode, line };
   }
 
   // Cancel one adopted candidate. additional_rule: remove ONLY when this
@@ -330,6 +375,12 @@
     let current = splitCompleteRules(line.multiplier_text);
     if (entry.mode === "alternative_reading") {
       current = current.filter((r) => r !== value);
+      // Reversible: restore the baseline rule(s) this candidate replaced.
+      const restored = (entry.removed_baseline || []).map(normalizeCandidate);
+      for (const r of restored) {
+        if (!current.includes(r)) current.push(r);
+      }
+      current = canonicalRuleOrder(current);
     } else {
       const added = (entry.added_rules || []).map(normalizeCandidate);
       if (added.includes(value)) current = current.filter((r) => r !== value);
