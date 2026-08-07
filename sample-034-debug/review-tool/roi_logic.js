@@ -65,6 +65,9 @@
   // shown as-is. PURE: never mutates line.
   function standardizedResultText(line) {
     if (!line) return "";
+    // Car bets keep their full play text (e.g. "15 34 各半車"); rebuilding
+    // from number_groups + multiplier_text would delete the 車 semantics.
+    if (line.play_type === "car_bet" && line.play_text) return String(line.play_text);
     const groups = line.number_groups || [];
     const mult = canonicalMultiplierText(line.multiplier_text);
     if (groups.length) {

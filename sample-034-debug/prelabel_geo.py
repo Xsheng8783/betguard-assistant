@@ -179,6 +179,35 @@ def section_to_lines(
         and len(play_xs) >= 1
         and bool(extract_multiplier(section_text))
     )
+    # Generic bbox sanity: a two-digit NUMBER token whose center_x falls into
+    # (or just left of) the right-side play zone is suspicious (mis-tokenized
+    # stacked digit / mis-attached continuation). When present, the column
+    # reconstruction must stay needs_review instead of being confident.
+    # Anchor the right-side play zone on the FIRST row's rightmost number
+    # (continuation/staggered tokens may sit inside the play zone and would
+    # otherwise pollute the anchor).
+    row_lo = min(_cy(t) for t in nums)
+    first_row_nums = [t for t in nums if _cy(t) <= row_lo + 18]
+    first_row_max_cx = max((_cx(t) for t in first_row_nums), default=max(_cx(t) for t in nums))
+    play_zone_x_min = None
+    play_cy_lo = None
+    play_cy_hi = None
+    for t in toks:
+        if not re.fullmatch(r"\d{2}", str(t.get("text") or "")) and _cx(t) > first_row_max_cx + 20:
+            c = _cx(t)
+            play_zone_x_min = c if play_zone_x_min is None else min(play_zone_x_min, c)
+            play_cy_lo = _cy(t) if play_cy_lo is None else min(play_cy_lo, _cy(t))
+            play_cy_hi = _cy(t) if play_cy_hi is None else max(play_cy_hi, _cy(t))
+    play_zone_overlap = False
+    if play_zone_x_min is not None and play_cy_lo is not None:
+        for t in toks:
+            if (
+                re.fullmatch(r"\d{2}", str(t.get("text") or ""))
+                and _cx(t) >= play_zone_x_min - 15
+                and play_cy_lo - 20 <= _cy(t) <= play_cy_hi + 20
+            ):
+                play_zone_overlap = True
+                break
     combo_status: str | None = None
     if column_like and img_path:
         combo = _read_column_combo(
@@ -341,6 +370,24 @@ def section_to_lines(
             out[0]["uncertain_reason"] = uncertain_reason
             out[0]["warnings"] = warnings
             out[0]["fallback_candidate"] = fallback_candidate
+        if play_zone_overlap:
+            if not uncertain:
+                uncertain = True
+                uncertain_reason = "number_token_overlaps_play_zone"
+            if "number_token_overlaps_play_zone" not in warnings:
+                warnings.append("number_token_overlaps_play_zone")
+            fb = fallback_candidate or {}
+            fb = dict(fb)
+            fb["evidence"] = list(fb.get("evidence") or []) + [{
+                "source": "geometry_fallback",
+                "rule": "number_token_overlaps_play_zone",
+                "note": "a two-digit number token falls inside the play zone; column layout is ambiguous",
+            }]
+            fallback_candidate = fb
+            out[0]["uncertain"] = uncertain
+            out[0]["uncertain_reason"] = uncertain_reason
+            out[0]["warnings"] = warnings
+            out[0]["fallback_candidate"] = fallback_candidate
         return _mark_combo_fallback(out, combo_status)
     # normal row: use model row numbers
     lines = []
@@ -385,6 +432,14 @@ def section_to_lines(
                 line["warnings"].append("possible_column_bet")
             if "column_combo_needs_review" not in line["warnings"]:
                 line["warnings"].append("column_combo_needs_review")
+    if play_zone_overlap:
+        for line in lines:
+            if not line.get("uncertain"):
+                line["uncertain"] = True
+                line["uncertain_reason"] = "number_token_overlaps_play_zone"
+            line.setdefault("warnings", [])
+            if "number_token_overlaps_play_zone" not in line["warnings"]:
+                line["warnings"].append("number_token_overlaps_play_zone")
     return _mark_combo_fallback(lines, combo_status)
 
 
@@ -449,7 +504,10 @@ def _normal_lines(
         model_mult = str(r.get("multiplier") or "").strip()
         if not rules and model_mult:
             rules = split_complete_rules(model_mult)
-        partial_toks = partial_tokens(model_mult)
+        # A bare model multiplier (e.g. "1") is superseded by the COMPLETE
+        # rules extracted from the tokens; only treat it as partial evidence
+        # when we have no complete rules at all.
+        partial_toks = partial_tokens(model_mult) if not rules else []
         mult = " ".join(merge_complete_rules(rules)) if rules else None
         warnings = []
         uncertain = False

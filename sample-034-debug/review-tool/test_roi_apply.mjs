@@ -536,4 +536,21 @@ function ok(name) {
   ok("E legacy 無 group 同 value 不自動破壞既有規則");
 }
 
+// ---- car bet canonical keeps full play text ----
+{
+  const line = {
+    line_id: "R01-L1",
+    play_type: "car_bet",
+    play_text: "15 34 各半車",
+    number_groups: [["15", "34"]],
+    multiplier_text: null,
+    layout_hint: "normal_row",
+    raw_text: "15 各半車",
+  };
+  const before = JSON.stringify(line);
+  assert.equal(R.standardizedResultText(line), "15 34 各半車", "car play text must survive canonical rendering");
+  assert.equal(JSON.stringify(line), before, "car canonical is pure");
+  ok("car canonical 保留 各半車、pure render");
+}
+
 console.log(`\n${passed} tests passed`);

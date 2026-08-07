@@ -263,6 +263,8 @@ def _revalidate_line(line: dict, revision: int | None = None, game: str = "539")
 def _canonical_text(line: dict, *, zh_mult: bool = False) -> str:
     """Standardized text from the authoritative structured fields:
     number_groups -> multiplier_text LAST (same as the UI 標準化結果)."""
+    if line.get("play_type") == "car_bet" and line.get("play_text"):
+        return str(line.get("play_text"))
     groups = line.get("number_groups") or []
     if not groups:
         return str(line.get("raw_text") or "")

@@ -1481,3 +1481,121 @@ def test_repair_sample012_rules():
     bad = line("R03-L1", [["99", "99", "99"]], "2X2", "normal_row", "x")
     with pytest.raises(AssertionError):
         R12.run_repair({"lines": [bad, r04, r06, r08]}, apply=True)
+
+
+def test_car_canonical_keeps_play_text_and_non_exportable():
+    import server as S
+    line = {
+        "line_id": "R01-L1",
+        "play_type": "car_bet",
+        "play_text": "15 34 各半車",
+        "number_groups": [["15", "34"]],
+        "multiplier_text": None,
+        "layout_hint": "normal_row",
+        "raw_text": "15 34 各半車",
+    }
+    assert S._canonical_text(line) == "15 34 各半車"
+    from betguard.vision.pipeline import process_row
+    rec = process_row({
+        "raw_text": "15 34 各半車",
+        "numbers": [["15", "34"]],
+        "multiplier": None,
+        "layout_hint": "normal_row",
+    }, region_bound=True, game="539")
+    assert rec["decision"]["executable"] is False
+    assert rec["supported"] is False
+
+
+def test_r03_play_zone_overlap_guard(monkeypatch):
+    monkeypatch.setattr(pg, "_read_column_combo", lambda *a, **k: None)
+    monkeypatch.setattr(pg, "_read_play_mark", lambda *a, **k: None)
+    sec = {"rows": [{"tokens": [
+        {"text": "12", "bbox": [60, 510, 125, 555]},
+        {"text": "x", "bbox": [135, 520, 150, 550]},
+        {"text": "15", "bbox": [160, 510, 225, 555]},
+        {"text": "x", "bbox": [235, 520, 250, 550]},
+        {"text": "34", "bbox": [260, 510, 325, 555]},
+        {"text": "x", "bbox": [335, 520, 350, 550]},
+        {"text": "08", "bbox": [360, 505, 425, 555]},
+        {"text": "2", "bbox": [460, 510, 495, 550]},
+        {"text": "x", "bbox": [505, 520, 520, 550]},
+        {"text": "3", "bbox": [530, 510, 590, 555]},
+        {"text": "20", "bbox": [460, 555, 525, 595]},
+        {"text": "3", "bbox": [560, 555, 595, 600]},
+        {"text": "x", "bbox": [605, 565, 620, 595]},
+        {"text": "1", "bbox": [630, 555, 690, 605]},
+    ]}]}
+    lines = pg.section_to_lines(sec, "R03", img_path=Path("x.jpg"))
+    l = lines[0]
+    assert l["layout_hint"] == "column_bet"
+    assert l["multiplier_text"] == "2X3 3X1"
+    assert l["uncertain"] is True
+    assert "number_token_overlaps_play_zone" in l["warnings"]
+
+
+def test_r04_complete_rules_not_bare_value(monkeypatch):
+    assert pg.extract_multiplier_rules("12 . 15 . 36 . 37 2 x 3 3 x 1") == ["2X3", "3X1"]
+    monkeypatch.setattr(pg, "_read_play_mark", lambda *a, **k: None)
+    sec = {"rows": [{"tokens": [
+        {"text": "12", "bbox": [60, 500, 110, 540]},
+        {"text": ".", "bbox": [115, 505, 130, 535]},
+        {"text": "15", "bbox": [135, 500, 185, 540]},
+        {"text": ".", "bbox": [190, 505, 205, 535]},
+        {"text": "36", "bbox": [210, 500, 260, 540]},
+        {"text": ".", "bbox": [265, 505, 280, 535]},
+        {"text": "37", "bbox": [285, 500, 335, 540]},
+        {"text": "2", "bbox": [420, 495, 450, 540]},
+        {"text": "x", "bbox": [455, 505, 475, 540]},
+        {"text": "3", "bbox": [480, 495, 510, 540]},
+        {"text": "3", "bbox": [420, 540, 450, 580]},
+        {"text": "x", "bbox": [455, 545, 475, 580]},
+        {"text": "1", "bbox": [480, 540, 510, 580]},
+    ], "numbers": [["12"], ["15"], ["36"], ["37"]], "multiplier": "1"}]}
+    lines = pg.section_to_lines(sec, "R04", img_path=Path("x.jpg"))
+    l = lines[0]
+    assert l["multiplier_text"] == "2X3 3X1"
+    assert "incomplete_multiplier_evidence" not in l["warnings"], "bare model multiplier must not re-flag complete rules"
+    assert l["uncertain"] is True and l["uncertain_reason"] == "play_mark_unclear"  # ROI mock artifact, not multiplier issue
+
+
+def test_repair_sample013_rules():
+    import repair_sample013_rules as R13
+
+    def line(lid, groups, mult, layout, raw, model_raw):
+        return {
+            "line_id": lid,
+            "number_groups": groups,
+            "multiplier_text": mult,
+            "multiplier_rules": [],
+            "layout_hint": layout,
+            "raw_text": raw,
+            "human_raw_text": None,
+            "model_raw_text": model_raw,
+            "play_type": None,
+            "play_text": None,
+            "review_action": "pending",
+            "uncertain": True,
+            "warnings": [],
+            "fallback_candidate": {},
+        }
+
+    r01 = line("R01-L1", [["15", "34"]], None, "normal_row", "15 各半車", "15 34 各半車")
+    r03 = line("R03-L1", [["12"], ["15"], ["34"], ["08"], ["20"]], "2/3", "column_bet", "12 / 15 / 34 / 08 / 20 2/3", None)
+    r04 = line("R04-L1", [["12", "15", "36", "37"]], "1", "normal_row", "12 . 15 . 36 . 37 2 x 3 3 x 1", None)
+    draft = {"lines": [r01, r03, r04]}
+    R13.run_repair(draft, apply=True)
+    assert r01["play_type"] == "car_bet"
+    assert r01["play_text"] == "15 34 各半車"
+    assert r01["raw_text"] == "15 34 各半車"
+    assert r03["number_groups"] == [["12"], ["15", "34"], ["08", "20"]]
+    assert r03["multiplier_text"] == "2X3 3X1"
+    assert len(r03["multiplier_rules"]) == 2
+    assert r04["multiplier_text"] == "2X3 3X1"
+    assert r04["raw_text"] == "12 15 36 37 2X3 3X1"
+    assert r04["review_action"] == "pending"
+    assert r01["model_raw_text"] == "15 34 各半車"
+    assert r01["fallback_candidate"]["evidence"][-1]["source"] == "human_verified_image_ground_truth"
+    assert R13.run_repair(draft, apply=False)["changed_lines"] == 0
+    bad = line("R01-L1", [["99"]], None, "normal_row", "x", "x")
+    with pytest.raises(AssertionError):
+        R13.run_repair({"lines": [bad, r03, r04]}, apply=True)
