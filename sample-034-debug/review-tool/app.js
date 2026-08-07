@@ -448,6 +448,7 @@ function renderLineCard(line, region) {
     line.review_action = line.review_action === "confirmed" ? "pending" : "confirmed";
     track(line.line_id, "review_action");
     renderEditor();
+    save(false); // persist immediately so confirmations never silently vanish
   });
   mkBtn("標記已修正", "", () => {
     line.review_action = "corrected";
@@ -640,10 +641,28 @@ async function save(complete = false) {
     });
   } catch (e) {
     const msg = String(e?.message || e);
-    if (msg.includes("revision_mismatch") || msg.includes("complete_validation_failed")) {
-      $("#status").textContent = msg.includes("revision_mismatch")
-        ? "版本衝突：另一個分頁已儲存，請重新整理（409）"
-        : "完成失敗（409）：" + msg;
+    if (msg.includes("revision_mismatch")) {
+      // Multi-tab conflict: reload server state but KEEP the reviewer's
+      // confirmations (other field edits are not auto-merged to avoid
+      // clobbering the other tab's work).
+      const pendingActions = (state.draft.lines || []).map((l) => ({
+        line_id: l.line_id,
+        review_action: l.review_action,
+      }));
+      await selectSample(state.sid);
+      for (const pa of pendingActions) {
+        const line = (state.draft.lines || []).find((l) => l.line_id === pa.line_id);
+        if (line && pa.review_action === "confirmed" && line.review_action !== "confirmed") {
+          line.review_action = "confirmed";
+          state.edits.push({ at: new Date().toISOString(), line_id: pa.line_id, fields: ["review_action"] });
+        }
+      }
+      $("#status").textContent = "版本衝突：已重新載入並保留你按的「確認」，請再按一次儲存";
+      renderEditor();
+      return;
+    }
+    if (msg.includes("complete_validation_failed")) {
+      $("#status").textContent = "完成失敗（409）：" + msg;
       await selectSample(state.sid);
       return;
     }
