@@ -36,6 +36,7 @@ class Token:
 
 
 COLLISION_MAP = {
+    frozenset({2, 3, 4}): ("2/3/4", "二三四碰"),
     frozenset({2, 3}): ("2/3", "二三碰"),
     frozenset({3, 4}): ("3/4", "三四碰"),
     frozenset({2, 4}): ("2/4", "二四碰"),
@@ -59,7 +60,7 @@ def classify_tokens(tokens: list[Token]) -> dict[str, list[Token]]:
             separators.append(t)
         elif re.fullmatch(r"\d{2}", t.text) and 1 <= int(t.text) <= 49:
             numbers.append(t)
-        elif re.fullmatch(r"[234](?:/[234])?", t.text):
+        elif re.fullmatch(r"234|[234](?:/[234])*", t.text):
             collision.append(t)
         elif re.fullmatch(r"x?0?\.?\d+(?:\.\d+)?", t.text) and ("." in t.text or len(t.text) <= 3):
             multiplier.append(t)
@@ -218,12 +219,23 @@ def build_page_bets(token_dicts: list[dict[str, Any]], *, row_threshold: float =
     out: list[dict[str, Any]] = []
     for bet in bets:
         flat = [t for row in bet for t in row]
-        if len(flat) < 3:
+        if len(flat) < 2:
             continue
         bet_x1 = min(t.center_x for t in flat) - 25
         bet_x2 = max(t.center_x for t in flat) + 110
         bet_y1 = min(t.center_y for t in flat) - 20
         bet_y2 = max(t.center_y for t in flat) + 35
+        if len(flat) == 2:
+            # Two-number short column: keep geometry chance only when an
+            # x/× separator sits between the two numbers.
+            xs = [
+                t for t in classified["separators"]
+                if t.text in "xX×"
+                and bet_x1 <= t.center_x <= bet_x2
+                and bet_y1 <= t.center_y <= bet_y2
+            ]
+            if not xs:
+                continue
         zone = (
             [{"text": t.text, "bbox": t.bbox} for t in flat]
             + [

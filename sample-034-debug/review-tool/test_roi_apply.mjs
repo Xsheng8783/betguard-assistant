@@ -147,6 +147,7 @@ function ok(name) {
     layout_hint: "column_bet",
     multiplier_text: "2X1",
     review_action: "pending",
+    uncertain: true,
     fallback_candidate: { multiplier_candidates: ["3X1"] },
   };
   const before = JSON.stringify(line);
@@ -173,6 +174,7 @@ function ok(name) {
     layout_hint: "column_bet",
     multiplier_text: "2X1",
     review_action: "pending",
+    uncertain: true,
     fallback_candidate: { multiplier_candidates: ["3X1"] },
   };
   const res = R.adoptMultiplierCandidate(line, "2/3X1");
@@ -195,6 +197,7 @@ function ok(name) {
     layout_hint: "normal_row",
     multiplier_text: "3X1",
     review_action: "pending",
+    uncertain: true,
     fallback_candidate: { multiplier_candidates: ["3/4X1"] },
   };
   const before = JSON.stringify(line);
@@ -341,6 +344,90 @@ function ok(name) {
   assert.equal(R.standardizedResultText(line), "32 34 35 3X5");
   assert.equal(JSON.stringify(line), before, "canonical display must not mutate");
   ok("標準化 spaced complete 倍率顯示 3/4X1/2X1/2X2 3X5、不改資料");
+}
+
+// ---- additional_rule / alternative_reading adoption model ----
+{
+  assert.deepEqual(R.splitCompleteRules("2X23X5"), [], "corrupted concat is not a complete rule set");
+
+  const line = {
+    line_id: "R03-L1",
+    number_groups: [["02", "30", "33"]],
+    layout_hint: "normal_row",
+    multiplier_text: "2X2",
+    review_action: "pending",
+    uncertain: false,
+    fallback_candidate: {
+      multiplier_candidates: [
+        { rule_text: "2X2", candidate_mode: "additional_rule", candidate_group_id: "slot1" },
+        { rule_text: "3X5", candidate_mode: "additional_rule", candidate_group_id: "slot2" },
+      ],
+    },
+  };
+  const res = R.adoptMultiplierCandidate(line, { rule_text: "3X5", candidate_mode: "additional_rule", candidate_group_id: "slot2" });
+  assert.equal(res.ok, true);
+  assert.equal(line.multiplier_text, "2X2 3X5", "additional_rule must NOT become 2X23X5");
+  assert.deepEqual(line.fallback_candidate.adopted_multipliers, ["3X5"]);
+  R.adoptMultiplierCandidate(line, { rule_text: "3X5", candidate_mode: "additional_rule", candidate_group_id: "slot2" });
+  assert.equal(line.multiplier_text, "2X2 3X5", "repeat adopt idempotent");
+  assert.equal(line.fallback_candidate.adopted_entries.length, 1, "no duplicate adoption record");
+  R.removeAdoptedCandidate(line, "3X5");
+  assert.equal(line.multiplier_text, "2X2", "removing adopted rule keeps pre-existing 2X2");
+  ok("additional_rule 採用不串接、冪等、取消不刪原有規則");
+}
+
+{
+  const line = {
+    line_id: "R04-L1",
+    number_groups: [["02", "05", "17"]],
+    layout_hint: "normal_row",
+    multiplier_text: "3X5",
+    review_action: "pending",
+    fallback_candidate: {
+      multiplier_candidates: [{ rule_text: "2X2", candidate_mode: "additional_rule", candidate_group_id: "slot1" }],
+    },
+  };
+  R.adoptMultiplierCandidate(line, { rule_text: "2X2", candidate_mode: "additional_rule", candidate_group_id: "slot1" });
+  assert.equal(line.multiplier_text, "3X5 2X2", "stable order: existing rules first, added rule appended");
+  ok("additional_rule 由 3X5 加入 2X2 → 3X5 2X2");
+}
+
+{
+  const line = {
+    line_id: "R02-L1",
+    number_groups: [["15"], ["24"], ["22", "35", "28"]],
+    layout_hint: "column_bet",
+    multiplier_text: "2X1",
+    review_action: "pending",
+    fallback_candidate: {
+      multiplier_candidates: [
+        { rule_text: "3X1", candidate_mode: "alternative_reading", candidate_group_id: "g1" },
+        { rule_text: "4X1", candidate_mode: "alternative_reading", candidate_group_id: "g1" },
+      ],
+    },
+  };
+  R.adoptMultiplierCandidate(line, { rule_text: "3X1", candidate_mode: "alternative_reading", candidate_group_id: "g1" });
+  assert.equal(line.multiplier_text, "3X1", "alternative replaces current reading");
+  R.adoptMultiplierCandidate(line, { rule_text: "4X1", candidate_mode: "alternative_reading", candidate_group_id: "g1" });
+  assert.equal(line.multiplier_text, "4X1", "same group alternatives are mutually exclusive");
+  ok("alternative_reading 同 group 互斥");
+}
+
+{
+  // Same value but DIFFERENT physical slots stay separate (no auto merge).
+  const line = {
+    line_id: "R99-L1",
+    number_groups: [["01", "02"]],
+    layout_hint: "normal_row",
+    multiplier_text: "2X1",
+    review_action: "pending",
+    fallback_candidate: {
+      multiplier_candidates: [{ rule_text: "3X1", candidate_mode: "additional_rule", candidate_group_id: "slot2" }],
+    },
+  };
+  R.adoptMultiplierCandidate(line, { rule_text: "3X1", candidate_mode: "additional_rule", candidate_group_id: "slot2" });
+  assert.equal(line.multiplier_text, "2X1 3X1", "different slots, same value: NOT merged to 2/3X1");
+  ok("不同 slot 同 value 不自動合併");
 }
 
 console.log(`\n${passed} tests passed`);

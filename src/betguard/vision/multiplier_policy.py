@@ -106,14 +106,31 @@ def is_complete_multiplier(text: str | None) -> bool:
     return bool(tokens) and all(classify_multiplier_token(t) == COMPLETE for t in tokens)
 
 
-def merge_complete_rules(rules: list[str]) -> list[str]:
+def merge_complete_rules(rules: list[str], *, merge_same_value: bool = True) -> list[str]:
     """Canonical merge policy for complete rules.
 
     - Categories are merged ONLY when the multiplier value is identical
       (e.g. 2/3X0.1 + 3/4X0.1 -> 2/3/4X0.1; 2X1 + 3X1 -> 2/3X1).
     - Different values NEVER merge (2X1, 3X0.2, 4X0.5 stay three rules).
     - Category order is always 2/3/4; 4/3 is canonicalized to 3/4.
+    - merge_same_value=False keeps same-value rules SEPARATE (distinct
+      physical slots), e.g. 2X1 + 3X1 -> "2X1 3X1".
+    - Ordering is deterministic: first-appearance order of the value
+      (never Set iteration).
     """
+    if not merge_same_value:
+        seen: set[str] = set()
+        out: list[str] = []
+        for rule in rules:
+            parsed = _parse_rule(rule)
+            if parsed is None:
+                continue
+            cats, value = parsed
+            canon = "/".join(sorted(cats)) + "X" + value
+            if canon not in seen:
+                seen.add(canon)
+                out.append(canon)
+        return out
     by_value: dict[str, set[str]] = {}
     order: list[str] = []
     for rule in rules:

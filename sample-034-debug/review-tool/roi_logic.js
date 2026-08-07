@@ -56,6 +56,7 @@
   }
 
   function normalizeCandidate(value) {
+    if (value && typeof value === "object") return normRuleText(value.rule_text || "");
     return normRuleText(value);
   }
 
@@ -96,68 +97,120 @@
       .join(" ");
   }
 
-  // Returns {hasCandidates, candidates, merged, displayCandidates, adopted,
-  // hint}. PURE: never mutates line. Candidates are normalized + deduped for
-  // DISPLAY ONLY; the original fallback_candidate.multiplier_candidates array
-  // is never modified here.
+  // Complete rules from a multiplier text. Returns [] when ANY token is
+  // partial/invalid (fragments never become official rules).
+  function splitCompleteRules(text) {
+    if (!text) return [];
+    const compact = canonicalMultiplierText(text);
+    const out = [];
+    for (const t of compact.split(/\s+/).filter(Boolean)) {
+      if (!ruleParts(t)) return [];
+      out.push(t);
+    }
+    return out;
+  }
+
+  function candidateMeta(c) {
+    return c && typeof c === "object" ? c : {};
+  }
+
+  // Legacy (no metadata) mode inference: same value with current rules means
+  // the same category slot (superset or disjoint categories) -> alternative;
+  // different value -> additional rule.
+  function inferMode(rule, currentRules) {
+    const p = ruleParts(rule);
+    if (!p) return "alternative_reading";
+    for (const r of currentRules) {
+      const q = ruleParts(r);
+      if (q && q.value === p.value) {
+        return "alternative_reading"; // same value -> same slot family
+      }
+    }
+    return "additional_rule";
+  }
+
+  // Returns {hasCandidates, entries, display, adopted(Set), merged, hint}.
+  // PURE: never mutates line. Candidates may be strings (legacy) or dicts
+  // {rule_text, candidate_mode, candidate_group_id, source, evidence}.
   function multiplierCandidatesInfo(line) {
     const fb = line && line.fallback_candidate;
     const raw = Array.isArray(fb && fb.multiplier_candidates) ? fb.multiplier_candidates : [];
+    const currentRules = splitCompleteRules(line && line.multiplier_text);
     const seen = new Set();
-    const candidates = [];
+    const entries = [];
     for (const c of raw) {
-      const n = normalizeCandidate(c);
-      if (!n || seen.has(n)) continue;
-      seen.add(n);
-      candidates.push(n);
+      const rule = normalizeCandidate(c);
+      const meta = candidateMeta(c);
+      if (!rule || seen.has(rule)) continue;
+      seen.add(rule);
+      entries.push({
+        rule,
+        mode: meta.candidate_mode || inferMode(rule, currentRules),
+        group: meta.candidate_group_id || null,
+        source: meta.source || null,
+        merged: false,
+      });
     }
+    const adoptedList = Array.isArray(fb && fb.adopted_multipliers)
+      ? fb.adopted_multipliers.map(normalizeCandidate).filter(Boolean)
+      : [];
+    const adoptedSingle = fb && fb.adopted_multiplier ? normalizeCandidate(fb.adopted_multiplier) : null;
+    if (adoptedSingle && !adoptedList.includes(adoptedSingle)) adoptedList.push(adoptedSingle);
+    const adopted = new Set(adoptedList);
+
     let merged = null;
-    if (line && line.multiplier_text) {
-      const currentRules = String(line.multiplier_text).split(/\s+/).map(normalizeCandidate).filter(Boolean);
-      for (const cand of candidates) {
-        const cp = ruleParts(cand);
-        if (!cp) continue;
-        const cats = new Set(cp.cats);
-        for (const r of currentRules) {
-          const p = ruleParts(r);
-          if (p && p.value === cp.value) p.cats.forEach((c) => cats.add(c));
-        }
-        if (cats.size >= 2) {
-          merged = Array.from(cats).sort().join("/") + "X" + cp.value;
-          break;
-        }
+    for (const e of entries) {
+      const cp = ruleParts(e.rule);
+      if (!cp) continue;
+      const cats = new Set(cp.cats);
+      for (const r of currentRules) {
+        const p = ruleParts(r);
+        if (p && p.value === cp.value) p.cats.forEach((c) => cats.add(c));
+      }
+      if (cats.size >= 2) {
+        merged = Array.from(cats).sort().join("/") + "X" + cp.value;
+        break;
       }
     }
-    const displayCandidates = merged && !candidates.includes(merged)
-      ? candidates.concat([merged])
-      : candidates.slice();
-    const adopted = fb && fb.adopted_multiplier ? normalizeCandidate(fb.adopted_multiplier) : null;
+    const display = entries.slice();
+    if (merged && !entries.some((e) => e.rule === merged)) {
+      display.push({ rule: merged, mode: "alternative_reading", group: null, source: "derived", merged: true });
+    }
     const hint = merged ? `可能為 ${merged}，請依圖片確認` : null;
     return {
-      hasCandidates: candidates.length > 0,
-      candidates,
-      merged,
-      displayCandidates,
+      hasCandidates: entries.length > 0,
+      entries,
+      candidates: entries.map((e) => e.rule),
+      display,
+      displayCandidates: display.map((e) => e.rule),
       adopted,
+      merged,
       hint,
     };
   }
 
-  // Display-only HTML; returns "" when there is nothing to show. Adopting is
-  // an explicit button click; rendering itself never mutates the line.
+  // Display-only HTML; returns "" when there is nothing to show. Adopting /
+  // removing is an explicit button click; rendering never mutates the line.
   function multiplierCandidatesHtml(line) {
     const info = multiplierCandidatesInfo(line);
     if (!info.hasCandidates) return "";
     const lineId = escHtml(line.line_id);
-    const item = (value) => {
-      const isMerged = info.merged === value;
-      const adopted = info.adopted === value;
+    const item = (e) => {
+      const adopted = info.adopted.has(e.rule);
+      const modeTag = e.mode === "alternative_reading"
+        ? '<span class="mult-mode">替代讀法</span>'
+        : '<span class="mult-mode">追加規則</span>';
       const action = adopted
-        ? '<span class="mult-adopted">已採用</span>'
-        : `<button type="button" class="mult-adopt" onclick="adoptCandidateClick('${lineId}','${escHtml(value)}')">採用此候選</button>`;
-      return `<li class="${isMerged ? "mult-merged" : ""}"><span class="mult-cand">${escHtml(value)}</span>${action}</li>`;
+        ? `<button type="button" class="mult-remove" onclick="removeCandidateClick('${lineId}','${escHtml(e.rule)}')">取消採用</button>`
+        : `<button type="button" class="mult-adopt" onclick="adoptCandidateClick('${lineId}','${escHtml(e.rule)}')">採用此候選</button>`;
+      return (
+        `<li class="${e.merged ? "mult-merged" : ""}"><span class="mult-cand">${escHtml(e.rule)}</span>${modeTag}` +
+        (adopted ? '<span class="mult-adopted">已採用</span>' : "") +
+        action +
+        "</li>"
+      );
     };
-    const items = info.displayCandidates.map(item).join("");
+    const items = info.display.map(item).join("");
     return (
       '<div class="mult-candidates"><b>倍率候選（需人工確認）</b><ul>' +
       items +
@@ -167,36 +220,110 @@
     );
   }
 
-  // Explicit human adoption of one candidate. Mutates line ONLY on adoption:
-  // multiplier_text, multiplier_rules, human_raw_text/raw_text, review_action
-  // -> corrected, uncertain stays true, and fallback_candidate keeps ALL
-  // original candidates plus an adopted_multiplier marker. Never confirms.
-  function adoptMultiplierCandidate(line, candidate) {
-    if (!line) return { ok: false, error: "line missing" };
-    const info = multiplierCandidatesInfo(line);
-    const value = normalizeCandidate(candidate);
-    if (!value || !(info.candidates.includes(value) || info.merged === value)) {
-      return { ok: false, error: "candidate not available" };
-    }
-    const parts = ruleParts(value);
-    if (!parts || parts.cats.length === 0) {
-      return { ok: false, error: "candidate unparseable" };
-    }
+  function _applyAdoption(line, newText, value, entry) {
+    line.multiplier_text = newText || null;
+    line.multiplier_rules = newText
+      ? newText.split(" ").map((r) => {
+          const p = ruleParts(r) || { cats: [], value: null };
+          return { rule_text: r, categories: p.cats, value: p.value };
+        })
+      : [];
     const groups = line.number_groups || [];
     const humanRaw =
       (line.layout_hint === "column_bet"
         ? groups.map((g) => (g || []).join(" ")).join(" / ")
-        : groups.flat().join(" ")) + " " + value;
-    line.multiplier_text = value;
-    line.multiplier_rules = [{ rule_text: value, categories: parts.cats, value: parts.value }];
+        : groups.flat().join(" ")) + (newText ? " " + newText : "");
     line.human_raw_text = humanRaw;
     line.raw_text = humanRaw;
     line.review_action = "corrected"; // edited but NOT confirmed
-    line.uncertain = true; // stays until human unchecks or confirms
     line.correction_source = "multiplier_candidate";
     line.human_edited = true;
     line.fallback_candidate = Object.assign({}, line.fallback_candidate || {});
-    line.fallback_candidate.adopted_multiplier = value; // original candidates untouched
+    const adoptedList = Array.isArray(line.fallback_candidate.adopted_multipliers)
+      ? line.fallback_candidate.adopted_multipliers.map(normalizeCandidate).filter(Boolean)
+      : [];
+    if (!adoptedList.includes(value)) adoptedList.push(value);
+    line.fallback_candidate.adopted_multipliers = adoptedList;
+    line.fallback_candidate.adopted_multiplier = value; // backward compatible
+    const entries = Array.isArray(line.fallback_candidate.adopted_entries)
+      ? line.fallback_candidate.adopted_entries
+      : [];
+    const exists = entries.find((e) => normalizeCandidate(e.rule_text || "") === value && !e.removed_at);
+    if (!exists) {
+      entries.push(Object.assign({ rule_text: value, at: new Date().toISOString() }, entry));
+    }
+    line.fallback_candidate.adopted_entries = entries;
+  }
+
+  // Explicit human adoption of one candidate. additional_rule candidates are
+  // ADDED to the current rules (never string-concatenated, never merged by
+  // value unless evidence says composable); alternative_reading candidates
+  // REPLACE the current reading (same physical slot -> mutually exclusive).
+  function adoptMultiplierCandidate(line, candidate) {
+    if (!line) return { ok: false, error: "line missing" };
+    const info = multiplierCandidatesInfo(line);
+    const value = normalizeCandidate(candidate);
+    const found = info.entries.find((e) => e.rule === value) || info.display.find((e) => e.rule === value);
+    if (!value || !found) return { ok: false, error: "candidate not available" };
+    const parts = ruleParts(value);
+    if (!parts || parts.cats.length === 0) return { ok: false, error: "candidate unparseable" };
+    const meta = candidateMeta(candidate);
+    const mode = found.mode || meta.candidate_mode || "additional_rule";
+    const group = found.group || meta.candidate_group_id || null;
+    const current = splitCompleteRules(line.multiplier_text);
+    const before = current.slice();
+    let after;
+    if (mode === "alternative_reading") {
+      after = [value]; // mutually exclusive reading
+    } else {
+      after = current.includes(value) ? current.slice() : current.concat([value]);
+    }
+    const addedRules = after.filter((r) => !before.includes(r));
+    const removedRules = before.filter((r) => !after.includes(r));
+    _applyAdoption(line, after.join(" "), value, { mode, group, added_rules: addedRules, removed_rules: removedRules });
+    return { ok: true, value, mode, line };
+  }
+
+  // Cancel one adopted candidate. additional_rule: remove ONLY when this
+  // candidate introduced the rule (a pre-existing rule is never deleted).
+  function removeAdoptedCandidate(line, rule) {
+    if (!line) return { ok: false, error: "line missing" };
+    const value = normalizeCandidate(rule);
+    const fb = line.fallback_candidate || {};
+    const entries = Array.isArray(fb.adopted_entries) ? fb.adopted_entries : [];
+    const idx = entries.findIndex((e) => normalizeCandidate(e.rule_text || "") === value);
+    if (idx < 0) return { ok: false, error: "not adopted" };
+    const entry = entries[idx];
+    let current = splitCompleteRules(line.multiplier_text);
+    if (entry.mode === "alternative_reading") {
+      current = current.filter((r) => r !== value);
+    } else {
+      const added = (entry.added_rules || []).map(normalizeCandidate);
+      if (added.includes(value)) current = current.filter((r) => r !== value);
+      // if the rule pre-existed, keep it
+    }
+    const newText = current.join(" ");
+    line.multiplier_text = newText || null;
+    line.multiplier_rules = newText
+      ? newText.split(" ").map((r) => {
+          const p = ruleParts(r) || { cats: [], value: null };
+          return { rule_text: r, categories: p.cats, value: p.value };
+        })
+      : [];
+    const groups = line.number_groups || [];
+    const humanRaw =
+      (line.layout_hint === "column_bet"
+        ? groups.map((g) => (g || []).join(" ")).join(" / ")
+        : groups.flat().join(" ")) + (newText ? " " + newText : "");
+    line.human_raw_text = humanRaw;
+    line.raw_text = humanRaw;
+    line.review_action = "corrected";
+    const remaining = (fb.adopted_multipliers || []).map(normalizeCandidate).filter((r) => r !== value);
+    fb.adopted_multipliers = remaining;
+    fb.adopted_multiplier = remaining.length ? remaining[remaining.length - 1] : null;
+    entries[idx] = Object.assign({}, entry, { removed_at: new Date().toISOString() });
+    fb.adopted_entries = entries;
+    line.fallback_candidate = fb;
     return { ok: true, value, line };
   }
 
@@ -270,8 +397,10 @@
     multiplierCandidatesInfo,
     multiplierCandidatesHtml,
     adoptMultiplierCandidate,
+    removeAdoptedCandidate,
     normalizeCandidate,
     standardizedResultText,
     canonicalMultiplierText,
+    splitCompleteRules,
   };
 });

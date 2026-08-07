@@ -1056,7 +1056,10 @@ def test_backfill_divergent_adds_candidates_without_touching_protected():
     v3 = [(["15", "24", "22", "35", "28"], ["2X1", "3X1"])]
     stats = bf.backfill_line(line, v3)
     assert stats["candidates"] == ["3X1"]
-    assert line["fallback_candidate"]["multiplier_candidates"] == ["3X1"]
+    cand = line["fallback_candidate"]["multiplier_candidates"]
+    assert cand[0]["rule_text"] == "3X1"
+    assert cand[0]["candidate_mode"] == "alternative_reading"
+    assert cand[0]["candidate_group_id"] == "R02-L1-slot-0"
     assert "cross_pass_multiplier_divergent" in line["warnings"]
     assert "possible_stacked_category_digit" in line["warnings"]
     assert line["uncertain"] is False  # protected: never auto-set
@@ -1083,7 +1086,10 @@ def test_backfill_idempotent():
     first = bf.backfill_line(line, v3)
     second = bf.backfill_line(line, v3)
     assert first["candidates"] == ["3/4X1"]
-    assert line["fallback_candidate"]["multiplier_candidates"] == ["3/4X1"]
+    cand = line["fallback_candidate"]["multiplier_candidates"]
+    assert cand[0]["rule_text"] == "3/4X1"
+    assert cand[0]["candidate_mode"] == "alternative_reading"
+    assert len(cand) == 1  # idempotent: no duplicate candidate entry
     assert len(line["fallback_candidate"]["evidence"]) == 1
     assert line["warnings"].count("cross_pass_multiplier_divergent") == 1
     assert line["warnings"].count("possible_stacked_category_digit") == 1
@@ -1366,3 +1372,111 @@ def test_partial_multiplier_never_executable():
     }, region_bound=True, game="539")
     assert rec["decision"]["executable"] is False
     assert rec["block_reason"] == "MISSING_MULTIPLIER"
+
+
+def test_merge_same_value_flag():
+    from betguard.vision.multiplier_policy import merge_complete_rules
+    # default: same-value categories merge
+    assert merge_complete_rules(["2X1", "3X1"]) == ["2/3X1"]
+    # distinct physical slots: keep separate
+    assert merge_complete_rules(["2X1", "3X1"], merge_same_value=False) == ["2X1", "3X1"]
+    # different values NEVER merge in either mode
+    assert merge_complete_rules(["2X2", "3X5"], merge_same_value=False) == ["2X2", "3X5"]
+
+
+def test_column_geometry_triple_collision():
+    from betguard.vision.column_geometry import Token, build_columns_from_bbox, parse_collision
+    # separate stacked tokens 2 + 3 + 4
+    raw, zh = parse_collision([
+        Token("2", [0, 0, 10, 10]),
+        Token("3", [0, 15, 10, 25]),
+        Token("4", [0, 30, 10, 40]),
+    ]) or (None, None)
+    assert raw == "2/3/4" and zh == "二三四碰"
+    # single 234 token
+    raw, _ = parse_collision([Token("234", [0, 0, 10, 10])]) or (None, None)
+    assert raw == "2/3/4"
+    # 2/3/4 token
+    raw, _ = parse_collision([Token("2/3/4", [0, 0, 10, 10])]) or (None, None)
+    assert raw == "2/3/4"
+    # only 2/3 evidence must NOT guess 4
+    raw, _ = parse_collision([Token("2", [0, 0, 10, 10]), Token("3", [0, 15, 10, 25])]) or (None, None)
+    assert raw == "2/3"
+    # full geometry with 2/3/4 collision + x0.1
+    res = build_columns_from_bbox([
+        {"text": "24", "bbox": [0, 0, 40, 30]},
+        {"text": "19", "bbox": [60, 0, 100, 30]},
+        {"text": "2", "bbox": [150, 0, 170, 25]},
+        {"text": "3", "bbox": [150, 25, 170, 50]},
+        {"text": "4", "bbox": [150, 50, 170, 75]},
+        {"text": "x", "bbox": [180, 10, 200, 40]},
+        {"text": "0.1", "bbox": [210, 10, 260, 40]},
+    ])
+    assert res["collision_raw"] == "2/3/4"
+
+
+def test_short_column_keeps_geometry_and_review(monkeypatch):
+    monkeypatch.setattr(pg, "_read_column_combo", lambda *a, **k: None)
+    monkeypatch.setattr(pg, "_read_play_mark", lambda *a, **k: None)
+    sec = {"rows": [{"tokens": [
+        {"text": "34", "bbox": [110, 605, 165, 640]},
+        {"text": "x", "bbox": [170, 610, 195, 640]},
+        {"text": "15", "bbox": [200, 600, 255, 640]},
+        {"text": "2", "bbox": [275, 610, 300, 640]},
+        {"text": "x", "bbox": [305, 615, 330, 640]},
+        {"text": "4", "bbox": [335, 605, 390, 640]},
+    ]}]}
+    lines = pg.section_to_lines(sec, "R06", img_path=Path("x.jpg"))
+    l = lines[0]
+    assert l["layout_hint"] == "column_bet", "two-number short column must not flatten to normal_row"
+    assert l["number_groups"] == [["34"], ["15"]]
+    assert l["multiplier_text"] == "2X4"
+    assert l["uncertain"] is True
+    assert l["uncertain_reason"] == "possible_column_bet"
+    assert "possible_column_bet" in l["warnings"]
+    assert "25" not in [n for g in l["number_groups"] for n in g], "never fabricate the missing stacked value"
+
+
+def test_repair_sample012_rules():
+    import repair_sample012_rules as R12
+
+    def line(lid, groups, mult, layout, raw):
+        return {
+            "line_id": lid,
+            "number_groups": groups,
+            "multiplier_text": mult,
+            "multiplier_rules": [],
+            "layout_hint": layout,
+            "raw_text": raw,
+            "human_raw_text": None,
+            "model_raw_text": "MODEL",
+            "review_action": "confirmed",
+            "uncertain": True,
+            "warnings": [],
+            "fallback_candidate": {},
+        }
+
+    r03 = line("R03-L1", [["02", "30", "33"]], "2X23X5", "normal_row", "02 30 33 2X2")
+    r04 = line("R04-L1", [["02", "05", "17"]], "2X2 3X5", "normal_row", "02 05 17 2X2 3X5")
+    r06 = line("R06-L1", [["34", "15"]], "2 x 4", "normal_row", "34 x 15 2 x 4")
+    r08 = line("R08-L1", [["24", "34"], ["19", "39"], ["16", "36"], ["27", "37"]], "2/3X0.1", "column_bet", "24 34 / 19 39 / 16 36 / 27 37 2/3X0.1")
+    draft = {"lines": [r03, r04, r06, r08]}
+    R12.run_repair(draft, apply=True)
+    assert r03["multiplier_text"] == "2X2 3X5"
+    assert r03["raw_text"] == "02 30 33 2X2 3X5"
+    assert r03["correction_source"] == R12.CORRECTION_SOURCE
+    assert r03["fallback_candidate"]["evidence"][-1]["source"] == "human_verified_image_ground_truth"
+    assert r03["model_raw_text"] == "MODEL"
+    assert r03["review_action"] == "confirmed", "repair must not auto-confirm or change action"
+    assert r04["multiplier_text"] == "2X2 3X5"
+    assert r06["layout_hint"] == "column_bet"
+    assert r06["number_groups"] == [["34"], ["15", "25"]]
+    assert r06["multiplier_text"] == "2X4"
+    assert r08["multiplier_text"] == "2/3/4X0.1"
+    # idempotent
+    rep = R12.run_repair(draft, apply=False)
+    assert rep["changed_lines"] == 0
+    # precondition fail-closed
+    bad = line("R03-L1", [["99", "99", "99"]], "2X2", "normal_row", "x")
+    with pytest.raises(AssertionError):
+        R12.run_repair({"lines": [bad, r04, r06, r08]}, apply=True)

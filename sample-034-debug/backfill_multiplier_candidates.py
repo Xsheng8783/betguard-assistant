@@ -34,6 +34,7 @@ from betguard.vision.multiplier_policy import (  # noqa: E402
     COMPLETE,
     classify_multiplier_token,
     partial_tokens as policy_partial_tokens,
+    split_complete_rules,
 )
 
 DATASET = Path(os.environ.get("BETGUARD_DATASET", ""))
@@ -130,7 +131,25 @@ def _best_v3_row(v3_rows: list[tuple[list[str], list[str], list[str]]], ours: li
 
 
 def _current_rules(line: dict) -> list[str]:
-    return [_norm_rule(r) for r in (line.get("multiplier_text") or "").split()]
+    return split_complete_rules(line.get("multiplier_text"))
+
+
+def _rule_parts(rule: str) -> dict | None:
+    m = re.fullmatch(r"([234/]+)X(\d+(?:\.\d+)?)", _norm_rule(rule))
+    if not m:
+        return None
+    return {"cats": set(re.findall(r"[234]", m.group(1))), "value": m.group(2)}
+
+
+def _infer_mode(rule: str, current: list[str]) -> str:
+    """Legacy inference: same value as a current rule -> same slot family
+    (alternative reading); different value -> additional rule."""
+    p = _rule_parts(rule)
+    for r in current:
+        q = _rule_parts(r)
+        if p and q and q["value"] == p["value"]:
+            return "alternative_reading"
+    return "additional_rule"
 
 
 def backfill_line(line: dict, v3_rows: list[tuple[list[str], list[str], list[str]]]) -> dict:
@@ -168,10 +187,25 @@ def backfill_line(line: dict, v3_rows: list[tuple[list[str], list[str], list[str
     }
     fallback = dict(line.get("fallback_candidate") or {})
     existing_cands = list(fallback.get("multiplier_candidates") or [])
+
+    def _norm_cand(c):
+        if isinstance(c, dict):
+            return _norm_rule(str(c.get("rule_text") or ""))
+        return _norm_rule(str(c))
+
     merged_cands = list(existing_cands)
-    for r in uniq_candidates:
-        if r not in merged_cands:
-            merged_cands.append(r)
+    existing_rules = {_norm_cand(c) for c in existing_cands}
+    for i, r in enumerate(uniq_candidates):
+        if r in existing_rules:
+            continue
+        merged_cands.append({
+            "rule_text": r,
+            "candidate_mode": _infer_mode(r, current),
+            "candidate_group_id": f"{line.get('line_id')}-slot-{i}",
+            "source": "v3_prelabel",
+            "evidence": {"matched_numbers": v3_flat, "v3_multiplier_rules": v3_rules},
+        })
+        existing_rules.add(r)
     if uniq_candidates or existing_cands:
         fallback["multiplier_candidates"] = merged_cands
     evidence_list = list(fallback.get("evidence") or [])

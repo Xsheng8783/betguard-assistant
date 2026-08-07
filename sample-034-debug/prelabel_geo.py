@@ -167,6 +167,18 @@ def section_to_lines(
     column_like = len(nums) >= 3 and (
         len(column_seps) >= 2 or has_slash or (len(column_seps) >= 1 and len(play_xs) >= 1)
     )
+    # Short column (only TWO numbers): never silently flatten to a normal row
+    # when an x/× separator sits between the numbers AND a complete right-side
+    # multiplier exists. The vertical column band may hide a stacked number
+    # (e.g. 34 x 15 with 25 below); without a secondary-pass read the result
+    # stays possible_column_bet / needs_review (never fabricate the missing
+    # value).
+    short_column_like = (
+        len(nums) == 2
+        and len(column_seps) >= 1
+        and len(play_xs) >= 1
+        and bool(extract_multiplier(section_text))
+    )
     combo_status: str | None = None
     if column_like and img_path:
         combo = _read_column_combo(
@@ -182,7 +194,7 @@ def section_to_lines(
                 combo_status = "insufficient_evidence"
         else:
             combo_status = "insufficient_evidence"
-    if single_row or len(nums) < 3:
+    if not short_column_like and (single_row or len(nums) < 3):
         return _mark_combo_fallback(
             _normal_lines(rows, region_id, img_path=img_path, crop_box=crop_box),
             combo_status,
@@ -219,6 +231,25 @@ def section_to_lines(
             if m2:
                 raw_rules[-1] = _norm_rule(last.group(0) + "." + m2.group(1))
         rules = _compose_collision_rules(raw_rules, coll)
+        # Geometry collision evidence may contain MORE category digits than
+        # the model's text (e.g. separate stacked 2/3/4 tokens that join
+        # textually as "3 / 4 x 0.1"). Only when there is exactly ONE rule
+        # whose categories are covered by the collision, expand it with the
+        # collision's canonical categories (same value). Never guess digits
+        # absent from the collision evidence.
+        if len(rules) == 1 and coll:
+            coll_digits = set(re.findall(r"[234]", coll))
+            rule_head = rules[0].split("X", 1)[0] if "X" in rules[0] else ""
+            rule_digits = set(re.findall(r"[234]", rule_head))
+            rule_value = rules[0].split("X", 1)[1] if "X" in rules[0] else None
+            # Guard: when the rule's VALUE is itself a category digit present
+            # in the collision extras (e.g. "2X4" + collision "2/4"), the
+            # collision "4" is almost certainly the multiplier value, NOT a
+            # stacked category. Do not fabricate a second category.
+            if rule_value and rule_value in coll_digits - rule_digits:
+                rule_digits = set()
+            if rule_digits and rule_digits <= coll_digits and len(coll_digits) > len(rule_digits) and rule_value:
+                rules = [f"{'/'.join(sorted(coll_digits))}X{rule_value}"]
         partial_evidence: list[str] = []
         if not rules:
             coll_txt = re.sub(r"\s+", "", coll or "")
@@ -291,6 +322,25 @@ def section_to_lines(
             "review_action": "pending",
             "human_added": False,
         }]
+        if short_column_like:
+            uncertain = True
+            uncertain_reason = "possible_column_bet"
+            if "possible_column_bet" not in warnings:
+                warnings.append("possible_column_bet")
+            if "column_combo_needs_review" not in warnings:
+                warnings.append("column_combo_needs_review")
+            fb = fallback_candidate or {}
+            fb = dict(fb)
+            fb["evidence"] = list(fb.get("evidence") or []) + [{
+                "source": "geometry_fallback",
+                "rule": "possible_column_bet_vertical_extension_unverified",
+                "short_column_numbers": [list(v) for v in cols.values()],
+            }]
+            fallback_candidate = fb
+            out[0]["uncertain"] = uncertain
+            out[0]["uncertain_reason"] = uncertain_reason
+            out[0]["warnings"] = warnings
+            out[0]["fallback_candidate"] = fallback_candidate
         return _mark_combo_fallback(out, combo_status)
     # normal row: use model row numbers
     lines = []
@@ -326,6 +376,15 @@ def section_to_lines(
             "review_action": "pending",
             "human_added": False,
         })
+    if short_column_like:
+        for line in lines:
+            line["uncertain"] = True
+            line["uncertain_reason"] = "possible_column_bet"
+            line.setdefault("warnings", [])
+            if "possible_column_bet" not in line["warnings"]:
+                line["warnings"].append("possible_column_bet")
+            if "column_combo_needs_review" not in line["warnings"]:
+                line["warnings"].append("column_combo_needs_review")
     return _mark_combo_fallback(lines, combo_status)
 
 

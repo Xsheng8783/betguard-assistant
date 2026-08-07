@@ -525,6 +525,20 @@ async function adoptCandidateClick(lineId, candidate) {
   renderEditor();
 }
 
+async function removeCandidateClick(lineId, rule) {
+  const line = (state.draft.lines || []).find((l) => l.line_id === lineId);
+  if (!line) return;
+  const res = ROILogic.removeAdoptedCandidate(line, rule);
+  if (!res.ok) {
+    $("#status").textContent = "取消採用失敗：" + (res.error || "未知錯誤");
+    return;
+  }
+  track(lineId, ["multiplier_text", "human_raw_text", "multiplier_rules", "fallback_candidate", "review_action"]);
+  await save(false);
+  $("#status").textContent = "已取消採用該候選（尚未確認）";
+  renderEditor();
+}
+
 function swapOrder(line, delta) {
   const lines = state.draft.lines;
   const same = lines.filter((l) => l.region_id === line.region_id).sort((a, b) => (a.order || 0) - (b.order || 0));
