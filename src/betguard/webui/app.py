@@ -2593,6 +2593,7 @@ window.assistPanelFill = assistPanelFill;
             image_id = data.get("image_id", "")
             aided_image_id = data.get("aided_image_id", "")
             document_mode = data.get("document_mode", "auto")
+            game = data.get("game")
             provider_id = data.get("provider_id", "fake")
             fixture = data.get("fixture", "bet_slip")
             from betguard.vision.service import run_job
@@ -2602,6 +2603,7 @@ window.assistPanelFill = assistPanelFill;
                 fixture,
                 aided_image_id=aided_image_id,
                 document_mode=document_mode,
+                game=game,
             )
             self._send_json(result, status=200 if result["ok"] else 400)
 
