@@ -9,7 +9,11 @@ from __future__ import annotations
 import traceback
 from typing import Any
 
-from betguard.vision.contracts import RecognitionRequest, RecognitionResult
+from betguard.vision.contracts import (
+    RecognitionRequest,
+    RecognitionResult,
+    RecognitionStatus,
+)
 from betguard.vision.errors import ErrorCode
 from betguard.vision.image_intake import (
     ImageMetadata,
@@ -34,6 +38,7 @@ from betguard.vision.providers.qwen_dashscope import (
     QwenDashScopeProvider,
     has_api_key as has_qwen_api_key,
 )
+from betguard.vision.structure_reconstruction import reconstruct_structure
 
 
 # ── Error helpers ────────────────────────────────────────────────────────────
@@ -51,6 +56,16 @@ def _error(code: str, message: str, retryable: bool = False) -> dict[str, Any]:
             "message": message,
             "retryable": retryable,
         },
+    }
+
+
+def _safe_error(code: str, message: str) -> dict[str, Any]:
+    return {
+        **_error(code, message, retryable=False),
+        "human_confirmation_required": True,
+        "auto_apply": False,
+        "auto_confirm": False,
+        "auto_submit": False,
     }
 
 
@@ -158,6 +173,7 @@ def run_job(
     fixture: str = "bet_slip",
     aided_image_id: str = "",
     document_mode: str = "auto",
+    game: str | None = None,
 ) -> dict[str, Any]:
     """Run a recognition job. Returns RecognitionResult dict on success."""
     # Validate image_id exists and is not expired
@@ -183,6 +199,10 @@ def run_job(
     if provider_id not in {"fake", QWEN_PROVIDER_ID}:
         return _error("PROVIDER_NOT_SUPPORTED", f"不支援的 provider: {provider_id}")
 
+    if provider_id == QWEN_PROVIDER_ID:
+        if not isinstance(game, str) or game not in {"539", "六合"}:
+            return _safe_error("INVALID_GAME", "Qwen 辨識必須明確指定 539 或六合彩")
+
     # Build request
     request = RecognitionRequest(
         request_id=f"job-{image_id}",
@@ -200,7 +220,19 @@ def run_job(
     if provider_id == QWEN_PROVIDER_ID:
         try:
             result = QwenDashScopeProvider().recognize(request)
-            return _ok({"result": result.to_dict()})
+            payload: dict[str, Any] = {"result": result.to_dict()}
+            if result.status == RecognitionStatus.COMPLETED:
+                try:
+                    payload["structure_evidence"] = reconstruct_structure(
+                        result,
+                        game=game,
+                    )
+                except Exception:
+                    payload["structure_evidence"] = _failed_structure_evidence(
+                        result,
+                        game=game,
+                    )
+            return _ok(payload)
         except Exception:
             return _error(
                 "VISION_JOB_FAILED",
@@ -226,6 +258,46 @@ def run_job(
             "辨識工作執行失敗",
             retryable=False,
         )
+
+
+def _failed_structure_evidence(
+    result: RecognitionResult,
+    *,
+    game: str,
+) -> list[dict[str, Any]]:
+    """Preserve a successful provider result when the evidence layer fails."""
+    line_ids = sorted(line.line_id for line in result.lines)
+    groups: dict[str, list[str]] = {}
+    for line_id in line_ids:
+        structure_id = line_id.split("-L", 1)[0] if "-L" in line_id else line_id
+        groups.setdefault(structure_id, []).append(line_id)
+
+    evidence: list[dict[str, Any]] = []
+    for structure_id in sorted(groups):
+        member_line_ids = groups[structure_id]
+        primary_line_id = member_line_ids[0]
+        for line_id in member_line_ids:
+            evidence.append({
+                "line_id": line_id,
+                "structure_id": structure_id,
+                "primary_line_id": primary_line_id,
+                "member_line_ids": member_line_ids,
+                "line_role": "primary" if line_id == primary_line_id else "continuation",
+                "source": "deterministic_geometry_v1",
+                "game": game,
+                "status": "incomplete",
+                "warnings": ["structure_reconstruction_failed"],
+                "evidence": {
+                    "tokens": [],
+                    "bbox_debug": {},
+                    "rules_used": [],
+                },
+                "human_confirmation_required": True,
+                "auto_apply": False,
+                "auto_confirm": False,
+                "auto_submit": False,
+            })
+    return evidence
 
 
 # ── Error message mapping ────────────────────────────────────────────────────

@@ -352,9 +352,10 @@ def test_service_lists_qwen_safety_and_calls_it_only_when_explicit(
     uploaded = service.upload_image(image.read_bytes(), "image/png", image.name)
     image_id = uploaded["image"]["image_id"]
     try:
-        result = service.run_job(image_id, PROVIDER_ID)
+        result = service.run_job(image_id, PROVIDER_ID, game="539")
         assert result["ok"] is True
         assert result["result"]["provider"]["id"] == PROVIDER_ID
+        assert result["structure_evidence"][0]["game"] == "539"
         assert calls == 1
     finally:
         service.delete_image_api(image_id)

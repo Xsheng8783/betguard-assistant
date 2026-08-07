@@ -110,6 +110,22 @@ def _post_manual_reparse(port: int, payload: dict) -> tuple[int, dict]:
         connection.close()
 
 
+def _post_vision_job(port: int, payload: dict) -> tuple[int, dict]:
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        connection.request(
+            "POST",
+            "/api/vision/v1/jobs",
+            body=body,
+            headers={"Content-Type": "application/json"},
+        )
+        response = connection.getresponse()
+        return response.status, json.loads(response.read().decode("utf-8"))
+    finally:
+        connection.close()
+
+
 def _qwen_line(line_id: str, text: str) -> dict:
     return {
         "line_id": line_id,
@@ -174,7 +190,45 @@ def _completed_qwen_result(line_text: str = "99") -> dict:
     }
 
 
-def _mount_qwen_ui(page, *, job_result: dict, manual_result: dict | None = None):
+def _structure_evidence(
+    line_id: str,
+    number: str,
+    *,
+    status: str = "consistent",
+) -> dict:
+    return {
+        "line_id": line_id,
+        "source": "deterministic_geometry_v1",
+        "model_candidate": {
+            "numbers": [[number]],
+            "multiplier": None,
+            "layout_hint": "normal_row",
+            "shared_multiplier": None,
+        },
+        "reconstructed_candidate": {
+            "number_groups": [[number]],
+            "multiplier_rules": [],
+            "layout": "normal_row",
+            "collision": None,
+            "shared_multiplier": None,
+        },
+        "status": status,
+        "warnings": [],
+        "evidence": {"tokens": [], "bbox_debug": {}, "rules_used": []},
+        "human_confirmation_required": True,
+        "auto_apply": False,
+        "auto_confirm": False,
+        "auto_submit": False,
+    }
+
+
+def _mount_qwen_ui(
+    page,
+    *,
+    job_result: dict,
+    manual_result: dict | None = None,
+    structure_evidence: list[dict] | None = None,
+):
     calls: dict[str, list] = {"jobs": [], "manual": [], "urls": [], "errors": []}
     png = _png_bytes()
 
@@ -226,10 +280,13 @@ def _mount_qwen_ui(page, *, job_result: dict, manual_result: dict | None = None)
             return
         if request.url.endswith("/api/vision/v1/jobs"):
             calls["jobs"].append(request.post_data_json)
+            response_body = {"ok": True, "result": job_result}
+            if structure_evidence is not None:
+                response_body["structure_evidence"] = structure_evidence
             route.fulfill(
                 status=200,
                 content_type="application/json",
-                body=json.dumps({"ok": True, "result": job_result}),
+                body=json.dumps(response_body),
             )
             return
         if request.url.endswith("/manual-reparse"):
@@ -283,6 +340,8 @@ def test_qwen_job_posts_explicit_provider_id() -> None:
     )
     assert 'fetch("/api/vision/v1/jobs"' in qwen_job
     assert 'provider_id: "qwen-dashscope"' in qwen_job
+    assert "game: selectedGame" in qwen_job
+    assert 'getElementById("vision-qwen-game")' in qwen_job
     assert "openai-vision-paid" not in qwen_job
     assert "aided_image_id" not in qwen_job
 
@@ -321,8 +380,39 @@ def test_qwen_evidence_keeps_required_provenance_and_structure() -> None:
         "multiplier=",
         "layout_hint=",
         "shared_multiplier=",
+        "AI 結構",
+        "規則重建",
+        "number_groups=",
+        "multiplier_rules=",
+        "collision=",
+        "比較狀態",
+        "warnings",
+        "evidence",
+        "human_confirmation_required=true",
+        "auto_apply=false",
     ):
         assert field in renderer
+
+
+def test_qwen_reconstruction_is_read_only_and_keyed_only_by_line_id() -> None:
+    html = _html()
+    mapper = _between(
+        html,
+        "function _qwenReconstructionByLineId(structureEvidence)",
+        "function _qwenComparisonLabel",
+    )
+    renderer = _between(
+        html,
+        "function _renderQwenEvidence(result)",
+        "window.qwenCopyLine",
+    )
+    assert "reconstructionByLineId[lineId] = item" in mapper
+    assert "reconstructionByLineId[lineId]" in renderer
+    assert "line.line_id" in renderer
+    assert "auto_apply=false" in renderer
+    assert "applyReconstruction" not in html
+    assert "reconstructionRows[i]" not in html
+    assert "structureEvidence[i].reconstructed_candidate" not in html
 
 
 def test_qwen_structure_uses_line_id_without_positional_fallback() -> None:
@@ -383,6 +473,8 @@ def test_reparse_preview_requires_explicit_button_and_selected_game() -> None:
     assert "重新解析預覽" in html
     assert '<option value="539">539</option>' in html
     assert '<option value="六合">六合彩</option>' in html
+    assert html.count('id="vision-qwen-game"') == 1
+    assert 'id="qwen-review-game"' not in html
     assert "document_mode 不代表遊戲類型" in html
     qwen_job_and_render = _between(
         html,
@@ -400,6 +492,45 @@ def test_reparse_preview_requires_explicit_button_and_selected_game() -> None:
     assert "register_candidate: false" in manual
     assert 'game: "auto"' not in manual
     assert "parser／validator" in manual
+
+
+def test_vision_job_handler_passes_game_separately_from_document_mode(monkeypatch) -> None:
+    import betguard.vision.service as vision_service
+
+    captured: dict = {}
+
+    def fake_run_job(
+        image_id,
+        provider_id,
+        fixture,
+        *,
+        aided_image_id,
+        document_mode,
+        game,
+    ):
+        captured.update({
+            "image_id": image_id,
+            "provider_id": provider_id,
+            "fixture": fixture,
+            "aided_image_id": aided_image_id,
+            "document_mode": document_mode,
+            "game": game,
+        })
+        return {"ok": True, "result": {"status": "completed"}}
+
+    monkeypatch.setattr(vision_service, "run_job", fake_run_job)
+    with _running_workbench() as port:
+        status, body = _post_vision_job(port, {
+            "image_id": "image-qwen",
+            "provider_id": "qwen-dashscope",
+            "fixture": "bet_slip",
+            "document_mode": "column",
+            "game": "六合",
+        })
+    assert status == 200
+    assert body["ok"] is True
+    assert captured["game"] == "六合"
+    assert captured["document_mode"] == "column"
 
 
 def test_reparse_preview_renders_parser_fields_and_stays_non_candidate() -> None:
@@ -628,13 +759,14 @@ def test_browser_qwen_evidence_requires_explicit_actions(page) -> None:
     assert calls["manual"] == []
     assert page.get_attribute("#vision-preview-img", "src") == "/api/vision/v1/images/image-qwen"
 
+    page.select_option("#vision-qwen-game", "六合")
     page.click("#vision-qwen-run-btn")
     page.wait_for_selector("#qwen-evidence-status")
     assert page.text_content("#qwen-evidence-status") == "AI 辨識完成，待人工核對"
     assert page.text_content("#qwen-raw-text") == "99"
     assert "needs_review" in page.text_content("#vision-results-body")
     assert calls["jobs"] == [
-        {"image_id": "image-qwen", "provider_id": "qwen-dashscope"}
+        {"image_id": "image-qwen", "provider_id": "qwen-dashscope", "game": "六合"}
     ]
     assert calls["manual"] == []
 
@@ -644,7 +776,6 @@ def test_browser_qwen_evidence_requires_explicit_actions(page) -> None:
     assert calls["manual"] == []
     assert not any("webfill" in url or "assist-fill" in url for url in calls["urls"])
 
-    page.select_option("#qwen-review-game", "六合")
     page.click("#qwen-manual-reparse-btn")
     page.wait_for_function("document.getElementById('qwen-manual-reparse-btn').disabled === false")
     assert calls["manual"] == [{
@@ -665,6 +796,19 @@ def test_browser_qwen_evidence_requires_explicit_actions(page) -> None:
         "auto_submit=false",
     ):
         assert expected in preview
+
+
+def test_browser_qwen_job_sends_explicit_539_from_visible_selector(page) -> None:
+    calls = _mount_qwen_ui(page, job_result=_completed_qwen_result("11"))
+    assert page.is_visible("#vision-qwen-game")
+    assert page.input_value("#vision-qwen-game") == "539"
+    page.click("#vision-qwen-run-btn")
+    page.wait_for_selector("#qwen-evidence-status")
+    assert calls["jobs"] == [{
+        "image_id": "image-qwen",
+        "provider_id": "qwen-dashscope",
+        "game": "539",
+    }]
 
 
 def test_browser_structure_evidence_follows_line_id_when_lines_reordered(page) -> None:
@@ -695,6 +839,119 @@ def test_browser_structure_evidence_follows_line_id_when_lines_reordered(page) -
     assert 'numbers=[["11"]]' in row_1
     assert "multiplier-11" in row_1
     assert "layout-11" in row_1
+
+
+def test_browser_reconstruction_follows_line_id_when_lines_reordered(page) -> None:
+    result = _completed_qwen_result("11")
+    result["raw_text"] = "22\n11"
+    result["lines"] = [
+        _qwen_line("S01-L02", "22"),
+        _qwen_line("S01-L01", "11"),
+    ]
+    result["preprocessing"]["qwen_response"]["sections"][0]["rows"] = [
+        _qwen_row("11"),
+        _qwen_row("22"),
+    ]
+    structures = [
+        _structure_evidence("S01-L01", "11"),
+        _structure_evidence("S01-L02", "22", status="divergent"),
+    ]
+
+    _mount_qwen_ui(page, job_result=result, structure_evidence=structures)
+    page.click("#vision-qwen-run-btn")
+    page.wait_for_selector("#qwen-evidence-status")
+
+    row_2 = page.text_content(
+        '.qwen-evidence-line[data-line-id="S01-L02"] .qwen-reconstructed-structure'
+    )
+    status_2 = page.text_content(
+        '.qwen-evidence-line[data-line-id="S01-L02"] .qwen-structure-comparison'
+    )
+    row_1 = page.text_content(
+        '.qwen-evidence-line[data-line-id="S01-L01"] .qwen-reconstructed-structure'
+    )
+    assert 'number_groups=[["22"]]' in row_2
+    assert "結構分歧（divergent）" in status_2
+    assert "needs_review" in status_2
+    assert 'number_groups=[["11"]]' in row_1
+
+
+def test_browser_multi_row_section_renders_one_reconstructed_structure(page) -> None:
+    result = _completed_qwen_result("24")
+    result["raw_text"] = "24 03 17 20\n34 23 27 30\n37 35"
+    result["lines"] = [
+        _qwen_line("S01-L01", "24 03 17 20"),
+        _qwen_line("S01-L02", "34 23 27 30"),
+        _qwen_line("S01-L03", "37 35"),
+    ]
+    result["preprocessing"]["qwen_response"]["sections"][0]["rows"] = [
+        _qwen_row("24 03 17 20"),
+        _qwen_row("34 23 27 30"),
+        _qwen_row("37 35"),
+    ]
+    primary = _structure_evidence("S01-L01", "24")
+    primary.update({
+        "structure_id": "S01",
+        "primary_line_id": "S01-L01",
+        "member_line_ids": ["S01-L01", "S01-L02", "S01-L03"],
+        "line_role": "primary",
+        "game": "539",
+    })
+    primary["reconstructed_candidate"]["number_groups"] = [
+        ["24", "34"], ["03", "23"], ["17", "27", "37"], ["20", "30", "35"],
+    ]
+    structures = [primary]
+    for line_id in ("S01-L02", "S01-L03"):
+        structures.append({
+            "line_id": line_id,
+            "structure_id": "S01",
+            "primary_line_id": "S01-L01",
+            "member_line_ids": ["S01-L01", "S01-L02", "S01-L03"],
+            "line_role": "continuation",
+            "game": "539",
+            "status": "incomplete",
+            "warnings": ["continuation_of:S01-L01"],
+            "evidence": {},
+            "human_confirmation_required": True,
+            "auto_apply": False,
+            "auto_confirm": False,
+            "auto_submit": False,
+        })
+
+    _mount_qwen_ui(page, job_result=result, structure_evidence=structures)
+    page.click("#vision-qwen-run-btn")
+    page.wait_for_selector("#qwen-evidence-status")
+
+    assert page.locator(".qwen-reconstructed-structure").count() == 1
+    assert page.locator(".qwen-reconstruction-continuation").count() == 2
+    rendered = page.text_content(".qwen-reconstructed-structure")
+    assert "primary_line_id=S01-L01" in rendered
+    assert 'member_line_ids=["S01-L01","S01-L02","S01-L03"]' in rendered
+    assert 'number_groups=[["24","34"],["03","23"],["17","27","37"],["20","30","35"]]' in rendered
+    assert all(
+        "不建立獨立投注結構" in text
+        for text in page.locator(".qwen-reconstruction-continuation").all_text_contents()
+    )
+
+
+def test_browser_missing_reconstruction_does_not_borrow_another_line(page) -> None:
+    result = _completed_qwen_result("11")
+    result["lines"] = [
+        _qwen_line("S01-L01", "11"),
+        _qwen_line("S01-L03", "33"),
+    ]
+    structures = [_structure_evidence("S01-L01", "11")]
+
+    _mount_qwen_ui(page, job_result=result, structure_evidence=structures)
+    page.click("#vision-qwen-run-btn")
+    page.wait_for_selector("#qwen-evidence-status")
+
+    missing = page.text_content(
+        '.qwen-evidence-line[data-line-id="S01-L03"] .qwen-reconstructed-structure'
+    )
+    assert "structure evidence unavailable" in missing
+    assert "證據不足（incomplete）" in missing
+    assert "11" not in missing
 
 
 def test_browser_missing_structure_does_not_borrow_next_row(page) -> None:

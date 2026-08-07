@@ -53,6 +53,13 @@ def render_vision_ui_section() -> str:
   </div>
 
   <!-- Run job button -->
+  <label id="vision-qwen-game-label" style="display:block;font-size:13px;color:#334155;margin-bottom:8px">
+    Qwen 遊戲類型（同時用於規則重建與重新解析預覽）：
+    <select id="vision-qwen-game" style="margin-left:6px;padding:5px 8px;border:1px solid #cbd5e1;border-radius:4px">
+      <option value="539">539</option>
+      <option value="六合">六合彩</option>
+    </select>
+  </label>
   <button id="vision-run-btn" class="btn-primary" style="display:none;margin-bottom:8px" onclick="visionRunJob()">開始 AI 辨識</button>
   <button id="vision-qwen-run-btn" class="btn-primary" style="display:none;margin-bottom:8px;background:#7c3aed" onclick="visionRunQwenJob()">Qwen 看圖</button>
 
@@ -72,6 +79,7 @@ def render_vision_ui_section() -> str:
   var visionQualityPassed = false;
   var qwenConfigured = false;
   var qwenEvidenceResult = null;
+  var qwenStructureEvidence = [];
 
   fetch("/api/vision/v1/providers").then(function(r) { return r.json(); }).then(function(data) {
     var providers = (data && data.providers) || [];
@@ -326,6 +334,12 @@ def render_vision_ui_section() -> str:
   window.visionRunQwenJob = function() {
     if (!uploadedImageId) return;
     var btn = document.getElementById("vision-qwen-run-btn");
+    var gameSelect = document.getElementById("vision-qwen-game");
+    var selectedGame = gameSelect ? gameSelect.value : "";
+    if (selectedGame !== "539" && selectedGame !== "六合") {
+      _renderQwenFailure("請先明確選擇 539 或六合彩");
+      return;
+    }
     btn.disabled = true;
     btn.textContent = "Qwen 辨識中...";
     fetch("/api/vision/v1/jobs", {
@@ -333,7 +347,8 @@ def render_vision_ui_section() -> str:
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         image_id: uploadedImageId,
-        provider_id: "qwen-dashscope"
+        provider_id: "qwen-dashscope",
+        game: selectedGame
       })
     }).then(function(r) { return r.json(); })
     .then(function(data) {
@@ -343,6 +358,8 @@ def render_vision_ui_section() -> str:
         _renderQwenFailure((data.error && data.error.message) || "Qwen 回應無效");
         return;
       }
+      qwenStructureEvidence = Array.isArray(data.structure_evidence)
+        ? data.structure_evidence : [];
       _renderQwenEvidence(data.result);
     }).catch(function() {
       btn.disabled = !qwenConfigured;
@@ -353,6 +370,7 @@ def render_vision_ui_section() -> str:
 
   function _renderQwenFailure(message) {
     qwenEvidenceResult = null;
+    qwenStructureEvidence = [];
     document.getElementById("vision-results-body").innerHTML =
       '<div id="qwen-evidence-status" style="color:#b91c1c;font-weight:700">Qwen 辨識失敗</div>' +
       '<div style="color:#ef4444;margin-top:4px">' + esc(message || "invalid response") + '</div>' +
@@ -379,6 +397,29 @@ def render_vision_ui_section() -> str:
     return evidenceByLineId;
   }
 
+  function _qwenReconstructionByLineId(structureEvidence) {
+    var reconstructionByLineId = Object.create(null);
+    var items = Array.isArray(structureEvidence) ? structureEvidence : [];
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i] || {};
+      var lineId = String(item.line_id || "");
+      if (lineId && !Object.prototype.hasOwnProperty.call(reconstructionByLineId, lineId)) {
+        reconstructionByLineId[lineId] = item;
+      }
+    }
+    return reconstructionByLineId;
+  }
+
+  function _qwenComparisonLabel(status) {
+    var labels = {
+      consistent: "結構一致",
+      divergent: "結構分歧",
+      incomplete: "證據不足",
+      unsupported: "不支援"
+    };
+    return labels[status] || "證據不足";
+  }
+
   // RecognitionStatus.COMPLETED means only that the provider job finished.
   // Every Qwen result remains review-only evidence until the human explicitly
   // presses the manual reparse button below.
@@ -389,6 +430,7 @@ def render_vision_ui_section() -> str:
     var qwenResponse = preprocessing.qwen_response || {};
     var lines = Array.isArray(result.lines) ? result.lines : [];
     var evidenceByLineId = _qwenEvidenceByLineId(qwenResponse);
+    var reconstructionByLineId = _qwenReconstructionByLineId(qwenStructureEvidence);
     var sections = Array.isArray(qwenResponse.sections) ? qwenResponse.sections : [];
 
     if (result.status !== "completed" || provider.id !== "qwen-dashscope" ||
@@ -424,6 +466,12 @@ def render_vision_ui_section() -> str:
         Object.prototype.hasOwnProperty.call(evidenceByLineId, lineId);
       var rowEvidence = hasStructureEvidence ? evidenceByLineId[lineId] : null;
       var row = rowEvidence ? rowEvidence.row : null;
+      var hasReconstruction = !!lineId &&
+        Object.prototype.hasOwnProperty.call(reconstructionByLineId, lineId);
+      var reconstruction = hasReconstruction ? reconstructionByLineId[lineId] : null;
+      var isContinuation = !!(reconstruction && reconstruction.line_role === "continuation");
+      var reconstructed = reconstruction && reconstruction.reconstructed_candidate
+        ? reconstruction.reconstructed_candidate : {};
       var tokens = Array.isArray(line.tokens) ? line.tokens : [];
       html += '<div class="qwen-evidence-line" data-line-index="' + i + '" data-line-id="' + esc(lineId) + '" style="padding:9px 0;border-bottom:1px solid #cbd5e1">';
       html += '<div><strong>Line.text：</strong><span class="qwen-model-line-text">' + esc(line.text || '') + '</span></div>';
@@ -433,7 +481,7 @@ def render_vision_ui_section() -> str:
         '<button type="button" class="qwen-copy-line" onclick="qwenCopyLine(' + i + ')">複製</button> ' +
         '<button type="button" class="qwen-stage-line" onclick="qwenStageLine(' + i + ')">帶入修正欄</button></div>';
       if (hasStructureEvidence) {
-        html += '<div class="qwen-row-structure" style="font-size:11px;color:#475569;margin-top:5px">' +
+        html += '<div class="qwen-row-structure" style="font-size:11px;color:#475569;margin-top:5px"><strong>AI 結構：</strong>' +
           'numbers=' + esc(JSON.stringify(row.numbers == null ? null : row.numbers)) +
           '｜multiplier=' + esc(JSON.stringify(row.multiplier == null ? null : row.multiplier)) +
           '｜layout_hint=' + esc(row.layout_hint == null ? 'null' : row.layout_hint) +
@@ -442,6 +490,36 @@ def render_vision_ui_section() -> str:
       } else {
         html += '<div class="qwen-row-structure qwen-structure-unavailable" style="font-size:11px;color:#b91c1c;margin-top:5px">' +
           'structure evidence unavailable｜needs_review</div>';
+      }
+      if (hasReconstruction && !isContinuation) {
+        html += '<div class="qwen-reconstructed-structure" style="font-size:11px;color:#475569;margin-top:5px"><strong>規則重建：</strong>' +
+          'structure_id=' + esc(reconstruction.structure_id || '-') +
+          '｜primary_line_id=' + esc(reconstruction.primary_line_id || lineId) +
+          '｜member_line_ids=' + esc(JSON.stringify(reconstruction.member_line_ids || [lineId])) +
+          '｜game=' + esc(reconstruction.game || '-') +
+          '｜' +
+          'number_groups=' + esc(JSON.stringify(reconstructed.number_groups == null ? [] : reconstructed.number_groups)) +
+          '｜multiplier_rules=' + esc(JSON.stringify(reconstructed.multiplier_rules == null ? [] : reconstructed.multiplier_rules)) +
+          '｜layout=' + esc(reconstructed.layout == null ? 'unknown' : reconstructed.layout) +
+          '｜collision=' + esc(JSON.stringify(reconstructed.collision == null ? null : reconstructed.collision)) +
+          '｜shared_multiplier=' + esc(JSON.stringify(reconstructed.shared_multiplier == null ? null : reconstructed.shared_multiplier)) +
+          '</div>';
+        html += '<div class="qwen-structure-comparison" data-structure-status="' + esc(reconstruction.status || 'incomplete') + '" style="font-size:11px;color:#9a3412;margin-top:4px"><strong>比較狀態：</strong>' +
+          esc(_qwenComparisonLabel(reconstruction.status)) + '（' + esc(reconstruction.status || 'incomplete') + '）｜needs_review' +
+          '｜human_confirmation_required=true｜auto_apply=false｜auto_confirm=false｜auto_submit=false</div>';
+        html += '<div class="qwen-reconstruction-warnings" style="font-size:11px;color:#64748b;margin-top:4px"><strong>warnings：</strong>' +
+          esc(JSON.stringify(Array.isArray(reconstruction.warnings) ? reconstruction.warnings : [])) + '</div>';
+        html += '<details class="qwen-reconstruction-evidence" style="font-size:11px;color:#64748b;margin-top:4px"><summary>evidence</summary><pre style="white-space:pre-wrap">' +
+          esc(JSON.stringify(reconstruction.evidence || {}, null, 2)) + '</pre></details>';
+      } else if (isContinuation) {
+        html += '<div class="qwen-reconstruction-continuation" style="font-size:11px;color:#64748b;margin-top:5px">' +
+          '此列是 structure ' + esc(reconstruction.structure_id || '-') + ' 的 continuation；' +
+          'primary_line_id=' + esc(reconstruction.primary_line_id || '-') +
+          '｜不建立獨立投注結構｜needs_review</div>';
+      } else {
+        html += '<div class="qwen-reconstructed-structure qwen-reconstruction-unavailable" style="font-size:11px;color:#b91c1c;margin-top:5px">' +
+          '<strong>規則重建：</strong>structure evidence unavailable｜證據不足（incomplete）｜needs_review' +
+          '｜human_confirmation_required=true｜auto_apply=false｜auto_confirm=false｜auto_submit=false</div>';
       }
       html += '<div class="qwen-token-bboxes" style="font-size:11px;color:#64748b;margin-top:4px"><strong>token bbox：</strong>';
       if (!tokens.length) {
@@ -457,12 +535,7 @@ def render_vision_ui_section() -> str:
     html += '<div id="qwen-correction-panel" style="margin-top:10px;padding:8px;background:#f8fafc;border:1px solid #cbd5e1;border-radius:4px">' +
       '<label for="qwen-review-editable" style="display:block;font-weight:700;margin-bottom:4px">前端修正暫存（可手動修改）</label>' +
       '<textarea id="qwen-review-editable" style="width:100%;min-height:70px;font-family:monospace;padding:6px" placeholder="先按某行的「帶入修正欄」，再人工修改"></textarea>' +
-      '<label for="qwen-review-game" style="display:block;font-weight:700;margin-top:7px;margin-bottom:4px">遊戲類型（必須明確選擇）</label>' +
-      '<select id="qwen-review-game" style="padding:5px;border:1px solid #cbd5e1;border-radius:4px">' +
-        '<option value="539">539</option>' +
-        '<option value="六合">六合彩</option>' +
-      '</select>' +
-      '<div style="font-size:11px;color:#64748b;margin-top:3px">遊戲類型不使用 auto；document_mode 不代表遊戲類型。</div>' +
+      '<div style="font-size:11px;color:#64748b;margin-top:3px">重新解析預覽沿用上方同一個遊戲類型；不使用 auto，document_mode 不代表遊戲類型。</div>' +
       '<button type="button" id="qwen-manual-reparse-btn" class="btn-primary" style="margin-top:6px" onclick="qwenPreviewReparse()">重新解析預覽</button>' +
       '<div id="qwen-manual-reparse-result" style="font-size:12px;margin-top:6px;color:#64748b">尚未要求解析預覽；未呼叫 /manual-reparse。</div>' +
       '</div>';
@@ -490,7 +563,7 @@ def render_vision_ui_section() -> str:
 
   window.qwenPreviewReparse = function() {
     var target = document.getElementById("qwen-review-editable");
-    var gameSelect = document.getElementById("qwen-review-game");
+    var gameSelect = document.getElementById("vision-qwen-game");
     var output = document.getElementById("qwen-manual-reparse-result");
     var btn = document.getElementById("qwen-manual-reparse-btn");
     var text = target ? target.value.trim() : "";
