@@ -114,17 +114,15 @@
     return c && typeof c === "object" ? c : {};
   }
 
-  // Legacy (no metadata) mode inference: same value with current rules means
-  // the same category slot (superset or disjoint categories) -> alternative;
-  // different value -> additional rule.
+  // Legacy (no metadata) mode inference. Without physical-slot evidence we
+  // must NEVER auto-declare mutual exclusion: same value -> unknown (needs
+  // review), different value -> additional rule.
   function inferMode(rule, currentRules) {
     const p = ruleParts(rule);
-    if (!p) return "alternative_reading";
+    if (!p) return "unknown_requires_review";
     for (const r of currentRules) {
       const q = ruleParts(r);
-      if (q && q.value === p.value) {
-        return "alternative_reading"; // same value -> same slot family
-      }
+      if (q && q.value === p.value) return "unknown_requires_review";
     }
     return "additional_rule";
   }
@@ -143,11 +141,13 @@
       const meta = candidateMeta(c);
       if (!rule || seen.has(rule)) continue;
       seen.add(rule);
+      const evidence = meta.evidence || {};
       entries.push({
         rule,
         mode: meta.candidate_mode || inferMode(rule, currentRules),
         group: meta.candidate_group_id || null,
         source: meta.source || null,
+        composable: meta.composable === true || evidence.composable === true,
         merged: false,
       });
     }
@@ -158,23 +158,31 @@
     if (adoptedSingle && !adoptedList.includes(adoptedSingle)) adoptedList.push(adoptedSingle);
     const adopted = new Set(adoptedList);
 
+    // Derived merged candidate: ONLY same candidate_group_id + composable
+    // evidence + same value. Different groups never merge, even on same value.
     let merged = null;
+    let mergedGroup = null;
     for (const e of entries) {
+      if (!(e.mode === "alternative_reading" && e.group && e.composable)) continue;
       const cp = ruleParts(e.rule);
       if (!cp) continue;
-      const cats = new Set(cp.cats);
-      for (const r of currentRules) {
-        const p = ruleParts(r);
-        if (p && p.value === cp.value) p.cats.forEach((c) => cats.add(c));
-      }
+      const peers = entries.filter((x) =>
+        x.group === e.group &&
+        x.mode === "alternative_reading" &&
+        x.composable &&
+        (() => { const q = ruleParts(x.rule); return q && q.value === cp.value; })()
+      );
+      const cats = new Set();
+      peers.forEach((x) => { const q = ruleParts(x.rule); (q ? q.cats : []).forEach((c) => cats.add(c)); });
       if (cats.size >= 2) {
         merged = Array.from(cats).sort().join("/") + "X" + cp.value;
+        mergedGroup = e.group;
         break;
       }
     }
     const display = entries.slice();
     if (merged && !entries.some((e) => e.rule === merged)) {
-      display.push({ rule: merged, mode: "alternative_reading", group: null, source: "derived", merged: true });
+      display.push({ rule: merged, mode: "alternative_reading", group: mergedGroup, source: "derived", merged: true, composable: true });
     }
     const hint = merged ? `可能為 ${merged}，請依圖片確認` : null;
     return {
@@ -199,7 +207,9 @@
       const adopted = info.adopted.has(e.rule);
       const modeTag = e.mode === "alternative_reading"
         ? '<span class="mult-mode">替代讀法</span>'
-        : '<span class="mult-mode">追加規則</span>';
+        : e.mode === "unknown_requires_review"
+          ? '<span class="mult-mode">未標記（需人工確認）</span>'
+          : '<span class="mult-mode">追加規則</span>';
       const action = adopted
         ? `<button type="button" class="mult-remove" onclick="removeCandidateClick('${lineId}','${escHtml(e.rule)}')">取消採用</button>`
         : `<button type="button" class="mult-adopt" onclick="adoptCandidateClick('${lineId}','${escHtml(e.rule)}')">採用此候選</button>`;
@@ -273,14 +283,34 @@
     const current = splitCompleteRules(line.multiplier_text);
     const before = current.slice();
     let after;
+    let replacedRules = [];
     if (mode === "alternative_reading") {
-      after = [value]; // mutually exclusive reading
+      // Remove ONLY the candidate-system-managed alternatives of the SAME
+      // physical slot (candidate_group_id); keep other groups' adopted rules
+      // and the original structured/human rules.
+      const entries = Array.isArray((line.fallback_candidate || {}).adopted_entries)
+        ? line.fallback_candidate.adopted_entries
+        : [];
+      replacedRules = entries
+        .filter((e) => e.group && group && e.group === group && !e.removed_at && normalizeCandidate(e.rule_text || "") !== value)
+        .map((e) => normalizeCandidate(e.rule_text || ""));
+      after = current.filter((r) => !replacedRules.includes(r));
+      if (!after.includes(value)) after.push(value);
+      const nowIso = new Date().toISOString();
+      entries.forEach((e) => {
+        if (replacedRules.includes(normalizeCandidate(e.rule_text || "")) && !e.removed_at) e.removed_at = nowIso;
+      });
+      line.fallback_candidate = Object.assign({}, line.fallback_candidate || {}, { adopted_entries: entries });
+      const am = Array.isArray(line.fallback_candidate.adopted_multipliers)
+        ? line.fallback_candidate.adopted_multipliers.map(normalizeCandidate).filter(Boolean)
+        : [];
+      line.fallback_candidate.adopted_multipliers = am.filter((r) => !replacedRules.includes(r));
     } else {
       after = current.includes(value) ? current.slice() : current.concat([value]);
     }
     const addedRules = after.filter((r) => !before.includes(r));
     const removedRules = before.filter((r) => !after.includes(r));
-    _applyAdoption(line, after.join(" "), value, { mode, group, added_rules: addedRules, removed_rules: removedRules });
+    _applyAdoption(line, after.join(" "), value, { mode, group, added_rules: addedRules, removed_rules: removedRules, replaced_rules: replacedRules });
     return { ok: true, value, mode, line };
   }
 

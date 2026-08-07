@@ -142,13 +142,13 @@ def _rule_parts(rule: str) -> dict | None:
 
 
 def _infer_mode(rule: str, current: list[str]) -> str:
-    """Legacy inference: same value as a current rule -> same slot family
-    (alternative reading); different value -> additional rule."""
+    """Legacy inference WITHOUT physical-slot evidence: same value -> unknown
+    (needs review, never auto-exclusive); different value -> additional."""
     p = _rule_parts(rule)
     for r in current:
         q = _rule_parts(r)
         if p and q and q["value"] == p["value"]:
-            return "alternative_reading"
+            return "unknown_requires_review"
     return "additional_rule"
 
 
@@ -195,14 +195,15 @@ def backfill_line(line: dict, v3_rows: list[tuple[list[str], list[str], list[str
 
     merged_cands = list(existing_cands)
     existing_rules = {_norm_cand(c) for c in existing_cands}
-    for i, r in enumerate(uniq_candidates):
+    for r in uniq_candidates:
         if r in existing_rules:
             continue
         merged_cands.append({
             "rule_text": r,
             "candidate_mode": _infer_mode(r, current),
-            "candidate_group_id": f"{line.get('line_id')}-slot-{i}",
+            "candidate_group_id": None,  # no bbox/ROI slot evidence
             "source": "v3_prelabel",
+            "confidence": "legacy/inferred",
             "evidence": {"matched_numbers": v3_flat, "v3_multiplier_rules": v3_rules},
         })
         existing_rules.add(r)

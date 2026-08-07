@@ -1058,8 +1058,9 @@ def test_backfill_divergent_adds_candidates_without_touching_protected():
     assert stats["candidates"] == ["3X1"]
     cand = line["fallback_candidate"]["multiplier_candidates"]
     assert cand[0]["rule_text"] == "3X1"
-    assert cand[0]["candidate_mode"] == "alternative_reading"
-    assert cand[0]["candidate_group_id"] == "R02-L1-slot-0"
+    assert cand[0]["candidate_mode"] == "unknown_requires_review"
+    assert cand[0]["candidate_group_id"] is None
+    assert cand[0]["confidence"] == "legacy/inferred"
     assert "cross_pass_multiplier_divergent" in line["warnings"]
     assert "possible_stacked_category_digit" in line["warnings"]
     assert line["uncertain"] is False  # protected: never auto-set
@@ -1088,7 +1089,7 @@ def test_backfill_idempotent():
     assert first["candidates"] == ["3/4X1"]
     cand = line["fallback_candidate"]["multiplier_candidates"]
     assert cand[0]["rule_text"] == "3/4X1"
-    assert cand[0]["candidate_mode"] == "alternative_reading"
+    assert cand[0]["candidate_mode"] == "unknown_requires_review"
     assert len(cand) == 1  # idempotent: no duplicate candidate entry
     assert len(line["fallback_candidate"]["evidence"]) == 1
     assert line["warnings"].count("cross_pass_multiplier_divergent") == 1

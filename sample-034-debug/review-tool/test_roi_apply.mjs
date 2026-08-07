@@ -154,17 +154,17 @@ function ok(name) {
   const info = R.multiplierCandidatesInfo(line);
   assert.equal(info.hasCandidates, true);
   assert.deepEqual(info.candidates, ["3X1"]);
-  assert.equal(info.merged, "2/3X1");
-  assert.deepEqual(info.displayCandidates, ["3X1", "2/3X1"], "R02: all candidates listed, merged included");
-  assert.equal(info.hint, "可能為 2/3X1，請依圖片確認");
+  assert.equal(info.entries[0].mode, "unknown_requires_review", "legacy same-value candidate must not auto-exclude");
+  assert.equal(info.merged, null, "no slot/composable evidence -> no derived merge");
+  assert.deepEqual(info.displayCandidates, ["3X1"]);
+  assert.equal(info.hint, null);
   const html = R.multiplierCandidatesHtml(line);
   assert.ok(html.includes("倍率候選（需人工確認）"), "R02: block title shown");
   assert.ok(html.includes("3X1"), "R02: candidate shown");
-  assert.ok(html.includes("2/3X1"), "R02: merged candidate shown");
   assert.ok(html.includes("採用此候選"), "R02: adopt buttons shown");
   assert.equal(JSON.stringify(line), before, "R02: display must not mutate line");
   assert.equal(line.review_action, "pending", "R02: review_action unchanged by display");
-  ok("候選 R02 顯示 3X1＋合併 2/3X1、顯示不改資料");
+  ok("候選 legacy 同 value 標 unknown_requires_review、不自動 merge、顯示不改資料");
 }
 
 {
@@ -177,17 +177,17 @@ function ok(name) {
     uncertain: true,
     fallback_candidate: { multiplier_candidates: ["3X1"] },
   };
-  const res = R.adoptMultiplierCandidate(line, "2/3X1");
+  const res = R.adoptMultiplierCandidate(line, "3X1");
   assert.equal(res.ok, true);
-  assert.equal(line.multiplier_text, "2/3X1", "R02 adopt: merged form, NOT 2X1 3X1");
-  assert.deepEqual(line.multiplier_rules, [{ rule_text: "2/3X1", categories: ["2", "3"], value: "1" }]);
+  assert.equal(line.multiplier_text, "2X1 3X1", "legacy adopt must NOT destroy existing rule");
+  assert.deepEqual(line.multiplier_rules.map((r) => r.rule_text), ["2X1", "3X1"]);
   assert.equal(line.review_action, "corrected", "R02 adopt: corrected, NOT confirmed");
   assert.equal(line.uncertain, true, "R02 adopt: uncertain stays true");
-  assert.equal(line.human_raw_text, "15 / 24 / 22 35 28 2/3X1");
+  assert.equal(line.human_raw_text, "15 / 24 / 22 35 28 2X1 3X1");
   assert.deepEqual(line.fallback_candidate.multiplier_candidates, ["3X1"], "R02 adopt: original evidence kept");
-  assert.equal(line.fallback_candidate.adopted_multiplier, "2/3X1");
+  assert.equal(line.fallback_candidate.adopted_multiplier, "3X1");
   assert.ok(R.multiplierCandidatesHtml(line).includes("已採用"), "R02 adopt: adopted marker shown");
-  ok("候選 R02 採用 2/3X1（不寫 2X1 3X1）、corrected、保留證據");
+  ok("候選 legacy 採用為追加、不破壞既有規則、corrected、保留證據");
 }
 
 {
@@ -203,21 +203,22 @@ function ok(name) {
   const before = JSON.stringify(line);
   const info = R.multiplierCandidatesInfo(line);
   assert.deepEqual(info.displayCandidates, ["3/4X1"]);
-  assert.equal(info.hint, "可能為 3/4X1，請依圖片確認");
+  assert.equal(info.entries[0].mode, "unknown_requires_review");
+  assert.equal(info.hint, null);
   assert.ok(R.multiplierCandidatesHtml(line).includes("3/4X1"));
   assert.equal(JSON.stringify(line), before, "R05: display must not mutate line");
   assert.equal(line.review_action, "pending", "R05: review_action unchanged by display");
 
   const res = R.adoptMultiplierCandidate(line, "3/4X1");
   assert.equal(res.ok, true);
-  assert.equal(line.multiplier_text, "3/4X1");
-  assert.deepEqual(line.multiplier_rules, [{ rule_text: "3/4X1", categories: ["3", "4"], value: "1" }]);
+  assert.equal(line.multiplier_text, "3X1 3/4X1", "legacy adopt is additive, never destroys 3X1");
+  assert.deepEqual(line.multiplier_rules.map((r) => r.rule_text), ["3X1", "3/4X1"]);
   assert.equal(line.review_action, "corrected");
   assert.equal(line.uncertain, true);
-  assert.equal(line.human_raw_text, "02 17 20 33 3/4X1");
+  assert.equal(line.human_raw_text, "02 17 20 33 3X1 3/4X1");
   assert.deepEqual(line.fallback_candidate.multiplier_candidates, ["3/4X1"], "R05 adopt: original evidence kept");
   assert.equal(line.fallback_candidate.adopted_multiplier, "3/4X1");
-  ok("候選 R05 顯示並採用 3/4X1、corrected、保留證據");
+  ok("候選 R05 legacy 顯示並追加 3/4X1、corrected、保留證據");
 }
 
 {
@@ -407,10 +408,10 @@ function ok(name) {
     },
   };
   R.adoptMultiplierCandidate(line, { rule_text: "3X1", candidate_mode: "alternative_reading", candidate_group_id: "g1" });
-  assert.equal(line.multiplier_text, "3X1", "alternative replaces current reading");
+  assert.equal(line.multiplier_text, "2X1 3X1", "alternative keeps existing structured 2X1");
   R.adoptMultiplierCandidate(line, { rule_text: "4X1", candidate_mode: "alternative_reading", candidate_group_id: "g1" });
-  assert.equal(line.multiplier_text, "4X1", "same group alternatives are mutually exclusive");
-  ok("alternative_reading 同 group 互斥");
+  assert.equal(line.multiplier_text, "2X1 4X1", "same group: 4X1 replaces only 3X1");
+  ok("alternative_reading 同 group 只替換候選管理的同槽規則");
 }
 
 {
@@ -428,6 +429,111 @@ function ok(name) {
   R.adoptMultiplierCandidate(line, { rule_text: "3X1", candidate_mode: "additional_rule", candidate_group_id: "slot2" });
   assert.equal(line.multiplier_text, "2X1 3X1", "different slots, same value: NOT merged to 2/3X1");
   ok("不同 slot 同 value 不自動合併");
+}
+
+// ---- candidate group semantics regressions (follow-up deb3038) ----
+{
+  // A. existing 2X2 3X5 + group-C alternatives 3X1/4X1; adopt 4X1
+  const line = {
+    line_id: "R99-L1",
+    number_groups: [["01", "02"]],
+    layout_hint: "normal_row",
+    multiplier_text: "2X2 3X5",
+    review_action: "pending",
+    fallback_candidate: {
+      multiplier_candidates: [
+        { rule_text: "3X1", candidate_mode: "alternative_reading", candidate_group_id: "C" },
+        { rule_text: "4X1", candidate_mode: "alternative_reading", candidate_group_id: "C" },
+      ],
+    },
+  };
+  R.adoptMultiplierCandidate(line, { rule_text: "4X1", candidate_mode: "alternative_reading", candidate_group_id: "C" });
+  assert.equal(line.multiplier_text, "2X2 3X5 4X1", "A: other groups + existing rules preserved");
+  ok("A 採用 4X1 → 2X2 3X5 4X1");
+}
+
+{
+  // B. same group: adopt 3X1 then 4X1 -> only 3X1 replaced
+  const line = {
+    line_id: "R99-L1",
+    number_groups: [["01", "02"]],
+    layout_hint: "normal_row",
+    multiplier_text: "2X2 3X5",
+    review_action: "pending",
+    fallback_candidate: {
+      multiplier_candidates: [
+        { rule_text: "3X1", candidate_mode: "alternative_reading", candidate_group_id: "C" },
+        { rule_text: "4X1", candidate_mode: "alternative_reading", candidate_group_id: "C" },
+      ],
+    },
+  };
+  R.adoptMultiplierCandidate(line, { rule_text: "3X1", candidate_mode: "alternative_reading", candidate_group_id: "C" });
+  assert.equal(line.multiplier_text, "2X2 3X5 3X1");
+  R.adoptMultiplierCandidate(line, { rule_text: "4X1", candidate_mode: "alternative_reading", candidate_group_id: "C" });
+  assert.equal(line.multiplier_text, "2X2 3X5 4X1", "B: 4X1 replaces only 3X1");
+  ok("B 同 group 4X1 只替換 3X1");
+}
+
+{
+  // C. different groups, same value -> never auto merge
+  const line = {
+    line_id: "R99-L1",
+    number_groups: [["01", "02"]],
+    layout_hint: "normal_row",
+    multiplier_text: null,
+    review_action: "pending",
+    fallback_candidate: {
+      multiplier_candidates: [
+        { rule_text: "2X1", candidate_mode: "alternative_reading", candidate_group_id: "A" },
+        { rule_text: "3X1", candidate_mode: "alternative_reading", candidate_group_id: "B" },
+      ],
+    },
+  };
+  const info = R.multiplierCandidatesInfo(line);
+  assert.equal(info.merged, null, "C: different groups must not derive 2/3X1");
+  R.adoptMultiplierCandidate(line, { rule_text: "2X1", candidate_mode: "alternative_reading", candidate_group_id: "A" });
+  R.adoptMultiplierCandidate(line, { rule_text: "3X1", candidate_mode: "alternative_reading", candidate_group_id: "B" });
+  assert.equal(line.multiplier_text, "2X1 3X1", "C: both adopted, never merged");
+  ok("C 不同 group 同 value 不合併");
+}
+
+{
+  // D. same group + composable evidence + same value -> derived 2/3X1 allowed
+  const line = {
+    line_id: "R99-L1",
+    number_groups: [["01", "02"]],
+    layout_hint: "normal_row",
+    multiplier_text: null,
+    review_action: "pending",
+    fallback_candidate: {
+      multiplier_candidates: [
+        { rule_text: "2X1", candidate_mode: "alternative_reading", candidate_group_id: "A", composable: true, evidence: { composable: true } },
+        { rule_text: "3X1", candidate_mode: "alternative_reading", candidate_group_id: "A", composable: true, evidence: { composable: true } },
+      ],
+    },
+  };
+  const info = R.multiplierCandidatesInfo(line);
+  assert.equal(info.merged, "2/3X1", "D: same group + composable + same value");
+  R.adoptMultiplierCandidate(line, "2/3X1");
+  assert.equal(line.multiplier_text, "2/3X1", "D: adopting derived merged candidate");
+  ok("D 同 group＋composable＋同 value 才允許 2/3X1");
+}
+
+{
+  // E. legacy candidate without group: same value must not destroy other rules
+  const line = {
+    line_id: "R99-L1",
+    number_groups: [["01", "02"]],
+    layout_hint: "normal_row",
+    multiplier_text: "2X1",
+    review_action: "pending",
+    fallback_candidate: { multiplier_candidates: ["3X1"] },
+  };
+  const info = R.multiplierCandidatesInfo(line);
+  assert.equal(info.entries[0].mode, "unknown_requires_review");
+  R.adoptMultiplierCandidate(line, "3X1");
+  assert.equal(line.multiplier_text, "2X1 3X1", "E: legacy adopt is additive");
+  ok("E legacy 無 group 同 value 不自動破壞既有規則");
 }
 
 console.log(`\n${passed} tests passed`);
