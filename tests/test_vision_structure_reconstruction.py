@@ -226,8 +226,8 @@ def test_stacked_collision_and_single_nearby_value_form_complete_rule(
         item["text"]: item["classification"]
         for item in result["evidence"]["tokens"]
     }
-    assert classifications[first] == "collision_or_partial_multiplier_evidence"
-    assert classifications[second] == "collision_or_partial_multiplier_evidence"
+    assert classifications[first] == "multiplier_fragment_candidate"
+    assert classifications[second] == "multiplier_fragment_candidate"
 
 
 def test_stacked_collision_with_two_nearby_values_is_incomplete() -> None:
@@ -283,10 +283,7 @@ def test_stacked_collision_value_too_far_is_incomplete() -> None:
 
     assert result["reconstructed_candidate"]["multiplier_rules"] == []
     assert result["status"] == "incomplete"
-    assert any(
-        warning.startswith("stacked_collision_value_missing:")
-        for warning in result["warnings"]
-    )
+    assert "fragment_multiplier_incomplete" in result["warnings"]
 
 
 def test_stacked_collision_never_pairs_value_from_different_line() -> None:
@@ -321,10 +318,7 @@ def test_stacked_collision_never_pairs_value_from_different_line() -> None:
     )
     assert primary["reconstructed_candidate"]["multiplier_rules"] == []
     assert primary["status"] == "incomplete"
-    assert any(
-        warning.startswith("stacked_collision_value_missing:")
-        for warning in primary["warnings"]
-    )
+    assert "fragment_multiplier_incomplete" in primary["warnings"]
 
 
 def test_collision_comparison_is_structural_not_raw_category_order() -> None:
@@ -426,9 +420,13 @@ def test_valid_pixel_bbox_records_zone_provenance() -> None:
     debug = evidence["evidence"]["bbox_debug"]
 
     assert evidence["status"] == "consistent"
-    assert debug["zone_rule"] == "bbox_center_x_gte_play_zone_boundary_x"
+    assert debug["zone_rule"] == "token_bbox_x1_gt_structure_rightmost_number_x2"
     assert debug["play_zone_ratio"] == 0.68
-    assert debug["play_zone_boundary_x"] == 680.0
+    assert debug["play_zone_boundary_x"] == 30.0
+    assert debug["play_zone_boundary_source"] == "structure_relative_rightmost_number_x2"
+    assert debug["global_play_zone_boundary_x"] == 680.0
+    assert debug["rightmost_number_x2"] == 30.0
+    assert debug["rightmost_number_token_ids"] == ["S01-L01-T01"]
     assert debug["image_width"] == 1000.0
 
 
@@ -443,7 +441,10 @@ def test_valid_normalized_bbox_records_zone_provenance() -> None:
     debug = evidence["evidence"]["bbox_debug"]
     assert evidence["status"] == "consistent"
     assert debug["coordinate_spaces"] == ["normalized"]
-    assert debug["play_zone_boundary_x"] == 0.68
+    assert debug["play_zone_boundary_x"] == 0.2
+    assert debug["play_zone_boundary_source"] == "structure_relative_rightmost_number_x2"
+    assert debug["global_play_zone_boundary_x"] == 0.68
+    assert debug["rightmost_number_x2"] == 0.2
     assert debug["play_zone_ratio"] == 0.68
 
 
@@ -519,6 +520,15 @@ def test_reconstruction_is_immutable_review_only_evidence() -> None:
     assert evidence[0]["auto_apply"] is False
     assert evidence[0]["auto_confirm"] is False
     assert evidence[0]["auto_submit"] is False
+
+
+def test_recognition_result_to_dict_is_deep_equal_after_reconstruction() -> None:
+    source = _recognition_result()
+    before = copy.deepcopy(source.to_dict())
+
+    reconstruct_structure(source, game="539")
+
+    assert source.to_dict() == before
 
 
 def test_service_attaches_evidence_outside_result_without_extra_provider_call(monkeypatch) -> None:
@@ -809,3 +819,307 @@ def _recognition_result() -> RecognitionResult:
             "auto_submit": False,
         },
     )
+
+
+def _exact_token(
+    line_id: str,
+    index: int,
+    text: str,
+    bbox: tuple[float, float, float, float],
+) -> dict:
+    return {
+        "token_id": f"{line_id}-T{index:02d}",
+        "text": text,
+        "bounding_box": _bbox(*bbox),
+    }
+
+
+def _sample014_s05_result() -> dict:
+    specs = [
+        (
+            "S05-L01",
+            [
+                ("24", (54, 471, 98, 499)),
+                ("x", (102, 471, 122, 499)),
+                ("08", (126, 471, 170, 499)),
+                ("x", (174, 471, 194, 499)),
+                ("16", (198, 471, 242, 499)),
+                ("x", (246, 471, 266, 499)),
+                ("03", (270, 471, 314, 499)),
+                (" ", (318, 471, 334, 499)),
+                ("2", (338, 478, 360, 504)),
+                ("/", (364, 478, 388, 504)),
+                ("3", (392, 478, 414, 504)),
+                ("x", (418, 478, 438, 504)),
+                ("0", (442, 478, 462, 504)),
+                (".", (466, 478, 486, 504)),
+                ("1", (490, 478, 510, 504)),
+            ],
+            [["24", "08", "16", "03"]],
+            "2/3x0.1",
+        ),
+        (
+            "S05-L02",
+            [
+                ("34", (54, 502, 98, 530)),
+                ("x", (102, 502, 122, 530)),
+                ("38", (126, 502, 170, 530)),
+                ("x", (174, 502, 194, 530)),
+                ("36", (198, 502, 242, 530)),
+                (" ", (246, 502, 266, 530)),
+                ("13", (270, 502, 314, 530)),
+                (" ", (318, 502, 334, 530)),
+                ("4", (338, 509, 360, 535)),
+            ],
+            [["34", "38", "36", "13"]],
+            None,
+        ),
+    ]
+    return _sample014_section_result(5, specs)
+
+
+def _sample014_s06_result() -> dict:
+    specs = [
+        (
+            "S06-L01",
+            [
+                ("34", (54, 580, 98, 608)),
+                ("x", (102, 580, 122, 608)),
+                ("03", (126, 580, 170, 608)),
+                ("x", (174, 580, 194, 608)),
+                ("16", (198, 580, 242, 608)),
+                (" ", (246, 580, 266, 608)),
+                ("2", (270, 587, 292, 613)),
+                ("x", (296, 587, 316, 613)),
+                ("1", (320, 587, 342, 613)),
+            ],
+            [["34", "03", "16"]],
+            "2x1",
+        ),
+        (
+            "S06-L02",
+            [
+                ("13", (126, 611, 170, 639)),
+                (" ", (174, 611, 194, 639)),
+                ("36", (198, 611, 242, 639)),
+            ],
+            [["13", "36"]],
+            None,
+        ),
+    ]
+    return _sample014_section_result(6, specs)
+
+
+def _sample014_section_result(section_number: int, specs: list[tuple]) -> dict:
+    lines: list[dict] = []
+    rows: list[dict] = []
+    for line_id, token_specs, numbers, multiplier in specs:
+        tokens = [
+            _exact_token(line_id, index, text, bbox)
+            for index, (text, bbox) in enumerate(token_specs, start=1)
+        ]
+        lines.append({
+            "line_id": line_id,
+            "text": " ".join(token["text"] for token in tokens),
+            "tokens": tokens,
+        })
+        rows.append({
+            "tokens": [
+                {
+                    "text": token["text"],
+                    "bbox": _polygon_to_xyxy(token["bounding_box"]),
+                }
+                for token in tokens
+            ],
+            "numbers": numbers,
+            "multiplier": multiplier,
+            "layout_hint": "row_bet",
+        })
+    sections = [{"rows": []} for _ in range(section_number - 1)]
+    sections.append({"rows": rows, "shared_multiplier": None})
+    return {
+        "status": "completed",
+        "provider": {"id": "qwen-dashscope", "model_name": "qwen3-vl-plus"},
+        "source_image": {"image_id": "sample-014", "width": 1024, "height": 768},
+        "raw_text": "\n".join(line["text"] for line in lines),
+        "lines": lines,
+        "preprocessing": {
+            "qwen_response": {"sections": sections},
+            "human_confirmation_required": True,
+            "auto_confirm": False,
+            "auto_submit": False,
+        },
+    }
+
+
+def test_sample014_s05_real_bbox_composes_stacked_fragmented_multiplier() -> None:
+    source = _sample014_s05_result()
+    before = copy.deepcopy(source)
+
+    evidence = reconstruct_structure(source, game="539")
+    primary = next(item for item in evidence if item["line_role"] == "primary")
+
+    assert primary["structure_id"] == "S05"
+    assert primary["member_line_ids"] == ["S05-L01", "S05-L02"]
+    assert primary["reconstructed_candidate"]["number_groups"] == [
+        ["24", "34"],
+        ["08", "38"],
+        ["16", "36"],
+        ["03", "13"],
+    ]
+    assert primary["reconstructed_candidate"]["multiplier_rules"] == ["2/3/4X0.1"]
+    assert primary["model_candidate"]["multiplier"] == "2/3x0.1"
+    assert primary["status"] == "divergent"
+    assert primary["human_confirmation_required"] is True
+    assert primary["auto_apply"] is False
+    assert primary["auto_confirm"] is False
+    assert primary["auto_submit"] is False
+
+    debug = primary["evidence"]["bbox_debug"]
+    assert debug["play_zone_boundary_x"] == 314.0
+    assert debug["play_zone_boundary_source"] == "structure_relative_rightmost_number_x2"
+    assert debug["rightmost_number_token_ids"] == ["S05-L01-T07", "S05-L02-T07"]
+    classifications = {
+        token["token_id"]: token["classification"]
+        for token in primary["evidence"]["tokens"]
+    }
+    assert classifications["S05-L01-T09"] == "multiplier_fragment_candidate"
+    assert classifications["S05-L01-T10"] == "multiplier_fragment"
+    assert classifications["S05-L01-T12"] == "multiplier_operator_candidate"
+    assert classifications["S05-L01-T13"] == "multiplier_fragment_candidate"
+    assert classifications["S05-L01-T14"] == "multiplier_fragment"
+    assert classifications["S05-L01-T15"] == "multiplier_fragment_candidate"
+    assert classifications["S05-L02-T09"] == "multiplier_fragment_candidate"
+    assert source == before
+
+
+def test_sample014_s06_real_bbox_composes_consistent_fragmented_multiplier() -> None:
+    source = _sample014_s06_result()
+    before = copy.deepcopy(source)
+
+    evidence = reconstruct_structure(source, game="539")
+    primary = next(item for item in evidence if item["line_role"] == "primary")
+
+    assert primary["structure_id"] == "S06"
+    assert primary["reconstructed_candidate"]["number_groups"] == [
+        ["34"],
+        ["03", "13"],
+        ["16", "36"],
+    ]
+    assert primary["reconstructed_candidate"]["multiplier_rules"] == ["2X1"]
+    assert primary["model_candidate"]["multiplier"] == "2x1"
+    assert primary["status"] == "consistent"
+    assert primary["human_confirmation_required"] is True
+    assert primary["auto_apply"] is False
+    assert primary["auto_confirm"] is False
+    assert primary["auto_submit"] is False
+    assert primary["evidence"]["bbox_debug"]["play_zone_boundary_x"] == 242.0
+    assert source == before
+
+
+@pytest.mark.parametrize(
+    ("parts", "expected_rule"),
+    [
+        (["2", "x", "1"], "2X1"),
+        (["3", "x", "5"], "3X5"),
+        (["2", "/", "3", "x", "0", ".", "1"], "2/3X0.1"),
+        (["2", "/", "3", "/", "4", "x", "0", ".", "1"], "2/3/4X0.1"),
+    ],
+)
+def test_adjacent_fragment_sequences_compose_one_valid_rule(
+    parts: list[str],
+    expected_rule: str,
+) -> None:
+    tokens = [_token("01", 10, 10)]
+    tokens.extend(_token(part, 60 + index * 24, 10) for index, part in enumerate(parts))
+    evidence = _one(_result(tokens, numbers=[["01"]], multiplier=expected_rule))
+
+    assert evidence["reconstructed_candidate"]["multiplier_rules"] == [expected_rule]
+    assert evidence["status"] == "consistent"
+
+
+def test_two_independent_fragmented_rules_remain_two_rules() -> None:
+    parts = ["2", "x", "2", "/", "3", "x", "5"]
+    tokens = [_token("01", 10, 10)]
+    tokens.extend(_token(part, 60 + index * 24, 10) for index, part in enumerate(parts))
+    evidence = _one(_result(tokens, numbers=[["01"]], multiplier="2X2 3X5"))
+
+    assert evidence["reconstructed_candidate"]["multiplier_rules"] == ["2X2", "3X5"]
+    assert evidence["status"] == "consistent"
+
+
+def test_two_possible_fragment_values_fail_closed_without_a_rule() -> None:
+    parts = ["2", "x", "1", "x", "2"]
+    tokens = [_token("01", 10, 10)]
+    tokens.extend(_token(part, 60 + index * 24, 10) for index, part in enumerate(parts))
+    evidence = _one(_result(tokens, numbers=[["01"]], multiplier="2X1"))
+
+    assert evidence["reconstructed_candidate"]["multiplier_rules"] == []
+    assert evidence["status"] == "incomplete"
+    assert "fragment_multiplier_ambiguous" in evidence["warnings"]
+
+
+def test_fragmented_decimal_without_tail_fails_closed() -> None:
+    parts = ["2", "x", "0", "."]
+    tokens = [_token("01", 10, 10)]
+    tokens.extend(_token(part, 60 + index * 24, 10) for index, part in enumerate(parts))
+    evidence = _one(_result(tokens, numbers=[["01"]], multiplier="2X0."))
+
+    assert evidence["reconstructed_candidate"]["multiplier_rules"] == []
+    assert evidence["status"] == "incomplete"
+    assert "fragment_multiplier_incomplete" in evidence["warnings"]
+
+
+def test_fragmented_tokens_too_far_apart_fail_closed() -> None:
+    tokens = [
+        _token("01", 10, 10),
+        _token("2", 60, 10),
+        _token("x", 84, 10),
+        _token("1", 180, 10),
+    ]
+    evidence = _one(_result(tokens, numbers=[["01"]], multiplier="2X1"))
+
+    assert evidence["reconstructed_candidate"]["multiplier_rules"] == []
+    assert evidence["status"] == "incomplete"
+    assert "fragment_multiplier_incomplete" in evidence["warnings"]
+
+
+def test_number_column_separator_never_becomes_multiplier_operator() -> None:
+    tokens = [_token("01", 10, 10), _token("x", 65, 10), _token("02", 120, 10)]
+    evidence = _one(_result(tokens, numbers=[["01"], ["02"]], layout="column_bet"))
+
+    separator = next(token for token in evidence["evidence"]["tokens"] if token["text"] == "x")
+    assert separator["zone"] == "main"
+    assert separator["classification"] == "column_separator"
+    assert evidence["reconstructed_candidate"]["multiplier_rules"] == []
+
+
+def test_fragmented_tokens_never_cross_structure_identity() -> None:
+    line_one_tokens = [_token("01", 10, 10), _token("2", 60, 10)]
+    line_two_tokens = [_token("02", 10, 50), _token("x", 60, 50), _token("1", 84, 50)]
+    for line_id, tokens in (("S01-L01", line_one_tokens), ("S02-L01", line_two_tokens)):
+        for index, token in enumerate(tokens, start=1):
+            token["token_id"] = f"{line_id}-T{index:02d}"
+    source = {
+        "status": "completed",
+        "provider": {"id": "qwen-dashscope"},
+        "source_image": {"width": 1000},
+        "raw_text": "01 2\n02 x 1",
+        "lines": [
+            {"line_id": "S01-L01", "text": "01 2", "tokens": line_one_tokens},
+            {"line_id": "S02-L01", "text": "02 x 1", "tokens": line_two_tokens},
+        ],
+        "preprocessing": {
+            "qwen_response": {
+                "sections": [
+                    {"rows": [{"numbers": [["01"]], "multiplier": "2", "layout_hint": "normal_row"}]},
+                    {"rows": [{"numbers": [["02"]], "multiplier": "X1", "layout_hint": "normal_row"}]},
+                ]
+            }
+        },
+    }
+
+    evidence = reconstruct_structure(source, game="539")
+    assert len(evidence) == 2
+    assert all(item["reconstructed_candidate"]["multiplier_rules"] == [] for item in evidence)
+    assert all(item["status"] == "incomplete" for item in evidence)

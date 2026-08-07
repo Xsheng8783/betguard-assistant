@@ -44,6 +44,7 @@ _COLLISION_RE = re.compile(r"234|[234](?:[/\.][234])*")
 _PLAY_CATEGORY_RE = re.compile(r"(?:23|24|34|234|[234](?:[/\.][234])*)")
 _TWO_DIGIT_RE = re.compile(r"\d{2}")
 _NUMBER_LIKE_RE = re.compile(r"[0-9?]+")
+_SINGLE_DIGIT_RE = re.compile(r"\d")
 _MULTIPLIER_VALUE_RE = re.compile(r"[xX×]\d+(?:\.\d+)?")
 _ALLOWED_COORDINATE_SPACES = frozenset({"pixel", "normalized"})
 _PLAY_ZONE_RATIO = 0.68
@@ -237,28 +238,69 @@ def _reconstruct_line(
     play_category_tokens: list[dict[str, Any]] = []
     complete_multiplier_texts: list[str] = []
     partial_multiplier_records: list[dict[str, Any]] = []
+    fragmented_multiplier_tokens: list[dict[str, Any]] = []
     invalid_multiplier_texts: list[str] = []
     coordinate_spaces: set[str] = set()
 
+    prepared_tokens: list[dict[str, Any]] = []
     for index, raw_token in enumerate(tokens, start=1):
         token = raw_token if isinstance(raw_token, Mapping) else {}
         token_id = str(token.get("token_id") or f"{line_id}-T{index:02d}")
         text = str(token.get("text") or "")
         source_line_id = str(token.get("_source_line_id") or line_id)
         bbox, coordinate_space, bbox_issue = _bbox_xyxy(token.get("bounding_box"))
-        zone = _bbox_zone(
+        global_zone = _bbox_zone(
             bbox,
             coordinate_space=coordinate_space,
             image_width=image_width,
         )
         if coordinate_space:
             coordinate_spaces.add(coordinate_space)
+        prepared_tokens.append({
+            "token_id": token_id,
+            "text": text,
+            "source_line_id": source_line_id,
+            "bbox": bbox,
+            "coordinate_space": coordinate_space,
+            "bbox_issue": bbox_issue,
+            "global_zone": global_zone,
+        })
+
+    preliminary_numbers = [
+        token for token in prepared_tokens
+        if token["bbox"] is not None
+        and _TWO_DIGIT_RE.fullmatch(str(token["text"]))
+        and _number_is_valid(str(token["text"]), game=game)
+        and token["global_zone"] != "play"
+    ]
+    play_boundary = _structure_play_boundary(
+        preliminary_numbers,
+        coordinate_spaces=coordinate_spaces,
+        image_width=image_width,
+    )
+
+    for prepared in prepared_tokens:
+        token_id = str(prepared["token_id"])
+        text = str(prepared["text"])
+        source_line_id = str(prepared["source_line_id"])
+        bbox = prepared["bbox"]
+        coordinate_space = prepared["coordinate_space"]
+        bbox_issue = prepared["bbox_issue"]
+        global_zone = str(prepared["global_zone"])
+        zone = _structure_token_zone(
+            bbox,
+            coordinate_space=coordinate_space,
+            global_zone=global_zone,
+            play_boundary=play_boundary,
+        )
 
         classification = "unknown"
         multiplier_classification: str | None = None
         number_valid = False
 
-        if _TWO_DIGIT_RE.fullmatch(text):
+        if not text.strip():
+            classification = "blank_geometry_token"
+        elif _TWO_DIGIT_RE.fullmatch(text):
             if zone == "play" and _PLAY_CATEGORY_RE.fullmatch(text):
                 classification = "play_category_evidence"
                 multiplier_classification = classify_multiplier_token(text)
@@ -271,6 +313,14 @@ def _reconstruct_line(
             else:
                 classification = "invalid_number"
                 _warn(warnings, blocking, f"number_out_of_range:{token_id}")
+        elif zone == "play" and text in {"/", "."}:
+            classification = "multiplier_fragment"
+        elif zone == "play" and _SINGLE_DIGIT_RE.fullmatch(text):
+            classification = "multiplier_fragment_candidate"
+            if text in {"2", "3", "4"}:
+                multiplier_classification = classify_multiplier_token(text)
+        elif zone == "play" and _SEPARATOR_RE.fullmatch(text):
+            classification = "multiplier_operator_candidate"
         elif _SEPARATOR_RE.fullmatch(text):
             classification = "column_separator"
         elif _COLLISION_RE.fullmatch(text):
@@ -322,6 +372,8 @@ def _reconstruct_line(
             "coordinate_space": coordinate_space,
             "bbox": bbox,
             "zone": zone,
+            "global_zone": global_zone,
+            "play_boundary_source": play_boundary["source"],
             "source_line_id": source_line_id,
         }
         if multiplier_classification is not None:
@@ -350,6 +402,15 @@ def _reconstruct_line(
         elif classification == "play_category_evidence":
             play_category_tokens.append(geometry_token)
             partial_multiplier_records.append(geometry_token)
+        elif classification in {
+            "multiplier_fragment",
+            "multiplier_fragment_candidate",
+            "multiplier_operator_candidate",
+        }:
+            fragmented_multiplier_tokens.append(geometry_token)
+            if classification == "multiplier_fragment_candidate" and text in {"2", "3", "4"}:
+                collision_tokens.append(geometry_token)
+                geometry_tokens.append(geometry_token)
 
     if len(coordinate_spaces) > 1:
         _warn(warnings, blocking, "coordinate_space_mismatch")
@@ -429,6 +490,31 @@ def _reconstruct_line(
         complete_multiplier_texts.extend(derived_play_rules)
         warnings.append("play_rule_reconstructed:" + "/".join(derived_play_rules))
 
+    (
+        fragmented_rules,
+        resolved_fragment_token_ids,
+        fragmented_rule_issues,
+        fragmented_rule_debug,
+    ) = _compose_fragmented_multiplier_rules(
+        fragmented_multiplier_tokens,
+        collision_tokens=collision_tokens,
+    )
+    for issue in fragmented_rule_issues:
+        _warn(warnings, blocking, issue)
+    if fragmented_rules:
+        complete_multiplier_texts.extend(fragmented_rules)
+        warnings.append("fragmented_play_rule_reconstructed:" + "/".join(fragmented_rules))
+
+    resolved_multiplier_token_ids = (
+        resolved_partial_token_ids | resolved_fragment_token_ids
+    )
+    unresolved_fragments = [
+        token for token in fragmented_multiplier_tokens
+        if str(token.get("token_id") or "") not in resolved_multiplier_token_ids
+    ]
+    if unresolved_fragments and "fragment_multiplier_ambiguous" not in blocking:
+        _warn(warnings, blocking, "fragment_multiplier_incomplete")
+
     complete_rules = merge_complete_rules(complete_multiplier_texts)
     # Re-run the public splitter over the canonical inputs so only an entirely
     # complete set can enter the reconstructed field.
@@ -441,16 +527,24 @@ def _reconstruct_line(
     model_row = _mapping(model_evidence.get("row")) if model_evidence else {}
     unresolved_partial = [
         token for token in partial_multiplier_records
-        if token["token_id"] not in resolved_partial_token_ids
+        if token["token_id"] not in resolved_multiplier_token_ids
         and str(token["text"]) not in collision_texts
     ]
     if unresolved_partial:
         _warn(warnings, blocking, "partial_multiplier_evidence")
     if invalid_multiplier_texts:
         _warn(warnings, blocking, "invalid_multiplier_evidence")
+    collision_token_ids = {
+        str(token.get("token_id") or "") for token in collision_tokens
+    }
+    collision_fully_composed = bool(collision_token_ids) and (
+        collision_token_ids <= resolved_multiplier_token_ids
+    )
     if collision_texts:
         warnings.append("collision_play_evidence:" + "/".join(sorted(collision_texts)))
-        if layout != "column_bet":
+        if collision_fully_composed:
+            warnings.append("collision_composed_into_multiplier")
+        elif layout != "column_bet":
             _warn(warnings, blocking, "collision_multiplier_scope_ambiguous")
         elif "collision" not in model_row:
             _warn(warnings, blocking, "model_collision_evidence_missing")
@@ -470,12 +564,17 @@ def _reconstruct_line(
         "shared_multiplier": shared_multiplier,
     }
 
+    comparison_collision = (
+        collision
+        if model_compare.get("collision") is not None or not collision_fully_composed
+        else None
+    )
     reconstruction_compare = {
         "number_groups": number_groups,
         "column_count": len(number_groups) if layout == "column_bet" else 1 if number_groups else 0,
         "layout": layout,
         "multiplier_rules": complete_rules,
-        "collision": collision,
+        "collision": comparison_collision,
         "shared_multiplier": shared_multiplier,
     }
 
@@ -492,14 +591,16 @@ def _reconstruct_line(
 
     bbox_debug = {
         "coordinate_spaces": sorted(coordinate_spaces),
-        "zone_rule": _ZONE_RULE,
+        "zone_rule": play_boundary["zone_rule"],
         "play_zone_ratio": _PLAY_ZONE_RATIO,
-        "play_zone_boundary_x": _play_zone_boundary_x(
-            coordinate_spaces,
-            image_width=image_width,
-        ),
+        "play_zone_boundary_x": play_boundary["boundary_x"],
+        "play_zone_boundary_source": play_boundary["source"],
+        "global_play_zone_boundary_x": play_boundary["global_boundary_x"],
+        "rightmost_number_x2": play_boundary["rightmost_number_x2"],
+        "rightmost_number_token_ids": play_boundary["rightmost_number_token_ids"],
         "image_width": image_width,
         "stacked_collision_categories": stacked_categories,
+        "fragmented_multiplier": fragmented_rule_debug,
         "row_first": grid,
         "x_clustered": bbox_columns,
         "separator_between_numbers": separator_between_numbers,
@@ -522,6 +623,8 @@ def _reconstruct_line(
                 "validate_number_token",
                 "build_grid_from_rows",
                 "build_columns_from_bbox",
+                "structure_relative_play_boundary",
+                "deterministic_fragmented_multiplier_v1",
                 "classify_multiplier_token",
                 "split_complete_rules",
                 "merge_complete_rules",
@@ -880,6 +983,411 @@ def _bbox_zone(
     return "unknown"
 
 
+def _structure_play_boundary(
+    number_tokens: list[dict[str, Any]],
+    *,
+    coordinate_spaces: set[str],
+    image_width: float | None,
+) -> dict[str, Any]:
+    global_boundary = _play_zone_boundary_x(
+        coordinate_spaces,
+        image_width=image_width,
+    )
+    number_spaces = {
+        str(token.get("coordinate_space") or "")
+        for token in number_tokens
+        if token.get("bbox") is not None
+    }
+    if number_tokens and len(number_spaces) == 1 and "" not in number_spaces:
+        rightmost_x2 = max(float(token["bbox"][2]) for token in number_tokens)
+        return {
+            "boundary_x": rightmost_x2,
+            "coordinate_space": next(iter(number_spaces)),
+            "source": "structure_relative_rightmost_number_x2",
+            "zone_rule": "token_bbox_x1_gt_structure_rightmost_number_x2",
+            "global_boundary_x": global_boundary,
+            "rightmost_number_x2": rightmost_x2,
+            "rightmost_number_token_ids": [
+                str(token.get("token_id") or "")
+                for token in number_tokens
+                if float(token["bbox"][2]) == rightmost_x2
+            ],
+        }
+    return {
+        "boundary_x": global_boundary,
+        "coordinate_space": (
+            next(iter(coordinate_spaces)) if len(coordinate_spaces) == 1 else None
+        ),
+        "source": "global_image_ratio_fallback",
+        "zone_rule": _ZONE_RULE,
+        "global_boundary_x": global_boundary,
+        "rightmost_number_x2": None,
+        "rightmost_number_token_ids": [],
+    }
+
+
+def _structure_token_zone(
+    bbox: list[float] | None,
+    *,
+    coordinate_space: str | None,
+    global_zone: str,
+    play_boundary: Mapping[str, Any],
+) -> str:
+    boundary_x = play_boundary.get("boundary_x")
+    boundary_space = play_boundary.get("coordinate_space")
+    if (
+        play_boundary.get("source") == "structure_relative_rightmost_number_x2"
+        and bbox is not None
+        and isinstance(boundary_x, (int, float))
+        and coordinate_space == boundary_space
+    ):
+        return "play" if bbox[0] > float(boundary_x) else "main"
+    return global_zone
+
+
+def _compose_fragmented_multiplier_rules(
+    fragments: list[dict[str, Any]],
+    *,
+    collision_tokens: list[dict[str, Any]],
+) -> tuple[list[str], set[str], list[str], dict[str, Any]]:
+    usable = [token for token in fragments if token.get("bbox") is not None]
+    issues: list[str] = []
+    if any(not str(token.get("source_line_id") or "") for token in usable):
+        issues.append("fragment_multiplier_scope_ambiguous")
+
+    by_source_line: dict[str, list[dict[str, Any]]] = {}
+    for token in usable:
+        source_line_id = str(token.get("source_line_id") or "")
+        by_source_line.setdefault(source_line_id, []).append(token)
+
+    candidates: list[dict[str, Any]] = []
+    for source_line_id in sorted(by_source_line):
+        ordered = sorted(
+            by_source_line[source_line_id],
+            key=lambda token: (
+                _center(token["bbox"])[0],
+                _center(token["bbox"])[1],
+                str(token.get("token_id") or ""),
+            ),
+        )
+        for index in range(len(ordered)):
+            if _category_start_is_continuation(ordered, index):
+                continue
+            candidate = _parse_fragment_rule(ordered, index)
+            if candidate is None:
+                continue
+            extended, extension_issue = _extend_fragment_category(
+                candidate,
+                collision_tokens=collision_tokens,
+            )
+            if extension_issue is not None:
+                issues.append(extension_issue)
+                continue
+            candidates.append(extended)
+
+    unique_candidates: list[dict[str, Any]] = []
+    seen_candidates: set[tuple[str, tuple[str, ...]]] = set()
+    for candidate in candidates:
+        key = (
+            str(candidate["rule"]),
+            tuple(sorted(str(token_id) for token_id in candidate["token_ids"])),
+        )
+        if key not in seen_candidates:
+            seen_candidates.add(key)
+            unique_candidates.append(candidate)
+
+    token_use_counts = Counter(
+        str(token_id)
+        for candidate in unique_candidates
+        for token_id in candidate["token_ids"]
+    )
+    category_use_counts = Counter(
+        str(candidate["category"])
+        for candidate in unique_candidates
+    )
+    ambiguous = any(count > 1 for count in token_use_counts.values()) or any(
+        count > 1 for count in category_use_counts.values()
+    )
+    if ambiguous:
+        issues.append("fragment_multiplier_ambiguous")
+        selected: list[dict[str, Any]] = []
+    else:
+        selected = unique_candidates
+
+    resolved = {
+        str(token_id)
+        for candidate in selected
+        for token_id in candidate["token_ids"]
+    }
+    resolved.update(_fragment_rule_divider_ids(usable, selected))
+    unresolved_token_ids = {
+        str(token.get("token_id") or "") for token in usable
+    } - resolved
+    if selected and unresolved_token_ids:
+        issues.append("fragment_multiplier_ambiguous")
+        selected = []
+        resolved = set()
+    rules = merge_complete_rules([str(candidate["rule"]) for candidate in selected])
+    debug = {
+        "composer": "deterministic_fragmented_multiplier_v1",
+        "input_token_ids": [str(token.get("token_id") or "") for token in usable],
+        "candidate_rules": [
+            {
+                "rule": candidate["rule"],
+                "base_rule": candidate["base_rule"],
+                "category": candidate["category"],
+                "value": candidate["value"],
+                "source_line_id": candidate["source_line_id"],
+                "token_ids": list(candidate["token_ids"]),
+                "stacked_category_token_ids": list(
+                    candidate["stacked_category_token_ids"]
+                ),
+            }
+            for candidate in unique_candidates
+        ],
+        "selected_rules": rules,
+        "resolved_token_ids": sorted(resolved),
+        "unresolved_token_ids": sorted(unresolved_token_ids),
+        "issues": _unique(issues),
+    }
+    return rules, resolved, _unique(issues), debug
+
+
+def _parse_fragment_rule(
+    ordered: list[dict[str, Any]],
+    start: int,
+) -> dict[str, Any] | None:
+    first = ordered[start]
+    if str(first.get("text") or "") not in {"2", "3", "4"}:
+        return None
+
+    category_tokens = [first]
+    cursor = start + 1
+    while (
+        cursor + 1 < len(ordered)
+        and str(ordered[cursor].get("text") or "") == "/"
+        and str(ordered[cursor + 1].get("text") or "") in {"2", "3", "4"}
+    ):
+        category_tokens.extend([ordered[cursor], ordered[cursor + 1]])
+        cursor += 2
+
+    if cursor >= len(ordered) or not _SEPARATOR_RE.fullmatch(
+        str(ordered[cursor].get("text") or "")
+    ):
+        return None
+    operator = ordered[cursor]
+    cursor += 1
+    if cursor >= len(ordered) or not _SINGLE_DIGIT_RE.fullmatch(
+        str(ordered[cursor].get("text") or "")
+    ):
+        return None
+
+    value_tokens: list[dict[str, Any]] = []
+    while cursor < len(ordered) and _SINGLE_DIGIT_RE.fullmatch(
+        str(ordered[cursor].get("text") or "")
+    ):
+        if (
+            value_tokens
+            and str(ordered[cursor].get("text") or "") in {"2", "3", "4"}
+            and cursor + 1 < len(ordered)
+            and _SEPARATOR_RE.fullmatch(str(ordered[cursor + 1].get("text") or ""))
+        ):
+            break
+        value_tokens.append(ordered[cursor])
+        cursor += 1
+
+    if cursor < len(ordered) and str(ordered[cursor].get("text") or "") == ".":
+        decimal_point = ordered[cursor]
+        cursor += 1
+        decimal_digits: list[dict[str, Any]] = []
+        while cursor < len(ordered) and _SINGLE_DIGIT_RE.fullmatch(
+            str(ordered[cursor].get("text") or "")
+        ):
+            if (
+                decimal_digits
+                and str(ordered[cursor].get("text") or "") in {"2", "3", "4"}
+                and cursor + 1 < len(ordered)
+                and _SEPARATOR_RE.fullmatch(str(ordered[cursor + 1].get("text") or ""))
+            ):
+                break
+            decimal_digits.append(ordered[cursor])
+            cursor += 1
+        if not decimal_digits:
+            return None
+        value_tokens.extend([decimal_point, *decimal_digits])
+
+    used_tokens = [*category_tokens, operator, *value_tokens]
+    if not all(
+        _fragment_pair_adjacent(first_token, second_token)
+        for first_token, second_token in zip(used_tokens, used_tokens[1:])
+    ):
+        return None
+
+    category_digits = [
+        str(token.get("text") or "")
+        for token in category_tokens
+        if str(token.get("text") or "") in {"2", "3", "4"}
+    ]
+    category = canonical_category("/".join(category_digits))
+    value = "".join(str(token.get("text") or "") for token in value_tokens)
+    base_rule = f"{category}X{value}"
+    validated = split_complete_rules(base_rule)
+    if len(validated) != 1:
+        return None
+    all_bboxes = [token["bbox"] for token in used_tokens]
+    return {
+        "rule": validated[0],
+        "base_rule": validated[0],
+        "category": category,
+        "category_digit_tokens": [
+            token for token in category_tokens
+            if str(token.get("text") or "") in {"2", "3", "4"}
+        ],
+        "value": value,
+        "source_line_id": str(first.get("source_line_id") or ""),
+        "token_ids": [str(token.get("token_id") or "") for token in used_tokens],
+        "stacked_category_token_ids": [],
+        "bbox": _bbox_union(all_bboxes),
+    }
+
+
+def _extend_fragment_category(
+    candidate: dict[str, Any],
+    *,
+    collision_tokens: list[dict[str, Any]],
+) -> tuple[dict[str, Any], str | None]:
+    used_ids = {str(token_id) for token_id in candidate["token_ids"]}
+    category_tokens = list(candidate["category_digit_tokens"])
+    category_digits = {
+        str(token.get("text") or "") for token in category_tokens
+    }
+    plausible: list[dict[str, Any]] = []
+    for token in collision_tokens:
+        token_id = str(token.get("token_id") or "")
+        text = str(token.get("text") or "")
+        if token_id in used_ids or text not in {"2", "3", "4"}:
+            continue
+        if any(_tokens_are_stacked(token, member) for member in category_tokens):
+            plausible.append(token)
+
+    if not plausible:
+        return candidate, None
+    plausible_digits = [str(token.get("text") or "") for token in plausible]
+    if (
+        len(plausible_digits) != len(set(plausible_digits))
+        or any(digit in category_digits for digit in plausible_digits)
+        or len(category_digits | set(plausible_digits)) > 3
+    ):
+        return candidate, "fragment_multiplier_ambiguous"
+
+    expanded = dict(candidate)
+    expanded_category = canonical_category(
+        "/".join([*sorted(category_digits), *plausible_digits])
+    )
+    expanded_rule = f"{expanded_category}X{candidate['value']}"
+    validated = split_complete_rules(expanded_rule)
+    if len(validated) != 1:
+        return candidate, "fragment_multiplier_ambiguous"
+    expanded["rule"] = validated[0]
+    expanded["category"] = expanded_category
+    expanded["token_ids"] = [
+        *candidate["token_ids"],
+        *(str(token.get("token_id") or "") for token in plausible),
+    ]
+    expanded["stacked_category_token_ids"] = [
+        str(token.get("token_id") or "") for token in plausible
+    ]
+    return expanded, None
+
+
+def _tokens_are_stacked(
+    first: Mapping[str, Any],
+    second: Mapping[str, Any],
+) -> bool:
+    if first.get("coordinate_space") != second.get("coordinate_space"):
+        return False
+    if not _horizontally_stacked(first, second):
+        return False
+    ordered = sorted([first, second], key=lambda token: _center(token["bbox"])[1])
+    return _vertically_stacked(ordered[0], ordered[1])
+
+
+def _fragment_pair_adjacent(
+    first: Mapping[str, Any],
+    second: Mapping[str, Any],
+) -> bool:
+    if first.get("coordinate_space") != second.get("coordinate_space"):
+        return False
+    first_bbox = first["bbox"]
+    second_bbox = second["bbox"]
+    first_center = _center(first_bbox)
+    second_center = _center(second_bbox)
+    geometry_unit = max(
+        first_bbox[3] - first_bbox[1],
+        second_bbox[3] - second_bbox[1],
+    )
+    horizontal_gap = second_bbox[0] - first_bbox[2]
+    return (
+        second_center[0] > first_center[0]
+        and -geometry_unit * 0.5 <= horizontal_gap <= geometry_unit * 1.75
+        and abs(second_center[1] - first_center[1]) <= geometry_unit * 1.5
+    )
+
+
+def _category_start_is_continuation(
+    ordered: list[dict[str, Any]],
+    index: int,
+) -> bool:
+    if index == 0:
+        return False
+    previous_text = str(ordered[index - 1].get("text") or "")
+    if _SEPARATOR_RE.fullmatch(previous_text):
+        return True
+    if previous_text != "/":
+        return False
+    for prior in reversed(ordered[: index - 1]):
+        text = str(prior.get("text") or "")
+        if _SEPARATOR_RE.fullmatch(text):
+            return False
+        if text == "/":
+            return True
+    return True
+
+
+def _fragment_rule_divider_ids(
+    fragments: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+) -> set[str]:
+    resolved: set[str] = set()
+    for token in fragments:
+        if str(token.get("text") or "") != "/":
+            continue
+        token_center = _center(token["bbox"])
+        source_line_id = str(token.get("source_line_id") or "")
+        left = [
+            candidate for candidate in candidates
+            if candidate["source_line_id"] == source_line_id
+            and candidate["bbox"][2] < token_center[0]
+        ]
+        right = [
+            candidate for candidate in candidates
+            if candidate["source_line_id"] == source_line_id
+            and candidate["bbox"][0] > token_center[0]
+        ]
+        if left and right:
+            resolved.add(str(token.get("token_id") or ""))
+    return resolved
+
+
+def _bbox_union(bboxes: list[list[float]]) -> list[float]:
+    return [
+        min(bbox[0] for bbox in bboxes),
+        min(bbox[1] for bbox in bboxes),
+        max(bbox[2] for bbox in bboxes),
+        max(bbox[3] for bbox in bboxes),
+    ]
+
+
 def _complete_play_rules(
     categories: list[dict[str, Any]],
     partials: list[dict[str, Any]],
@@ -911,10 +1419,6 @@ def _complete_play_rules(
     )
     for category, nearby in category_matches:
         if not nearby:
-            if category.get("geometry") == "stacked_bbox":
-                issues.append(
-                    f"stacked_collision_value_missing:{category.get('token_id') or ''}"
-                )
             continue
         value = nearby[0][1]
         if (
