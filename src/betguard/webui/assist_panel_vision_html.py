@@ -360,21 +360,23 @@ def render_vision_ui_section() -> str:
     document.getElementById("vision-results").style.display = "block";
   }
 
-  function _flattenQwenRows(qwenResponse) {
-    var flattened = [];
+  function _qwenEvidenceByLineId(qwenResponse) {
+    var evidenceByLineId = Object.create(null);
     var sections = qwenResponse && Array.isArray(qwenResponse.sections)
       ? qwenResponse.sections : [];
     for (var s = 0; s < sections.length; s++) {
       var section = sections[s] || {};
       var rows = Array.isArray(section.rows) ? section.rows : [];
       for (var r = 0; r < rows.length; r++) {
-        flattened.push({
+        var lineId = "S" + String(s + 1).padStart(2, "0") +
+          "-L" + String(r + 1).padStart(2, "0");
+        evidenceByLineId[lineId] = {
           row: rows[r] || {},
           shared_multiplier: section.shared_multiplier
-        });
+        };
       }
     }
-    return flattened;
+    return evidenceByLineId;
   }
 
   // RecognitionStatus.COMPLETED means only that the provider job finished.
@@ -386,7 +388,7 @@ def render_vision_ui_section() -> str:
     var requestMeta = preprocessing.qwen_request || {};
     var qwenResponse = preprocessing.qwen_response || {};
     var lines = Array.isArray(result.lines) ? result.lines : [];
-    var evidenceRows = _flattenQwenRows(qwenResponse);
+    var evidenceByLineId = _qwenEvidenceByLineId(qwenResponse);
     var sections = Array.isArray(qwenResponse.sections) ? qwenResponse.sections : [];
 
     if (result.status !== "completed" || provider.id !== "qwen-dashscope" ||
@@ -417,22 +419,30 @@ def render_vision_ui_section() -> str:
 
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i] || {};
-      var rowEvidence = evidenceRows[i] || {};
-      var row = rowEvidence.row || {};
+      var lineId = String(line.line_id || "");
+      var hasStructureEvidence = !!lineId &&
+        Object.prototype.hasOwnProperty.call(evidenceByLineId, lineId);
+      var rowEvidence = hasStructureEvidence ? evidenceByLineId[lineId] : null;
+      var row = rowEvidence ? rowEvidence.row : null;
       var tokens = Array.isArray(line.tokens) ? line.tokens : [];
-      html += '<div class="qwen-evidence-line" data-line-index="' + i + '" style="padding:9px 0;border-bottom:1px solid #cbd5e1">';
+      html += '<div class="qwen-evidence-line" data-line-index="' + i + '" data-line-id="' + esc(lineId) + '" style="padding:9px 0;border-bottom:1px solid #cbd5e1">';
       html += '<div><strong>Line.text：</strong><span class="qwen-model-line-text">' + esc(line.text || '') + '</span></div>';
       html += '<label style="display:block;margin-top:5px;font-size:12px">手動修改：' +
         '<input class="qwen-line-edit" value="' + esc(line.text || '') + '" style="width:70%;font-family:monospace;padding:4px;border:1px solid #cbd5e1;border-radius:4px"></label>';
       html += '<div style="margin-top:5px">' +
         '<button type="button" class="qwen-copy-line" onclick="qwenCopyLine(' + i + ')">複製</button> ' +
         '<button type="button" class="qwen-stage-line" onclick="qwenStageLine(' + i + ')">帶入修正欄</button></div>';
-      html += '<div class="qwen-row-structure" style="font-size:11px;color:#475569;margin-top:5px">' +
-        'numbers=' + esc(JSON.stringify(row.numbers == null ? null : row.numbers)) +
-        '｜multiplier=' + esc(JSON.stringify(row.multiplier == null ? null : row.multiplier)) +
-        '｜layout_hint=' + esc(row.layout_hint == null ? 'null' : row.layout_hint) +
-        '｜shared_multiplier=' + esc(JSON.stringify(rowEvidence.shared_multiplier == null ? null : rowEvidence.shared_multiplier)) +
-        '</div>';
+      if (hasStructureEvidence) {
+        html += '<div class="qwen-row-structure" style="font-size:11px;color:#475569;margin-top:5px">' +
+          'numbers=' + esc(JSON.stringify(row.numbers == null ? null : row.numbers)) +
+          '｜multiplier=' + esc(JSON.stringify(row.multiplier == null ? null : row.multiplier)) +
+          '｜layout_hint=' + esc(row.layout_hint == null ? 'null' : row.layout_hint) +
+          '｜shared_multiplier=' + esc(JSON.stringify(rowEvidence.shared_multiplier == null ? null : rowEvidence.shared_multiplier)) +
+          '</div>';
+      } else {
+        html += '<div class="qwen-row-structure qwen-structure-unavailable" style="font-size:11px;color:#b91c1c;margin-top:5px">' +
+          'structure evidence unavailable｜needs_review</div>';
+      }
       html += '<div class="qwen-token-bboxes" style="font-size:11px;color:#64748b;margin-top:4px"><strong>token bbox：</strong>';
       if (!tokens.length) {
         html += '無';
@@ -447,8 +457,14 @@ def render_vision_ui_section() -> str:
     html += '<div id="qwen-correction-panel" style="margin-top:10px;padding:8px;background:#f8fafc;border:1px solid #cbd5e1;border-radius:4px">' +
       '<label for="qwen-review-editable" style="display:block;font-weight:700;margin-bottom:4px">前端修正暫存（可手動修改）</label>' +
       '<textarea id="qwen-review-editable" style="width:100%;min-height:70px;font-family:monospace;padding:6px" placeholder="先按某行的「帶入修正欄」，再人工修改"></textarea>' +
-      '<button type="button" id="qwen-manual-reparse-btn" class="btn-primary" style="margin-top:6px" onclick="qwenManualReparse()">人工確認並重新解析</button>' +
-      '<div id="qwen-manual-reparse-result" style="font-size:12px;margin-top:6px;color:#64748b">尚未人工確認；未呼叫 /manual-reparse。</div>' +
+      '<label for="qwen-review-game" style="display:block;font-weight:700;margin-top:7px;margin-bottom:4px">遊戲類型（必須明確選擇）</label>' +
+      '<select id="qwen-review-game" style="padding:5px;border:1px solid #cbd5e1;border-radius:4px">' +
+        '<option value="539">539</option>' +
+        '<option value="六合">六合彩</option>' +
+      '</select>' +
+      '<div style="font-size:11px;color:#64748b;margin-top:3px">遊戲類型不使用 auto；document_mode 不代表遊戲類型。</div>' +
+      '<button type="button" id="qwen-manual-reparse-btn" class="btn-primary" style="margin-top:6px" onclick="qwenPreviewReparse()">重新解析預覽</button>' +
+      '<div id="qwen-manual-reparse-result" style="font-size:12px;margin-top:6px;color:#64748b">尚未要求解析預覽；未呼叫 /manual-reparse。</div>' +
       '</div>';
     document.getElementById("vision-results-body").innerHTML = html;
     document.getElementById("vision-results").style.display = "block";
@@ -469,25 +485,36 @@ def render_vision_ui_section() -> str:
     if (!target || !inputs[index]) return;
     target.value = inputs[index].value;
     document.getElementById("qwen-manual-reparse-result").textContent =
-      "已帶入前端修正暫存；仍未呼叫 /manual-reparse。";
+      "已帶入前端修正暫存；尚未要求解析預覽。";
   };
 
-  window.qwenManualReparse = function() {
+  window.qwenPreviewReparse = function() {
     var target = document.getElementById("qwen-review-editable");
+    var gameSelect = document.getElementById("qwen-review-game");
     var output = document.getElementById("qwen-manual-reparse-result");
     var btn = document.getElementById("qwen-manual-reparse-btn");
     var text = target ? target.value.trim() : "";
+    var selectedGame = gameSelect ? gameSelect.value : "";
     if (!text) {
       output.textContent = "needs_review：請先帶入並人工修改文字。";
       output.style.color = "#b91c1c";
       return;
     }
+    if (selectedGame !== "539" && selectedGame !== "六合") {
+      output.textContent = "needs_review：請明確選擇 539 或六合彩。";
+      output.style.color = "#b91c1c";
+      return;
+    }
     btn.disabled = true;
-    output.textContent = "依既有 parser／validator 重新解析中...";
+    output.textContent = "依既有 parser／validator 產生唯讀預覽中...";
     fetch("/manual-reparse", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: text, game: "auto" })
+      body: JSON.stringify({
+        text: text,
+        game: selectedGame,
+        register_candidate: false
+      })
     }).then(function(r) { return r.json(); }).then(function(data) {
       btn.disabled = false;
       if (!data.ok) {
@@ -495,11 +522,27 @@ def render_vision_ui_section() -> str:
         output.style.color = "#b91c1c";
         return;
       }
-      output.textContent = "人工重新解析完成；結果已經過既有 parser／validator，未自動寫入 queue 或 draft。";
-      output.style.color = "#166534";
+      if (data.manual_candidate_id || data.accepted_by_human === true ||
+          data.auto_confirm !== false || data.auto_submit !== false) {
+        output.textContent = "needs_review：解析預覽安全狀態不符，未顯示為可填入候選。";
+        output.style.color = "#b91c1c";
+        return;
+      }
+      output.innerHTML =
+        '<div class="qwen-parser-preview-status" style="font-weight:700;color:#9a3412">解析預覽完成，尚未加入可填入候選</div>' +
+        '<div style="margin-top:5px;color:#475569">' +
+          'numbers=' + esc(JSON.stringify(data.numbers == null ? null : data.numbers)) + '<br>' +
+          'stars=' + esc(JSON.stringify(data.stars == null ? null : data.stars)) + '<br>' +
+          'amounts=' + esc(JSON.stringify(data.amounts == null ? null : data.amounts)) + '<br>' +
+          'type=' + esc(data.type == null ? null : data.type) + '<br>' +
+          'columns=' + esc(JSON.stringify(data.columns == null ? null : data.columns)) + '<br>' +
+          'summary=' + esc(data.summary == null ? '' : data.summary) + '<br>' +
+          'auto_confirm=false<br>auto_submit=false' +
+        '</div>';
+      output.style.color = "#475569";
     }).catch(function() {
       btn.disabled = false;
-      output.textContent = "needs_review：人工重新解析請求失敗。";
+      output.textContent = "needs_review：解析預覽請求失敗。";
       output.style.color = "#b91c1c";
     });
   };

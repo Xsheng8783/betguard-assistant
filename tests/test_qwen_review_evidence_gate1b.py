@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import io
 import json
 import os
+import socket
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -19,6 +23,8 @@ except ImportError:
     HAS_PLAYWRIGHT = False
 
 from betguard.webui.assist_panel_vision_html import render_vision_ui_section
+from betguard.webui import app as webui_app
+from betguard.webui.app import build_workbench_handler
 
 
 EXPECTED_LOCKED_HASHES = {
@@ -65,6 +71,71 @@ def _png_bytes() -> bytes:
     return buffer.getvalue()
 
 
+def _free_port() -> int:
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return port
+
+
+@contextmanager
+def _running_workbench():
+    port = _free_port()
+    handler = build_workbench_handler(project_version="gate1b-test", git_commit="test")
+    server = webui_app.ThreadingHTTPServer(("127.0.0.1", port), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield port
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def _post_manual_reparse(port: int, payload: dict) -> tuple[int, dict]:
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        connection.request(
+            "POST",
+            "/manual-reparse",
+            body=body,
+            headers={"Content-Type": "application/json"},
+        )
+        response = connection.getresponse()
+        return response.status, json.loads(response.read().decode("utf-8"))
+    finally:
+        connection.close()
+
+
+def _qwen_line(line_id: str, text: str) -> dict:
+    return {
+        "line_id": line_id,
+        "text": text,
+        "tokens": [
+            {
+                "text": text,
+                "bounding_box": {
+                    "coordinate_space": "pixel",
+                    "polygon": [[1, 2], [3, 2], [3, 4], [1, 4]],
+                },
+            }
+        ],
+        "warnings": [],
+    }
+
+
+def _qwen_row(text: str) -> dict:
+    return {
+        "tokens": [{"text": text, "bbox": [1, 2, 3, 4]}],
+        "numbers": [[text]],
+        "multiplier": f"multiplier-{text}",
+        "layout_hint": f"layout-{text}",
+    }
+
+
 def _completed_qwen_result(line_text: str = "99") -> dict:
     return {
         "request_id": "job-image-qwen",
@@ -76,22 +147,7 @@ def _completed_qwen_result(line_text: str = "99") -> dict:
         },
         "source_image": {"sha256": "image-sha"},
         "raw_text": line_text,
-        "lines": [
-            {
-                "line_id": "S01-L01",
-                "text": line_text,
-                "tokens": [
-                    {
-                        "text": line_text,
-                        "bounding_box": {
-                            "coordinate_space": "pixel",
-                            "polygon": [[1, 2], [3, 2], [3, 4], [1, 4]],
-                        },
-                    }
-                ],
-                "warnings": [],
-            }
-        ],
+        "lines": [_qwen_line("S01-L01", line_text)],
         "preprocessing": {
             "human_confirmation_required": True,
             "auto_confirm": False,
@@ -109,12 +165,7 @@ def _completed_qwen_result(line_text: str = "99") -> dict:
                     {
                         "shared_multiplier": None,
                         "rows": [
-                            {
-                                "tokens": [{"text": line_text, "bbox": [1, 2, 3, 4]}],
-                                "numbers": [[line_text]],
-                                "multiplier": None,
-                                "layout_hint": "normal_row",
-                            }
+                            _qwen_row(line_text)
                         ],
                     }
                 ]
@@ -274,6 +325,28 @@ def test_qwen_evidence_keeps_required_provenance_and_structure() -> None:
         assert field in renderer
 
 
+def test_qwen_structure_uses_line_id_without_positional_fallback() -> None:
+    html = _html()
+    mapper = _between(
+        html,
+        "function _qwenEvidenceByLineId(qwenResponse)",
+        "function _renderQwenEvidence(result)",
+    )
+    renderer = _between(
+        html,
+        "function _renderQwenEvidence(result)",
+        "window.qwenCopyLine",
+    )
+    assert '"S" + String(s + 1).padStart(2, "0")' in mapper
+    assert '"-L" + String(r + 1).padStart(2, "0")' in mapper
+    assert "evidenceByLineId[lineId]" in mapper
+    assert "evidenceByLineId[lineId]" in renderer
+    assert "line.line_id" in renderer
+    assert "structure evidence unavailable" in renderer
+    assert "evidenceRows[i]" not in html
+    assert "flattened[i]" not in html
+
+
 def test_each_line_has_copy_stage_and_manual_edit_controls() -> None:
     renderer = _between(
         _html(),
@@ -290,7 +363,7 @@ def test_stage_line_changes_only_frontend_temporary_field() -> None:
     stage = _between(
         _html(),
         "window.qwenStageLine = function(index)",
-        "window.qwenManualReparse",
+        "window.qwenPreviewReparse",
     )
     assert "target.value = inputs[index].value" in stage
     assert "fetch(" not in stage
@@ -305,23 +378,49 @@ def test_stage_line_changes_only_frontend_temporary_field() -> None:
         assert forbidden not in stage
 
 
-def test_manual_reparse_requires_explicit_human_button() -> None:
+def test_reparse_preview_requires_explicit_button_and_selected_game() -> None:
     html = _html()
-    assert "人工確認並重新解析" in html
+    assert "重新解析預覽" in html
+    assert '<option value="539">539</option>' in html
+    assert '<option value="六合">六合彩</option>' in html
+    assert "document_mode 不代表遊戲類型" in html
     qwen_job_and_render = _between(
         html,
         "window.visionRunQwenJob = function()",
-        "window.qwenManualReparse = function()",
+        "window.qwenPreviewReparse = function()",
     )
     assert 'fetch("/manual-reparse"' not in qwen_job_and_render
     manual = _between(
         html,
-        "window.qwenManualReparse = function()",
+        "window.qwenPreviewReparse = function()",
         "function _renderPendingConfirmation",
     )
     assert 'fetch("/manual-reparse"' in manual
-    assert 'body: JSON.stringify({ text: text, game: "auto" })' in manual
+    assert "game: selectedGame" in manual
+    assert "register_candidate: false" in manual
+    assert 'game: "auto"' not in manual
     assert "parser／validator" in manual
+
+
+def test_reparse_preview_renders_parser_fields_and_stays_non_candidate() -> None:
+    preview = _between(
+        _html(),
+        "window.qwenPreviewReparse = function()",
+        "function _renderPendingConfirmation",
+    )
+    for field in (
+        "data.numbers",
+        "data.stars",
+        "data.amounts",
+        "data.type",
+        "data.columns",
+        "data.summary",
+        "auto_confirm=false",
+        "auto_submit=false",
+    ):
+        assert field in preview
+    assert "解析預覽完成，尚未加入可填入候選" in preview
+    assert "register_candidate: false" in preview
 
 
 def test_invalid_qwen_response_displays_failure_and_review_state() -> None:
@@ -329,7 +428,7 @@ def test_invalid_qwen_response_displays_failure_and_review_state() -> None:
     failure = _between(
         html,
         "function _renderQwenFailure(message)",
-        "function _flattenQwenRows",
+        "function _qwenEvidenceByLineId",
     )
     renderer = _between(
         html,
@@ -353,12 +452,12 @@ def test_structurally_valid_but_wrong_qwen_output_never_becomes_candidate() -> N
     for forbidden in (
         "panelState",
         "validCandidates",
-        "accepted_by_human",
         "create-batch",
         "approved_fill_queue",
         "ground-truth-draft",
     ):
         assert forbidden not in qwen_flow
+    assert "register_candidate: false" in qwen_flow
 
 
 def test_qwen_flow_has_no_auto_actions_paid_fallback_or_webfill() -> None:
@@ -383,6 +482,105 @@ def test_qwen_prompt_and_provider_code_are_not_modified_by_gate1b() -> None:
     ).read_text(encoding="utf-8")
     assert "qwen_prompts" not in ui_source
     assert "QwenDashScopeProvider" not in ui_source
+
+
+def test_backend_read_only_preview_keeps_manual_registry_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    existing = {"manual-existing": {"summary": "preserve me"}}
+    monkeypatch.setattr(webui_app, "_manual_candidates", existing.copy())
+    before = dict(webui_app._manual_candidates)
+
+    with _running_workbench() as port:
+        status, result = _post_manual_reparse(
+            port,
+            {
+                "text": "40 49 2X1",
+                "game": "六合",
+                "register_candidate": False,
+            },
+        )
+
+    assert status == 200
+    assert result["ok"] is True
+    assert result["numbers"] == [40, 49]
+    assert webui_app._manual_candidates == before
+    assert "manual_candidate_id" not in result
+    assert result.get("accepted_by_human") is False
+    assert result["auto_confirm"] is False
+    assert result["auto_submit"] is False
+
+
+def test_backend_game_selection_controls_40_to_49_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(webui_app, "_manual_candidates", {})
+    with _running_workbench() as port:
+        _status_liuhe, liuhe = _post_manual_reparse(
+            port,
+            {
+                "text": "40 49 2X1",
+                "game": "六合",
+                "register_candidate": False,
+            },
+        )
+        _status_539, game_539 = _post_manual_reparse(
+            port,
+            {
+                "text": "40 49 2X1",
+                "game": "539",
+                "register_candidate": False,
+            },
+        )
+
+    assert liuhe["ok"] is True
+    assert liuhe["numbers"] == [40, 49]
+    assert game_539["ok"] is False
+    assert game_539["reason"] == "needs_review"
+    assert "valid range is 1-39" in game_539["error"]
+    assert webui_app._manual_candidates == {}
+
+
+def test_backend_default_manual_reparse_still_registers_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(webui_app, "_manual_candidates", {})
+    with _running_workbench() as port:
+        status, result = _post_manual_reparse(
+            port,
+            {"text": "05 09 2X1", "game": "539"},
+        )
+
+    assert status == 200
+    assert result["ok"] is True
+    assert result["accepted_by_human"] is True
+    assert result["auto_confirm"] is False
+    assert result["auto_submit"] is False
+    candidate_id = result["manual_candidate_id"]
+    assert candidate_id in webui_app._manual_candidates
+    assert webui_app._manual_candidates[candidate_id]["numbers"] == [5, 9]
+
+
+def test_backend_read_only_handler_has_no_queue_draft_or_webfill_path() -> None:
+    source = (
+        Path(__file__).resolve().parents[1] / "src/betguard/webui/app.py"
+    ).read_text(encoding="utf-8")
+    handler = _between(
+        source,
+        "        def _handle_manual_reparse(self) -> None:",
+        "        def _handle_window_pin(self) -> None:",
+    )
+    assert 'data.get("register_candidate", True)' in handler
+    assert "result.get(\"ok\") and register_candidate" in handler
+    for forbidden in (
+        "approved_fill_queue",
+        "ground-truth-draft",
+        "RUNS_DIR",
+        "get_assist_session",
+        "_handle_assist_fill",
+        "dispatch(",
+    ):
+        assert forbidden not in handler
 
 
 def test_locked_sample_hashes_are_unchanged() -> None:
@@ -410,7 +608,22 @@ def test_locked_sample_hashes_are_unchanged() -> None:
 
 
 def test_browser_qwen_evidence_requires_explicit_actions(page) -> None:
-    calls = _mount_qwen_ui(page, job_result=_completed_qwen_result("99"))
+    calls = _mount_qwen_ui(
+        page,
+        job_result=_completed_qwen_result("99"),
+        manual_result={
+            "ok": True,
+            "numbers": [40, 49],
+            "stars": [2],
+            "amounts": {"2": 100},
+            "type": "normal",
+            "columns": [],
+            "summary": "40,49｜2星｜100元",
+            "accepted_by_human": False,
+            "auto_confirm": False,
+            "auto_submit": False,
+        },
+    )
     assert calls["jobs"] == []
     assert calls["manual"] == []
     assert page.get_attribute("#vision-preview-img", "src") == "/api/vision/v1/images/image-qwen"
@@ -425,16 +638,104 @@ def test_browser_qwen_evidence_requires_explicit_actions(page) -> None:
     ]
     assert calls["manual"] == []
 
-    page.fill(".qwen-line-edit", "05 09 2X1")
+    page.fill(".qwen-line-edit", "40 49 2X1")
     page.click(".qwen-stage-line")
-    assert page.input_value("#qwen-review-editable") == "05 09 2X1"
+    assert page.input_value("#qwen-review-editable") == "40 49 2X1"
     assert calls["manual"] == []
     assert not any("webfill" in url or "assist-fill" in url for url in calls["urls"])
 
+    page.select_option("#qwen-review-game", "六合")
     page.click("#qwen-manual-reparse-btn")
     page.wait_for_function("document.getElementById('qwen-manual-reparse-btn').disabled === false")
-    assert calls["manual"] == [{"text": "05 09 2X1", "game": "auto"}]
-    assert "needs_review" in page.text_content("#qwen-manual-reparse-result")
+    assert calls["manual"] == [{
+        "text": "40 49 2X1",
+        "game": "六合",
+        "register_candidate": False,
+    }]
+    preview = page.text_content("#qwen-manual-reparse-result")
+    assert "解析預覽完成，尚未加入可填入候選" in preview
+    for expected in (
+        "numbers=[40,49]",
+        "stars=[2]",
+        'amounts={"2":100}',
+        "type=normal",
+        "columns=[]",
+        "summary=40,49｜2星｜100元",
+        "auto_confirm=false",
+        "auto_submit=false",
+    ):
+        assert expected in preview
+
+
+def test_browser_structure_evidence_follows_line_id_when_lines_reordered(page) -> None:
+    result = _completed_qwen_result("11")
+    result["raw_text"] = "22\n11"
+    result["lines"] = [
+        _qwen_line("S01-L02", "22"),
+        _qwen_line("S01-L01", "11"),
+    ]
+    result["preprocessing"]["qwen_response"]["sections"][0]["rows"] = [
+        _qwen_row("11"),
+        _qwen_row("22"),
+    ]
+
+    _mount_qwen_ui(page, job_result=result)
+    page.click("#vision-qwen-run-btn")
+    page.wait_for_selector("#qwen-evidence-status")
+
+    row_2 = page.text_content(
+        '.qwen-evidence-line[data-line-id="S01-L02"] .qwen-row-structure'
+    )
+    row_1 = page.text_content(
+        '.qwen-evidence-line[data-line-id="S01-L01"] .qwen-row-structure'
+    )
+    assert 'numbers=[["22"]]' in row_2
+    assert "multiplier-22" in row_2
+    assert "layout-22" in row_2
+    assert 'numbers=[["11"]]' in row_1
+    assert "multiplier-11" in row_1
+    assert "layout-11" in row_1
+
+
+def test_browser_missing_structure_does_not_borrow_next_row(page) -> None:
+    result = _completed_qwen_result("11")
+    result["raw_text"] = "11\n33"
+    result["lines"] = [
+        _qwen_line("S01-L01", "11"),
+        _qwen_line("S01-L03", "33"),
+    ]
+    result["preprocessing"]["qwen_response"]["sections"][0]["rows"] = [
+        _qwen_row("11"),
+        _qwen_row("22"),
+    ]
+
+    _mount_qwen_ui(page, job_result=result)
+    page.click("#vision-qwen-run-btn")
+    page.wait_for_selector("#qwen-evidence-status")
+
+    missing = page.text_content(
+        '.qwen-evidence-line[data-line-id="S01-L03"] .qwen-row-structure'
+    )
+    assert "structure evidence unavailable" in missing
+    assert "needs_review" in missing
+    assert "22" not in missing
+    assert "numbers=" not in missing
+    assert "multiplier=" not in missing
+    assert "layout_hint=" not in missing
+
+
+def test_browser_unknown_line_id_displays_structure_unavailable(page) -> None:
+    result = _completed_qwen_result("11")
+    result["lines"] = [_qwen_line("unknown-line", "11")]
+
+    _mount_qwen_ui(page, job_result=result)
+    page.click("#vision-qwen-run-btn")
+    page.wait_for_selector("#qwen-evidence-status")
+
+    structure = page.text_content(
+        '.qwen-evidence-line[data-line-id="unknown-line"] .qwen-row-structure'
+    )
+    assert structure == "structure evidence unavailable｜needs_review"
 
 
 def test_browser_invalid_qwen_result_displays_failure(page) -> None:

@@ -2474,6 +2474,7 @@ window.assistPanelFill = assistPanelFill;
                 return
             text = (data.get("text") or "").strip()
             game = (data.get("game") or "六合").strip()
+            register_candidate = bool(data.get("register_candidate", True))
             if not text:
                 self._send_json({"ok": False, "error": "empty text"})
                 return
@@ -2483,8 +2484,9 @@ window.assistPanelFill = assistPanelFill;
             result.setdefault("auto_submit", False)
             result.setdefault("auto_confirm", False)
 
-            # Register valid manual corrections so they can be assisted later
-            if result.get("ok"):
+            # Preserve the existing manual-correction flow by default, while
+            # allowing review surfaces to request a read-only parser preview.
+            if result.get("ok") and register_candidate:
                 cid = _register_manual_candidate({
                     "original_text": text,
                     "numbers": result["numbers"],
@@ -2502,6 +2504,8 @@ window.assistPanelFill = assistPanelFill;
                 result["accepted_by_human"] = True
                 result["acceptance_source"] = "assist_panel_manual_reparse"
                 result["manual_reparse"] = True
+            elif result.get("ok"):
+                result["accepted_by_human"] = False
 
             self._send_json(result)
 
