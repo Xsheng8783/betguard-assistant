@@ -448,6 +448,122 @@ def test_valid_normalized_bbox_records_zone_provenance() -> None:
     assert debug["play_zone_ratio"] == 0.68
 
 
+def test_right_side_column_structure_uses_model_number_multiset_before_global_zone() -> None:
+    tokens = [
+        _token("12", 720, 10),
+        _token("x", 755, 10),
+        _token("15", 790, 10),
+        _token("x", 825, 10),
+        _token("06", 860, 10),
+        _token("2", 900, 10),
+        _token("x", 925, 10),
+        _token("3", 950, 10),
+    ]
+
+    evidence = _one(_result(
+        tokens,
+        numbers=[["12"], ["15"], ["06"]],
+        layout="column_bet",
+        multiplier="2X3",
+    ))
+
+    assert evidence["reconstructed_candidate"]["number_groups"] == [
+        ["12"],
+        ["15"],
+        ["06"],
+    ]
+    assert evidence["reconstructed_candidate"]["multiplier_rules"] == ["2X3"]
+    assert evidence["reconstructed_candidate"]["layout"] == "column_bet"
+    debug = evidence["evidence"]["bbox_debug"]
+    assert debug["number_boundary_source"] == "model_number_multiset"
+    assert debug["matched_number_token_ids"] == [
+        "S01-L01-T01",
+        "S01-L01-T03",
+        "S01-L01-T05",
+    ]
+    assert debug["unmatched_model_number_values"] == []
+    assert debug["local_play_boundary_x"] == 880.0
+    assert debug["global_play_boundary_x"] == 680.0
+    assert debug["fallback_reason"] is None
+    assert debug["ambiguous_number_play_token_ids"] == []
+
+
+def test_column_structure_crossing_global_boundary_keeps_all_model_numbers() -> None:
+    tokens = [
+        _token("12", 620, 10),
+        _token("x", 655, 10),
+        _token("15", 690, 10),
+        _token("x", 725, 10),
+        _token("06", 760, 10),
+    ]
+
+    evidence = _one(_result(
+        tokens,
+        numbers=[["12"], ["15"], ["06"]],
+        layout="column_bet",
+    ))
+
+    assert evidence["reconstructed_candidate"]["number_groups"] == [
+        ["12"],
+        ["15"],
+        ["06"],
+    ]
+    debug = evidence["evidence"]["bbox_debug"]
+    assert debug["number_boundary_source"] == "model_number_multiset"
+    assert debug["matched_number_token_ids"] == [
+        "S01-L01-T01",
+        "S01-L01-T03",
+        "S01-L01-T05",
+    ]
+    assert debug["local_play_boundary_x"] == 780.0
+    assert debug["global_play_boundary_x"] == 680.0
+
+
+def test_left_of_global_boundary_shorthand_stays_out_of_model_number_multiset() -> None:
+    tokens = [
+        _token("01", 100, 10),
+        _token("02", 200, 10),
+        _token("34", 350, 10),
+        _token("X1", 390, 10),
+    ]
+
+    evidence = _one(_result(
+        tokens,
+        numbers=[["01", "02"]],
+        multiplier="34X1",
+    ))
+
+    assert evidence["reconstructed_candidate"]["number_groups"] == [["01", "02"]]
+    assert evidence["reconstructed_candidate"]["multiplier_rules"] == ["3/4X1"]
+    debug = evidence["evidence"]["bbox_debug"]
+    assert debug["number_boundary_source"] == "model_number_multiset"
+    assert debug["matched_number_token_ids"] == ["S01-L01-T01", "S01-L01-T02"]
+    assert debug["local_play_boundary_x"] == 220.0
+    assert debug["global_play_boundary_x"] == 680.0
+    assert debug["ambiguous_number_play_token_ids"] == []
+
+
+def test_model_number_that_also_forms_shorthand_fails_closed_as_ambiguous() -> None:
+    tokens = [
+        _token("01", 100, 10),
+        _token("34", 350, 10),
+        _token("X1", 390, 10),
+    ]
+
+    evidence = _one(_result(
+        tokens,
+        numbers=[["01", "34"]],
+        multiplier="34X1",
+    ))
+
+    assert evidence["status"] == "incomplete"
+    assert "local_number_play_scope_ambiguous" in evidence["warnings"]
+    assert evidence["reconstructed_candidate"]["multiplier_rules"] == []
+    assert evidence["evidence"]["bbox_debug"]["ambiguous_number_play_token_ids"] == [
+        "S01-L01-T02"
+    ]
+
+
 @pytest.mark.parametrize("line_id_mode", ["blank", "missing"])
 def test_blank_or_missing_line_id_produces_explicit_safe_incomplete_evidence(
     line_id_mode: str,
@@ -607,10 +723,13 @@ def test_left_number_zone_keeps_twenty_three_as_a_number() -> None:
 
 @pytest.mark.parametrize("category", ["23", "24"])
 def test_right_play_zone_category_never_enters_number_groups(category: str) -> None:
-    source = _result([_token(category, 800, 10)], numbers=[[category]])
+    source = _result(
+        [_token("01", 100, 10), _token(category, 800, 10)],
+        numbers=[["01"]],
+    )
     evidence = _one(source)
-    assert evidence["reconstructed_candidate"]["number_groups"] == []
-    token = evidence["evidence"]["tokens"][0]
+    assert evidence["reconstructed_candidate"]["number_groups"] == [["01"]]
+    token = evidence["evidence"]["tokens"][1]
     assert token["zone"] == "play"
     assert token["classification"] == "play_category_evidence"
     assert evidence["status"] == "incomplete"
@@ -618,13 +737,13 @@ def test_right_play_zone_category_never_enters_number_groups(category: str) -> N
 
 def test_right_play_zone_34_plus_x1_forms_rule_without_becoming_a_number() -> None:
     source = _result(
-        [_token("34", 760, 10), _token("X1", 810, 10)],
-        numbers=[["34"]],
+        [_token("01", 100, 10), _token("34", 760, 10), _token("X1", 810, 10)],
+        numbers=[["01"]],
         multiplier="34X1",
     )
     evidence = _one(source)
     reconstructed = evidence["reconstructed_candidate"]
-    assert reconstructed["number_groups"] == []
+    assert reconstructed["number_groups"] == [["01"]]
     assert reconstructed["multiplier_rules"] == ["3/4X1"]
     assert any(warning.startswith("play_rule_reconstructed:") for warning in evidence["warnings"])
 
@@ -910,6 +1029,42 @@ def _sample014_s06_result() -> dict:
     return _sample014_section_result(6, specs)
 
 
+def _sample014_s11_result() -> dict:
+    specs = [
+        (
+            "S11-L01",
+            [
+                ("12", (590, 240, 634, 268)),
+                ("x", (638, 240, 658, 268)),
+                ("15", (662, 240, 706, 268)),
+                ("x", (710, 240, 730, 268)),
+                ("34", (734, 240, 778, 268)),
+                ("x", (782, 240, 802, 268)),
+                ("13", (806, 240, 850, 268)),
+                (" ", (854, 240, 870, 268)),
+                ("2", (874, 247, 896, 273)),
+                ("x", (900, 247, 920, 273)),
+                ("3", (924, 247, 946, 273)),
+            ],
+            [["12", "15", "34", "13"]],
+            "2x3",
+        ),
+        (
+            "S11-L02",
+            [
+                ("20", (806, 278, 850, 306)),
+                (" ", (854, 278, 870, 306)),
+                ("3", (874, 285, 896, 311)),
+                ("x", (900, 285, 920, 311)),
+                ("1", (924, 285, 946, 311)),
+            ],
+            [["20"]],
+            "3x1",
+        ),
+    ]
+    return _sample014_section_result(11, specs)
+
+
 def _sample014_section_result(section_number: int, specs: list[tuple]) -> dict:
     lines: list[dict] = []
     rows: list[dict] = []
@@ -1015,6 +1170,146 @@ def test_sample014_s06_real_bbox_composes_consistent_fragmented_multiplier() -> 
     assert primary["auto_submit"] is False
     assert primary["evidence"]["bbox_debug"]["play_zone_boundary_x"] == 242.0
     assert source == before
+
+
+def test_sample014_s11_real_bbox_keeps_independent_member_line_rules() -> None:
+    source = _sample014_s11_result()
+    before = copy.deepcopy(source)
+
+    evidence = reconstruct_structure(source, game="539")
+    primary = next(item for item in evidence if item["line_role"] == "primary")
+    continuation = next(
+        item for item in evidence if item["line_role"] == "continuation"
+    )
+
+    assert primary["structure_id"] == "S11"
+    assert primary["primary_line_id"] == "S11-L01"
+    assert primary["member_line_ids"] == ["S11-L01", "S11-L02"]
+    assert continuation["line_id"] == "S11-L02"
+    assert continuation["primary_line_id"] == "S11-L01"
+    assert "reconstructed_candidate" not in continuation
+    assert primary["reconstructed_candidate"] == {
+        "number_groups": [["12"], ["15"], ["34"], ["13", "20"]],
+        "multiplier_rules": ["2X3", "3X1"],
+        "layout": "column_bet",
+        "collision": None,
+        "shared_multiplier": None,
+    }
+    assert primary["status"] == "consistent"
+    assert "fragment_multiplier_ambiguous" not in primary["warnings"]
+    assert not any("collision" in warning for warning in primary["warnings"])
+    assert "model_collision_evidence_missing" not in primary["warnings"]
+    assert primary["needs_review"] is True
+    assert primary["human_confirmation_required"] is True
+    assert primary["auto_apply"] is False
+    assert primary["auto_confirm"] is False
+    assert primary["auto_submit"] is False
+    assert source == before
+
+
+def _two_line_fragment_rules(
+    first_parts: list[str],
+    second_parts: list[str],
+    *,
+    first_multiplier: str,
+    second_multiplier: str,
+) -> dict:
+    specs = []
+    for line_index, (parts, multiplier) in enumerate(
+        (
+            (first_parts, first_multiplier),
+            (second_parts, second_multiplier),
+        ),
+        start=1,
+    ):
+        line_id = f"S01-L{line_index:02d}"
+        y = 10 + (line_index - 1) * 40
+        token_specs = [(f"0{line_index}", (10, y, 30, y + 16))]
+        token_specs.extend(
+            (part, (60 + index * 24, y, 80 + index * 24, y + 16))
+            for index, part in enumerate(parts)
+        )
+        specs.append((line_id, token_specs, [[f"0{line_index}"]], multiplier))
+    return _sample014_section_result(1, specs)
+
+
+def test_two_member_lines_keep_independent_fragmented_rules() -> None:
+    source = _two_line_fragment_rules(
+        ["2", "x", "3"],
+        ["3", "x", "1"],
+        first_multiplier="2X3",
+        second_multiplier="3X1",
+    )
+    primary = next(
+        item for item in reconstruct_structure(source, game="539")
+        if item["line_role"] == "primary"
+    )
+
+    assert primary["reconstructed_candidate"]["multiplier_rules"] == ["2X3", "3X1"]
+    assert primary["reconstructed_candidate"]["collision"] is None
+    assert "fragment_multiplier_ambiguous" not in primary["warnings"]
+
+
+def test_shared_fragment_token_id_fails_closed_as_ambiguous() -> None:
+    source = _two_line_fragment_rules(
+        ["2", "x", "3"],
+        ["2", "x", "1"],
+        first_multiplier="2X3",
+        second_multiplier="2X1",
+    )
+    source["lines"][0]["tokens"][1]["token_id"] = "shared-category-token"
+    source["lines"][1]["tokens"][1]["token_id"] = "shared-category-token"
+
+    primary = next(
+        item for item in reconstruct_structure(source, game="539")
+        if item["line_role"] == "primary"
+    )
+    assert primary["reconstructed_candidate"]["multiplier_rules"] == []
+    assert primary["status"] == "incomplete"
+    assert "fragment_multiplier_ambiguous" in primary["warnings"]
+
+
+def test_fragmented_rules_with_same_value_follow_existing_merge_policy() -> None:
+    source = _two_line_fragment_rules(
+        ["2", "x", "1"],
+        ["3", "x", "1"],
+        first_multiplier="2X1",
+        second_multiplier="3X1",
+    )
+    primary = next(
+        item for item in reconstruct_structure(source, game="539")
+        if item["line_role"] == "primary"
+    )
+
+    assert primary["reconstructed_candidate"]["multiplier_rules"] == ["2/3X1"]
+
+
+def test_only_unconsumed_stacked_categories_remain_collision_evidence() -> None:
+    tokens = [
+        _token("01", 10, 10),
+        _token("x", 45, 10),
+        _token("02", 80, 10),
+        _token("2", 130, 10),
+        _token("x", 154, 10),
+        _token("1", 178, 10),
+        _token("3", 260, 10),
+        _token("4", 260, 50),
+    ]
+    evidence = _one(_result(
+        tokens,
+        numbers=[["01"], ["02"]],
+        layout="column_bet",
+        multiplier="2X1",
+        extra_row={"collision": "3/4"},
+    ))
+
+    assert evidence["reconstructed_candidate"]["multiplier_rules"] == ["2X1"]
+    assert evidence["reconstructed_candidate"]["collision"] == "3/4"
+    collision_warnings = [
+        warning for warning in evidence["warnings"]
+        if warning.startswith("collision_play_evidence:")
+    ]
+    assert collision_warnings == ["collision_play_evidence:3/4"]
 
 
 @pytest.mark.parametrize(

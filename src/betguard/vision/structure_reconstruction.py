@@ -266,18 +266,15 @@ def _reconstruct_line(
             "global_zone": global_zone,
         })
 
-    preliminary_numbers = [
-        token for token in prepared_tokens
-        if token["bbox"] is not None
-        and _TWO_DIGIT_RE.fullmatch(str(token["text"]))
-        and _number_is_valid(str(token["text"]), game=game)
-        and token["global_zone"] != "play"
-    ]
     play_boundary = _structure_play_boundary(
-        preliminary_numbers,
+        prepared_tokens,
+        model_numbers=model_candidate.get("numbers"),
+        game=game,
         coordinate_spaces=coordinate_spaces,
         image_width=image_width,
     )
+    if play_boundary["ambiguous_number_play_token_ids"]:
+        _warn(warnings, blocking, "local_number_play_scope_ambiguous")
 
     for prepared in prepared_tokens:
         token_id = str(prepared["token_id"])
@@ -289,6 +286,7 @@ def _reconstruct_line(
         global_zone = str(prepared["global_zone"])
         zone = _structure_token_zone(
             bbox,
+            token_id=token_id,
             coordinate_space=coordinate_space,
             global_zone=global_zone,
             play_boundary=play_boundary,
@@ -374,6 +372,7 @@ def _reconstruct_line(
             "zone": zone,
             "global_zone": global_zone,
             "play_boundary_source": play_boundary["source"],
+            "number_boundary_source": play_boundary["number_boundary_source"],
             "source_line_id": source_line_id,
         }
         if multiplier_classification is not None:
@@ -474,22 +473,6 @@ def _reconstruct_line(
     if _number_in_play_area(number_tokens, collision_tokens, complete_multiplier_texts, token_evidence):
         _warn(warnings, blocking, "number_token_in_play_area")
 
-    stacked_categories, stacked_category_issues = _stacked_collision_categories(
-        collision_tokens,
-    )
-    for issue in stacked_category_issues:
-        _warn(warnings, blocking, issue)
-
-    derived_play_rules, resolved_partial_token_ids, play_rule_issues = _complete_play_rules(
-        play_category_tokens + stacked_categories,
-        partial_multiplier_records,
-    )
-    for issue in play_rule_issues:
-        _warn(warnings, blocking, issue)
-    if derived_play_rules:
-        complete_multiplier_texts.extend(derived_play_rules)
-        warnings.append("play_rule_reconstructed:" + "/".join(derived_play_rules))
-
     (
         fragmented_rules,
         resolved_fragment_token_ids,
@@ -505,12 +488,38 @@ def _reconstruct_line(
         complete_multiplier_texts.extend(fragmented_rules)
         warnings.append("fragmented_play_rule_reconstructed:" + "/".join(fragmented_rules))
 
+    collision_after_fragments = [
+        token for token in collision_tokens
+        if str(token.get("token_id") or "") not in resolved_fragment_token_ids
+    ]
+    stacked_categories, stacked_category_issues = _stacked_collision_categories(
+        collision_after_fragments,
+    )
+    for issue in stacked_category_issues:
+        _warn(warnings, blocking, issue)
+
+    derived_play_rules, resolved_partial_token_ids, play_rule_issues = _complete_play_rules(
+        play_category_tokens + stacked_categories,
+        partial_multiplier_records,
+    )
+    for issue in play_rule_issues:
+        _warn(warnings, blocking, issue)
+    if derived_play_rules:
+        complete_multiplier_texts.extend(derived_play_rules)
+        warnings.append("play_rule_reconstructed:" + "/".join(derived_play_rules))
+
     resolved_multiplier_token_ids = (
         resolved_partial_token_ids | resolved_fragment_token_ids
     )
+    stacked_collision_token_ids = {
+        str(token_id)
+        for category in stacked_categories
+        for token_id in category.get("member_token_ids") or []
+    }
     unresolved_fragments = [
         token for token in fragmented_multiplier_tokens
         if str(token.get("token_id") or "") not in resolved_multiplier_token_ids
+        and str(token.get("token_id") or "") not in stacked_collision_token_ids
     ]
     if unresolved_fragments and "fragment_multiplier_ambiguous" not in blocking:
         _warn(warnings, blocking, "fragment_multiplier_incomplete")
@@ -523,7 +532,18 @@ def _reconstruct_line(
             split_complete_rules(" ".join(complete_rules))
         )
 
-    collision_texts = {str(token["text"]) for token in collision_tokens}
+    collision_token_ids = {
+        str(token.get("token_id") or "") for token in collision_tokens
+    }
+    remaining_collision_tokens = [
+        token for token in collision_tokens
+        if str(token.get("token_id") or "") not in resolved_multiplier_token_ids
+    ]
+    remaining_collision_ids = {
+        str(token.get("token_id") or "") for token in remaining_collision_tokens
+    }
+    collision_fully_composed = bool(collision_token_ids) and not remaining_collision_ids
+    collision_texts = {str(token["text"]) for token in remaining_collision_tokens}
     model_row = _mapping(model_evidence.get("row")) if model_evidence else {}
     unresolved_partial = [
         token for token in partial_multiplier_records
@@ -532,19 +552,28 @@ def _reconstruct_line(
     ]
     if unresolved_partial:
         _warn(warnings, blocking, "partial_multiplier_evidence")
+        if stacked_categories:
+            _warn(warnings, blocking, "fragment_multiplier_incomplete")
     if invalid_multiplier_texts:
         _warn(warnings, blocking, "invalid_multiplier_evidence")
-    collision_token_ids = {
-        str(token.get("token_id") or "") for token in collision_tokens
-    }
-    collision_fully_composed = bool(collision_token_ids) and (
-        collision_token_ids <= resolved_multiplier_token_ids
-    )
+    if not remaining_collision_ids:
+        collision = (
+            _canonical_collision(model_row.get("collision"))
+            if collision_fully_composed and "collision" in model_row
+            else None
+        )
+    elif remaining_collision_ids != collision_token_ids:
+        remaining_stacked, _ = _stacked_collision_categories(
+            remaining_collision_tokens,
+        )
+        collision = (
+            str(remaining_stacked[0]["text"])
+            if len(remaining_stacked) == 1
+            else None
+        )
     if collision_texts:
         warnings.append("collision_play_evidence:" + "/".join(sorted(collision_texts)))
-        if collision_fully_composed:
-            warnings.append("collision_composed_into_multiplier")
-        elif layout != "column_bet":
+        if layout != "column_bet":
             _warn(warnings, blocking, "collision_multiplier_scope_ambiguous")
         elif "collision" not in model_row:
             _warn(warnings, blocking, "model_collision_evidence_missing")
@@ -564,17 +593,12 @@ def _reconstruct_line(
         "shared_multiplier": shared_multiplier,
     }
 
-    comparison_collision = (
-        collision
-        if model_compare.get("collision") is not None or not collision_fully_composed
-        else None
-    )
     reconstruction_compare = {
         "number_groups": number_groups,
         "column_count": len(number_groups) if layout == "column_bet" else 1 if number_groups else 0,
         "layout": layout,
         "multiplier_rules": complete_rules,
-        "collision": comparison_collision,
+        "collision": collision,
         "shared_multiplier": shared_multiplier,
     }
 
@@ -596,6 +620,15 @@ def _reconstruct_line(
         "play_zone_boundary_x": play_boundary["boundary_x"],
         "play_zone_boundary_source": play_boundary["source"],
         "global_play_zone_boundary_x": play_boundary["global_boundary_x"],
+        "number_boundary_source": play_boundary["number_boundary_source"],
+        "matched_number_token_ids": play_boundary["matched_number_token_ids"],
+        "unmatched_model_number_values": play_boundary["unmatched_model_number_values"],
+        "local_play_boundary_x": play_boundary["local_play_boundary_x"],
+        "global_play_boundary_x": play_boundary["global_boundary_x"],
+        "fallback_reason": play_boundary["fallback_reason"],
+        "ambiguous_number_play_token_ids": play_boundary[
+            "ambiguous_number_play_token_ids"
+        ],
         "rightmost_number_x2": play_boundary["rightmost_number_x2"],
         "rightmost_number_token_ids": play_boundary["rightmost_number_token_ids"],
         "image_width": image_width,
@@ -632,6 +665,7 @@ def _reconstruct_line(
                 "combination_count",
             ],
         },
+        "needs_review": True,
         "human_confirmation_required": True,
         "auto_apply": False,
         "auto_confirm": False,
@@ -799,6 +833,7 @@ def _continuation_evidence(
             "bbox_debug": {},
             "rules_used": [],
         },
+        "needs_review": True,
         "human_confirmation_required": True,
         "auto_apply": False,
         "auto_confirm": False,
@@ -847,6 +882,7 @@ def _line_id_missing_evidence(
             },
             "rules_used": [],
         },
+        "needs_review": True,
         "human_confirmation_required": True,
         "auto_apply": False,
         "auto_confirm": False,
@@ -984,8 +1020,10 @@ def _bbox_zone(
 
 
 def _structure_play_boundary(
-    number_tokens: list[dict[str, Any]],
+    prepared_tokens: list[dict[str, Any]],
     *,
+    model_numbers: Any,
+    game: str,
     coordinate_spaces: set[str],
     image_width: float | None,
 ) -> dict[str, Any]:
@@ -993,19 +1031,45 @@ def _structure_play_boundary(
         coordinate_spaces,
         image_width=image_width,
     )
+    (
+        number_tokens,
+        unmatched_model_values,
+        ambiguous_token_ids,
+        shorthand_play_token_ids,
+        model_numbers_available,
+    ) = _match_model_number_tokens(
+        prepared_tokens,
+        model_numbers=model_numbers,
+        game=game,
+    )
     number_spaces = {
         str(token.get("coordinate_space") or "")
         for token in number_tokens
         if token.get("bbox") is not None
     }
-    if number_tokens and len(number_spaces) == 1 and "" not in number_spaces:
+    reliable_model_match = (
+        model_numbers_available
+        and not unmatched_model_values
+        and number_tokens
+        and len(number_spaces) == 1
+        and "" not in number_spaces
+    )
+    matched_token_ids = [str(token.get("token_id") or "") for token in number_tokens]
+    if reliable_model_match:
         rightmost_x2 = max(float(token["bbox"][2]) for token in number_tokens)
         return {
             "boundary_x": rightmost_x2,
             "coordinate_space": next(iter(number_spaces)),
             "source": "structure_relative_rightmost_number_x2",
+            "number_boundary_source": "model_number_multiset",
             "zone_rule": "token_bbox_x1_gt_structure_rightmost_number_x2",
             "global_boundary_x": global_boundary,
+            "local_play_boundary_x": rightmost_x2,
+            "matched_number_token_ids": matched_token_ids,
+            "unmatched_model_number_values": [],
+            "fallback_reason": None,
+            "ambiguous_number_play_token_ids": ambiguous_token_ids,
+            "shorthand_play_token_ids": shorthand_play_token_ids,
             "rightmost_number_x2": rightmost_x2,
             "rightmost_number_token_ids": [
                 str(token.get("token_id") or "")
@@ -1013,26 +1077,182 @@ def _structure_play_boundary(
                 if float(token["bbox"][2]) == rightmost_x2
             ],
         }
+    if not model_numbers_available:
+        fallback_reason = "model_number_multiset_unavailable"
+    elif unmatched_model_values:
+        fallback_reason = "model_number_tokens_unmatched"
+    elif not number_tokens:
+        fallback_reason = "model_number_tokens_missing"
+    else:
+        fallback_reason = "matched_number_coordinate_space_invalid"
     return {
         "boundary_x": global_boundary,
         "coordinate_space": (
             next(iter(coordinate_spaces)) if len(coordinate_spaces) == 1 else None
         ),
         "source": "global_image_ratio_fallback",
+        "number_boundary_source": "global_image_ratio_fallback",
         "zone_rule": _ZONE_RULE,
         "global_boundary_x": global_boundary,
+        "local_play_boundary_x": None,
+        "matched_number_token_ids": matched_token_ids,
+        "unmatched_model_number_values": unmatched_model_values,
+        "fallback_reason": fallback_reason,
+        "ambiguous_number_play_token_ids": ambiguous_token_ids,
+        "shorthand_play_token_ids": shorthand_play_token_ids,
         "rightmost_number_x2": None,
         "rightmost_number_token_ids": [],
     }
 
 
+def _match_model_number_tokens(
+    prepared_tokens: list[dict[str, Any]],
+    *,
+    model_numbers: Any,
+    game: str,
+) -> tuple[list[dict[str, Any]], list[str], list[str], list[str], bool]:
+    expected_values = [
+        str(value)
+        for group in (model_numbers if isinstance(model_numbers, list) else [])
+        if isinstance(group, list)
+        for value in group
+        if isinstance(value, str) and _TWO_DIGIT_RE.fullmatch(value)
+    ]
+    if not expected_values:
+        return [], [], [], [], False
+
+    candidates = [
+        token for token in prepared_tokens
+        if token.get("bbox") is not None
+        and _TWO_DIGIT_RE.fullmatch(str(token.get("text") or ""))
+        and _number_is_valid(str(token.get("text") or ""), game=game)
+    ]
+    candidates.sort(key=_prepared_token_geometry_key)
+    shorthand_play_token_ids = _complete_shorthand_category_token_ids(prepared_tokens)
+    expected_counts = Counter(expected_values)
+    candidates_by_value: dict[str, list[dict[str, Any]]] = {}
+    for token in candidates:
+        candidates_by_value.setdefault(str(token.get("text") or ""), []).append(token)
+
+    matched: list[dict[str, Any]] = []
+    ambiguous_ids: list[str] = []
+    unmatched: list[str] = []
+    for value in _unique(expected_values):
+        needed = expected_counts[value]
+        value_candidates = candidates_by_value.get(value, [])
+        ordinary = [
+            token for token in value_candidates
+            if str(token.get("token_id") or "") not in shorthand_play_token_ids
+        ]
+        shorthand = [
+            token for token in value_candidates
+            if str(token.get("token_id") or "") in shorthand_play_token_ids
+        ]
+
+        ordinary_to_use = ordinary[:needed]
+        matched.extend(ordinary_to_use)
+        needed -= len(ordinary_to_use)
+        if len(ordinary) > len(ordinary_to_use):
+            ambiguous_ids.extend(str(token.get("token_id") or "") for token in ordinary)
+
+        if needed:
+            shorthand_to_use = shorthand[:needed]
+            matched.extend(shorthand_to_use)
+            ambiguous_ids.extend(
+                str(token.get("token_id") or "") for token in shorthand
+            )
+            needed -= len(shorthand_to_use)
+        if needed:
+            unmatched.extend([value] * needed)
+
+    matched.sort(key=_prepared_token_geometry_key)
+    return (
+        matched,
+        unmatched,
+        _unique(ambiguous_ids),
+        sorted(shorthand_play_token_ids),
+        True,
+    )
+
+
+def _complete_shorthand_category_token_ids(
+    prepared_tokens: list[dict[str, Any]],
+) -> set[str]:
+    categories = [
+        token for token in prepared_tokens
+        if token.get("bbox") is not None
+        and _PLAY_CATEGORY_RE.fullmatch(str(token.get("text") or ""))
+    ]
+    values = [
+        token for token in prepared_tokens
+        if token.get("bbox") is not None
+        and _MULTIPLIER_VALUE_RE.fullmatch(str(token.get("text") or ""))
+    ]
+    matches_by_category: dict[str, list[dict[str, Any]]] = {}
+    value_match_counts: Counter[str] = Counter()
+    for category in categories:
+        category_record = {
+            **category,
+            "source_line_ids": [str(category.get("source_line_id") or "")],
+        }
+        matches = [
+            value for value in values
+            if _value_matches_category(category_record, value)
+            and split_complete_rules(
+                canonical_category(str(category.get("text") or ""))
+                + normalize_rule(str(value.get("text") or ""))
+            )
+        ]
+        category_id = str(category.get("token_id") or "")
+        matches_by_category[category_id] = matches
+        value_match_counts.update(
+            str(value.get("token_id") or "") for value in matches
+        )
+
+    return {
+        category_id
+        for category_id, matches in matches_by_category.items()
+        if len(matches) == 1
+        and value_match_counts[str(matches[0].get("token_id") or "")] == 1
+    }
+
+
+def _prepared_token_geometry_key(token: Mapping[str, Any]) -> tuple[Any, ...]:
+    bbox = token.get("bbox")
+    center = _center(bbox) if isinstance(bbox, list) else (math.inf, math.inf)
+    return (
+        str(token.get("source_line_id") or ""),
+        center[1],
+        center[0],
+        str(token.get("token_id") or ""),
+    )
+
+
 def _structure_token_zone(
     bbox: list[float] | None,
     *,
+    token_id: str,
     coordinate_space: str | None,
     global_zone: str,
     play_boundary: Mapping[str, Any],
 ) -> str:
+    matched_number_token_ids = set(play_boundary.get("matched_number_token_ids") or [])
+    shorthand_play_token_ids = set(play_boundary.get("shorthand_play_token_ids") or [])
+    ambiguous_token_ids = set(
+        play_boundary.get("ambiguous_number_play_token_ids") or []
+    )
+    if (
+        play_boundary.get("source") == "structure_relative_rightmost_number_x2"
+        and token_id
+        and token_id in matched_number_token_ids
+    ):
+        return "main"
+    if (
+        token_id
+        and token_id in shorthand_play_token_ids
+        and token_id not in ambiguous_token_ids
+    ):
+        return "play"
     boundary_x = play_boundary.get("boundary_x")
     boundary_space = play_boundary.get("coordinate_space")
     if (
@@ -1060,7 +1280,7 @@ def _compose_fragmented_multiplier_rules(
         source_line_id = str(token.get("source_line_id") or "")
         by_source_line.setdefault(source_line_id, []).append(token)
 
-    candidates: list[dict[str, Any]] = []
+    base_candidates: list[dict[str, Any]] = []
     for source_line_id in sorted(by_source_line):
         ordered = sorted(
             by_source_line[source_line_id],
@@ -1076,40 +1296,52 @@ def _compose_fragmented_multiplier_rules(
             candidate = _parse_fragment_rule(ordered, index)
             if candidate is None:
                 continue
-            extended, extension_issue = _extend_fragment_category(
-                candidate,
-                collision_tokens=collision_tokens,
-            )
-            if extension_issue is not None:
-                issues.append(extension_issue)
-                continue
-            candidates.append(extended)
+            base_candidates.append(candidate)
 
-    unique_candidates: list[dict[str, Any]] = []
+    unique_base_candidates: list[dict[str, Any]] = []
     seen_candidates: set[tuple[str, tuple[str, ...]]] = set()
-    for candidate in candidates:
+    for candidate in base_candidates:
         key = (
             str(candidate["rule"]),
             tuple(sorted(str(token_id) for token_id in candidate["token_ids"])),
         )
         if key not in seen_candidates:
             seen_candidates.add(key)
-            unique_candidates.append(candidate)
+            unique_base_candidates.append(candidate)
+
+    base_token_use_counts = Counter(
+        str(token_id)
+        for candidate in unique_base_candidates
+        for token_id in candidate["token_ids"]
+    )
+    if any(count > 1 for count in base_token_use_counts.values()):
+        issues.append("fragment_multiplier_ambiguous")
+        unique_candidates: list[dict[str, Any]] = []
+    else:
+        base_consumed_ids = set(base_token_use_counts)
+        extension_tokens = [
+            token for token in collision_tokens
+            if str(token.get("token_id") or "") not in base_consumed_ids
+        ]
+        unique_candidates = []
+        for candidate in unique_base_candidates:
+            extended, extension_issue = _extend_fragment_category(
+                candidate,
+                collision_tokens=extension_tokens,
+            )
+            if extension_issue is not None:
+                issues.append(extension_issue)
+                continue
+            unique_candidates.append(extended)
 
     token_use_counts = Counter(
         str(token_id)
         for candidate in unique_candidates
         for token_id in candidate["token_ids"]
     )
-    category_use_counts = Counter(
-        str(candidate["category"])
-        for candidate in unique_candidates
-    )
-    ambiguous = any(count > 1 for count in token_use_counts.values()) or any(
-        count > 1 for count in category_use_counts.values()
-    )
-    if ambiguous:
-        issues.append("fragment_multiplier_ambiguous")
+    if issues or any(count > 1 for count in token_use_counts.values()):
+        if any(count > 1 for count in token_use_counts.values()):
+            issues.append("fragment_multiplier_ambiguous")
         selected: list[dict[str, Any]] = []
     else:
         selected = unique_candidates
@@ -1123,7 +1355,19 @@ def _compose_fragmented_multiplier_rules(
     unresolved_token_ids = {
         str(token.get("token_id") or "") for token in usable
     } - resolved
-    if selected and unresolved_token_ids:
+    unresolved_collision_tokens = [
+        token for token in collision_tokens
+        if str(token.get("token_id") or "") in unresolved_token_ids
+    ]
+    unresolved_stacked, _ = _stacked_collision_categories(
+        unresolved_collision_tokens,
+    )
+    unresolved_stacked_ids = {
+        str(token_id)
+        for category in unresolved_stacked
+        for token_id in category.get("member_token_ids") or []
+    }
+    if selected and unresolved_token_ids - unresolved_stacked_ids:
         issues.append("fragment_multiplier_ambiguous")
         selected = []
         resolved = set()
@@ -1186,6 +1430,9 @@ def _parse_fragment_rule(
     while cursor < len(ordered) and _SINGLE_DIGIT_RE.fullmatch(
         str(ordered[cursor].get("text") or "")
     ):
+        previous_value_token = value_tokens[-1] if value_tokens else operator
+        if not _fragment_pair_adjacent(previous_value_token, ordered[cursor]):
+            break
         if (
             value_tokens
             and str(ordered[cursor].get("text") or "") in {"2", "3", "4"}
@@ -1203,6 +1450,11 @@ def _parse_fragment_rule(
         while cursor < len(ordered) and _SINGLE_DIGIT_RE.fullmatch(
             str(ordered[cursor].get("text") or "")
         ):
+            previous_decimal_token = (
+                decimal_digits[-1] if decimal_digits else decimal_point
+            )
+            if not _fragment_pair_adjacent(previous_decimal_token, ordered[cursor]):
+                break
             if (
                 decimal_digits
                 and str(ordered[cursor].get("text") or "") in {"2", "3", "4"}
