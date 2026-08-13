@@ -13,6 +13,7 @@ from __future__ import annotations
 import queue
 import threading
 import time
+import json
 from typing import Any
 
 from betguard.webfill.web_assisted_fill_executor import (
@@ -46,6 +47,14 @@ def _pad_number(n: int) -> str:
     if 1 <= i <= 9:
         return f"0{i}"
     return str(i)
+
+
+def _assist_panel_popup_script(url: str) -> str:
+    encoded_url = json.dumps(url)
+    return (
+        f"() => {{ window.open({encoded_url}, 'betguard_panel', "
+        "'width=420,height=1040,left=1480,top=0'); }"
+    )
 
 
 def _count_selected_numbers(page: Any, expected: list[str]) -> int:
@@ -269,10 +278,11 @@ class _AssistWorker(threading.Thread):
 
         # Open assist panel popup after any successful browser start (new or reused)
         try:
-            self._page.evaluate(
-                "() => { window.open('http://127.0.0.1:8765/assist-panel',"
-                " 'betguard_panel', 'width=420,height=1040,left=1480,top=0'); }"
+            assist_panel_url = str(
+                payload.get("assist_panel_url")
+                or "http://127.0.0.1:8765/assist-panel"
             )
+            self._page.evaluate(_assist_panel_popup_script(assist_panel_url))
         except Exception:
             pass
 

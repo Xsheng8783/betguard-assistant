@@ -1,0 +1,225 @@
+{
+  "report_type": "diagnostics_only",
+  "dataset_truth_modified": false,
+  "external_qwen_dashscope_calls": 0,
+  "cache_provenance": {
+    "sample-008": {
+      "cache_hit": true,
+      "model": "qwen3-vl-plus",
+      "prompt_version": "combined-bbox-v1",
+      "image_sha256": "79c9fa3f35c0d31a144f9391559b524d6a993d0c05b096dd8325fd5c94caac36"
+    },
+    "sample-010": {
+      "cache_hit": true,
+      "model": "qwen3-vl-plus",
+      "prompt_version": "combined-bbox-v1",
+      "image_sha256": "12cd59aef6f4afb52e52b2b51aa496dc508badaa387855630abc38f603184edd"
+    },
+    "sample-011": {
+      "cache_hit": true,
+      "model": "qwen3-vl-plus",
+      "prompt_version": "combined-bbox-v1",
+      "image_sha256": "7f15be60d6876febcd5b455c361a868bad8ddab0c3b7a442d029f0140ad738a6"
+    }
+  },
+  "entries": [
+    {
+      "sample": "sample-008",
+      "bet_structure": "S03 missing 08 and 04",
+      "human_expected": {"number_groups": [["08"], ["01", "04"]], "multiplier_rules": ["2X5"]},
+      "qwen_section": "S03",
+      "qwen_row": {"numbers": [["58"], ["01"]], "layout_hint": "row_bet"},
+      "qwen_multiplier": "2x5",
+      "qwen_tokens": ["58", "x", "01", " ", "2", "x", "5"],
+      "qwen_bboxes": [[45,315,85,358],[90,320,105,353],[110,315,150,358],[155,320,170,353],[175,328,195,358],[200,325,215,358],[220,328,240,358]],
+      "recognition_lines": ["S03-L01: 58 x 01   2 x 5"],
+      "member_line_ids": ["S03-L01"],
+      "reconstructed_candidate": {"number_groups": [["01"]], "multiplier_rules": [], "layout": "normal_row", "collision": null, "shared_multiplier": null},
+      "ui_candidate": {"number_groups": [["01"]], "multiplier_rules": [], "layout": "normal_row", "collision": null, "shared_multiplier": null},
+      "root_cause_classification": "OCR_MISSING"
+    },
+    {
+      "sample": "sample-008",
+      "bet_structure": "S03 multiplier 2X5 missing from final card",
+      "human_expected": {"number_groups": [["08"], ["01", "04"]], "multiplier_rules": ["2X5"]},
+      "qwen_section": "S03",
+      "qwen_row": {"numbers": [["58"], ["01"]], "layout_hint": "row_bet"},
+      "qwen_multiplier": "2x5",
+      "qwen_tokens": ["58", "x", "01", " ", "2", "x", "5"],
+      "qwen_bboxes": [[45,315,85,358],[90,320,105,353],[110,315,150,358],[155,320,170,353],[175,328,195,358],[200,325,215,358],[220,328,240,358]],
+      "recognition_lines": ["S03-L01: 58 x 01   2 x 5"],
+      "member_line_ids": ["S03-L01"],
+      "reconstructed_candidate": {"number_groups": [["01"]], "multiplier_rules": [], "layout": "normal_row", "collision": null, "shared_multiplier": null},
+      "ui_candidate": {"number_groups": [["01"]], "multiplier_rules": [], "layout": "normal_row", "collision": null, "shared_multiplier": null},
+      "root_cause_classification": "MULTIPLIER_ASSOCIATION_ERROR"
+    },
+    {
+      "sample": "sample-008",
+      "bet_structure": "S04 missing 26",
+      "human_expected": {"number_groups": [["08"], ["16", "26"]], "multiplier_rules": ["2X5"]},
+      "qwen_section": "S04",
+      "qwen_row": {"numbers": [["08"], ["16"]], "layout_hint": "row_bet"},
+      "qwen_multiplier": "2x5",
+      "qwen_tokens": ["08", "x", "16", " ", "2", "x", "5"],
+      "qwen_bboxes": [[55,415,95,458],[100,420,115,453],[120,415,160,458],[165,420,180,453],[185,428,205,458],[210,425,225,458],[230,428,250,458]],
+      "recognition_lines": ["S04-L01: 08 x 16   2 x 5"],
+      "member_line_ids": ["S04-L01"],
+      "reconstructed_candidate": {"number_groups": [["08"], ["16"]], "multiplier_rules": ["2X5"], "layout": "column_bet", "collision": null, "shared_multiplier": null},
+      "ui_candidate": {"number_groups": [["08"], ["16"]], "multiplier_rules": ["2X5"], "layout": "column_bet", "collision": null, "shared_multiplier": null},
+      "root_cause_classification": "OCR_MISSING"
+    },
+    {
+      "sample": "sample-008",
+      "bet_structure": "S06 missing 09",
+      "human_expected": {"number_groups": [["25"], ["26"], ["28"], ["07", "09"]], "multiplier_rules": ["3X1"]},
+      "qwen_section": "S06",
+      "qwen_row": {"numbers": [["25"], ["26"], ["28"], ["07"]], "layout_hint": "row_bet"},
+      "qwen_multiplier": "3x1",
+      "qwen_tokens": ["25", "x", "26", "x", "28", "x", "07", " ", "3", "x", "1"],
+      "qwen_bboxes": [[75,618,115,661],[120,623,135,656],[140,618,180,661],[185,623,200,656],[205,618,245,661],[250,623,265,656],[270,618,310,661],[315,623,330,656],[335,620,360,653],[365,623,385,656],[390,623,410,656]],
+      "recognition_lines": ["S06-L01: 25 x 26 x 28 x 07   3 x 1"],
+      "member_line_ids": ["S06-L01"],
+      "reconstructed_candidate": {"number_groups": [["25"], ["26"], ["28"], ["07"]], "multiplier_rules": ["3X1"], "layout": "column_bet", "collision": null, "shared_multiplier": null},
+      "ui_candidate": {"number_groups": [["25"], ["26"], ["28"], ["07"]], "multiplier_rules": ["3X1"], "layout": "column_bet", "collision": null, "shared_multiplier": null},
+      "root_cause_classification": "OCR_MISSING"
+    },
+    {
+      "sample": "sample-010",
+      "bet_structure": "S01 two multipliers omitted from final card",
+      "human_expected": {"number_groups": [["11", "15", "24", "37"]], "multiplier_rules": ["2X5", "3X2"]},
+      "qwen_section": "S01",
+      "qwen_row": {"numbers": [["11"], ["15"], ["24"], ["37"]], "layout_hint": "row_bet"},
+      "qwen_multiplier": "2x5\n3x2",
+      "qwen_tokens": ["11", ",", "15", ",", "24", ".", "37", "2", "x", "5", "3", "x", "2"],
+      "qwen_bboxes": [[40,120,80,155],[90,125,105,150],[120,120,170,155],[180,125,195,150],[210,120,260,155],[270,125,285,150],[295,120,350,155],[420,125,445,150],[450,125,470,150],[480,125,510,150],[420,165,445,190],[450,165,470,190],[480,165,510,190]],
+      "recognition_lines": ["S01-L01: 11 , 15 , 24 . 37 2 x 5 3 x 2"],
+      "member_line_ids": ["S01-L01"],
+      "reconstructed_candidate": {"number_groups": [["11", "15", "24", "37"]], "multiplier_rules": ["2X5", "3X2"], "layout": "normal_row", "collision": null, "shared_multiplier": null},
+      "ui_candidate": {"number_groups": [["11", "15", "24", "37"]], "multiplier_rules": ["2X5", "3X2"], "layout": "normal_row", "collision": null, "shared_multiplier": null},
+      "root_cause_classification": "MULTIPLIER_ASSOCIATION_ERROR"
+    },
+    {
+      "sample": "sample-010",
+      "bet_structure": "S02 missing 3X1",
+      "human_expected": {"number_groups": [["15"], ["24"], ["22", "35", "28"]], "multiplier_rules": ["2X1", "3X1"]},
+      "qwen_section": "S02",
+      "qwen_row": {"numbers": [["15"], ["24"], ["22"]], "layout_hint": "column_bet"},
+      "qwen_multiplier": "2x1",
+      "qwen_tokens": ["15", ".", "24", "x", "22", "2", "x", "1", "35", "28"],
+      "qwen_bboxes": [[50,225,90,265],[100,230,115,260],[125,225,185,265],[195,230,215,260],[225,225,275,265],[395,255,420,285],[425,255,445,285],[455,255,485,285],[225,275,275,310],[225,305,275,335]],
+      "recognition_lines": ["S02-L01: 15 . 24 x 22 2 x 1 35 28"],
+      "member_line_ids": ["S02-L01"],
+      "reconstructed_candidate": {"number_groups": [["15"], ["24"], ["22", "35", "28"]], "multiplier_rules": ["2X1"], "layout": "column_bet", "collision": null, "shared_multiplier": null},
+      "ui_candidate": {"number_groups": [["15"], ["24"], ["22", "35", "28"]], "multiplier_rules": ["2X1"], "layout": "column_bet", "collision": null, "shared_multiplier": null},
+      "root_cause_classification": "OCR_MISSING"
+    },
+    {
+      "sample": "sample-011",
+      "bet_structure": "S03/S04 duplicate number row split into two cards",
+      "human_expected": {"number_groups": [["32", "34", "35"]], "multiplier_rules": ["2X2", "3X5"]},
+      "qwen_section": ["S03", "S04"],
+      "qwen_row": [{"numbers": [["32"], ["34"], ["35"]], "layout_hint": "row_bet"}, {"numbers": [["32"], ["34"], ["35"]], "layout_hint": "row_bet"}],
+      "qwen_multiplier": ["2x2", "3x5"],
+      "qwen_tokens": [["32", ".", "34", ".", "35", " ", "2", "x", "2"], ["32", ".", "34", ".", "35", " ", "3", "x", "5"]],
+      "qwen_bboxes": [[[62,315,102,347],[102,320,115,342],[120,315,160,347],[160,320,173,342],[178,315,218,347],[218,318,232,344],[235,305,265,347],[268,305,288,347],[292,305,322,347]], [[62,315,102,347],[102,320,115,342],[120,315,160,347],[160,320,173,342],[178,315,218,347],[218,318,232,344],[235,335,265,367],[268,335,288,367],[292,335,322,367]]],
+      "recognition_lines": ["S03-L01: 32 . 34 . 35   2 x 2", "S04-L01: 32 . 34 . 35   3 x 5"],
+      "member_line_ids": ["S03-L01", "S04-L01"],
+      "reconstructed_candidate": {"number_groups": [["32", "34", "35"]], "multiplier_rules": ["2X2", "3X5"], "layout": "normal_row", "collision": null, "shared_multiplier": null},
+      "ui_candidate": {"number_groups": [["32", "34", "35"]], "multiplier_rules": ["2X2", "3X5"], "layout": "normal_row", "collision": null, "shared_multiplier": null},
+      "root_cause_classification": "QWEN_ROW_GROUPING_ERROR"
+    },
+    {
+      "sample": "sample-011",
+      "bet_structure": "S08 first-column continuation 35 right-aligned into column four",
+      "human_expected": {"number_groups": [["21", "35"], ["23"], ["34"], ["37"]], "multiplier_rules": ["2X1", "3X0.2", "4X0.5"]},
+      "qwen_section": "S08",
+      "qwen_row": [{"numbers": [["21"], ["23"], ["34"], ["37"]], "multiplier": "2x1"}, {"numbers": [["35"]], "multiplier": null}],
+      "qwen_multiplier": ["2x1", null, "3x0.2", "4x0.5"],
+      "qwen_tokens": [["21", "x", "23", "x", "34", "x", "37", " ", "2", "x", "1"], ["35"]],
+      "qwen_bboxes": [[[92,695,122,727],[125,695,145,727],[148,695,188,727],[192,695,212,727],[215,695,255,727],[258,695,278,727],[282,695,322,727],[322,698,336,724],[339,685,369,727],[372,685,392,727],[395,685,425,727]], [[92,725,122,757]]],
+      "recognition_lines": ["S08-L01: 21 x 23 x 34 x 37   2 x 1", "S08-L02: 35", "S08-L03: 3 x 0 . 2", "S08-L04: 4 x 0 . 5"],
+      "member_line_ids": ["S08-L01", "S08-L02", "S08-L03", "S08-L04"],
+      "reconstructed_candidate": {"number_groups": [["21", "35"], ["23"], ["34"], ["37"]], "multiplier_rules": ["2X1", "3X0.2", "4X0.5"], "layout": "column_bet", "collision": null, "shared_multiplier": null},
+      "ui_candidate": {"number_groups": [["21", "35"], ["23"], ["34"], ["37"]], "multiplier_rules": ["2X1", "3X0.2", "4X0.5"], "layout": "column_bet", "collision": null, "shared_multiplier": null},
+      "root_cause_classification": "COLUMN_ALIGNMENT_ERROR"
+    },
+    {
+      "sample": "sample-011",
+      "bet_structure": "S10 token 37 excluded from final number groups",
+      "human_expected": {"number_groups": [["34"], ["23"], ["35"], ["27", "37"]], "multiplier_rules": ["2X1"]},
+      "qwen_section": "S10",
+      "qwen_row": {"numbers": [["34"], ["23"], ["35"], ["27"]], "layout_hint": "row_bet"},
+      "qwen_multiplier": "27/37x1",
+      "qwen_tokens": ["34", "x", "23", "x", "35", "x", "27", "/", "37", " ", "2", "x", "1"],
+      "qwen_bboxes": [[585,115,615,147],[618,115,638,147],[642,115,682,147],[685,115,705,147],[708,115,748,147],[752,115,772,147],[775,105,805,147],[805,115,822,147],[822,115,852,147],[852,118,866,144],[869,105,899,147],[902,105,922,147],[925,105,955,147]],
+      "recognition_lines": ["S10-L01: 34 x 23 x 35 x 27 / 37   2 x 1"],
+      "member_line_ids": ["S10-L01"],
+      "reconstructed_candidate": {"number_groups": [["34"], ["23"], ["35"], ["27", "37"]], "multiplier_rules": ["2X1"], "layout": "column_bet", "collision": null, "shared_multiplier": null},
+      "ui_candidate": {"number_groups": [["34"], ["23"], ["35"], ["27", "37"]], "multiplier_rules": ["2X1"], "layout": "column_bet", "collision": null, "shared_multiplier": null},
+      "root_cause_classification": "QWEN_ROW_GROUPING_ERROR"
+    },
+    {
+      "sample": "sample-011",
+      "bet_structure": "S02 first number 30 read as 34",
+      "human_expected": {"number_groups": [["30", "35", "36", "38"]], "multiplier_rules": ["3/4X1"]},
+      "qwen_section": "S02",
+      "qwen_row": {"numbers": [["34"], ["35"], ["36"], ["38"]], "multiplier": "3/4x1", "layout_hint": "row_bet"},
+      "qwen_multiplier": "3/4x1",
+      "qwen_tokens": ["34", ".", "35", ".", "36", ".", "38", " ", "3", "/", "4", "x", "1"],
+      "qwen_bboxes": [[54,225,95,257],[95,230,108,252],[112,225,152,257],[152,230,165,252],[170,225,210,257],[210,230,223,252],[228,225,268,257],[268,228,282,254],[285,215,315,257],[315,225,332,257],[332,225,362,257],[365,225,385,257],[388,225,415,257]],
+      "recognition_lines": ["S02-L01: 34 . 35 . 36 . 38   3 / 4 x 1"],
+      "member_line_ids": ["S02-L01"],
+      "reconstructed_candidate": {"number_groups": [["34", "35", "36", "38"]], "multiplier_rules": ["3/4X1"], "layout": "normal_row", "collision": null, "shared_multiplier": null},
+      "ui_candidate": {"number_groups": [["34", "35", "36", "38"]], "multiplier_rules": ["3/4X1"], "layout": "normal_row", "collision": null, "shared_multiplier": null},
+      "root_cause_classification": "OCR_SUBSTITUTION",
+      "action": "DEFER_TO_OCR_GATE_OR_HUMAN_EDIT"
+    },
+    {
+      "sample": "sample-011",
+      "bet_structure": "S02 reconstructed multiplier hidden from review card",
+      "human_expected": {"number_groups": [["30", "35", "36", "38"]], "multiplier_rules": ["3/4X1"]},
+      "qwen_section": "S02",
+      "qwen_row": {"numbers": [["34"], ["35"], ["36"], ["38"]], "multiplier": "3/4x1", "layout_hint": "row_bet"},
+      "qwen_multiplier": "3/4x1",
+      "qwen_tokens": ["34", ".", "35", ".", "36", ".", "38", " ", "3", "/", "4", "x", "1"],
+      "qwen_bboxes": [[54,225,95,257],[95,230,108,252],[112,225,152,257],[152,230,165,252],[170,225,210,257],[210,230,223,252],[228,225,268,257],[268,228,282,254],[285,215,315,257],[315,225,332,257],[332,225,362,257],[365,225,385,257],[388,225,415,257]],
+      "recognition_lines": ["S02-L01: 34 . 35 . 36 . 38   3 / 4 x 1"],
+      "member_line_ids": ["S02-L01"],
+      "reconstructed_candidate": {"number_groups": [["34", "35", "36", "38"]], "multiplier_rules": ["3/4X1"], "layout": "normal_row", "collision": null, "shared_multiplier": null},
+      "old_ui_candidate": {"number_groups": [["34", "35", "36", "38"]], "multiplier_rules": [], "layout": "normal_row", "collision": null, "shared_multiplier": null},
+      "ui_candidate": {"number_groups": [["34", "35", "36", "38"]], "multiplier_rules": ["3/4X1"], "layout": "normal_row", "collision": null, "shared_multiplier": null},
+      "root_cause_classification": "UI_SESSION_PRESENTATION_ERROR",
+      "action": "FIXED"
+    }
+  ],
+  "positive_controls": [
+    {
+      "sample": "sample-010",
+      "bet_structure": "S05",
+      "qwen_multiplier": "3/4x1",
+      "reconstructed_multiplier_rules": ["3/4X1"],
+      "result": "PASS"
+    }
+  ],
+  "provider_failure_diagnostics": [
+    {
+      "sample": "sample-006",
+      "request_id": "job-e52e3fcff11a4ae2b278596cc0d5ed17",
+      "latency_s": 110.48,
+      "finish_reason": "length",
+      "completion_tokens": 8000,
+      "total_tokens": 9382,
+      "image_tokens": 882,
+      "response_content_length": 18019,
+      "classification": "QWEN_OUTPUT_TRUNCATED",
+      "secondary_classification": "NESTED_JSON_SALVAGE_MISLEADING_ERROR",
+      "external_qwen_dashscope_calls": 0
+    }
+  ],
+  "known_limitations_not_modified": [
+    "strikethrough whole-bet cancellation",
+    "各 / 半車 / 車 unresolved scope",
+    "Gate 2B crop hallucination",
+    "Qwen speed optimization"
+  ]
+}

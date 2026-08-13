@@ -391,7 +391,7 @@ def test_image_quality_sample034():
 
 # --- second-round static-review additions ---
 
-def test_qwen_429_retries_400_does_not(monkeypatch):
+def test_qwen_429_retries_400_does_not(monkeypatch, tmp_path):
     import io
     import urllib.error
     import test_combined_bbox as tcb
@@ -400,6 +400,7 @@ def test_qwen_429_retries_400_does_not(monkeypatch):
     # CI has no DASHSCOPE_API_KEY; the retry/backoff logic must be tested
     # without the real key guard (urlopen is fully mocked below).
     monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-test-fake-key")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     monkeypatch.setattr(qwen, "_default_client", None)
 
     calls = {"n": 0}

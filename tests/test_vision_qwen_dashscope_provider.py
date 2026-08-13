@@ -29,6 +29,7 @@ from betguard.vision.providers.qwen_dashscope import (
     validate_task_response,
 )
 from betguard.vision.qwen_cache import QwenResponseCache, default_qwen_cache_dir
+from betguard.vision.qwen_diagnostics import QwenFailureDiagnosticStore
 from betguard.vision.qwen_prompts import (
     COLUMN_COMBO_PROMPT,
     FOCUSED_PROMPT,
@@ -85,6 +86,7 @@ def _client(tmp_path: Path, transport) -> QwenDashScopeClient:
     return QwenDashScopeClient(
         config=QwenDashScopeConfig(),
         cache=QwenResponseCache(tmp_path / "cache"),
+        diagnostic_store=QwenFailureDiagnosticStore(tmp_path / "diagnostics"),
         transport=transport,
         sleep=lambda _: None,
     )

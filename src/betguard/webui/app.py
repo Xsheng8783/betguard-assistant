@@ -54,6 +54,17 @@ VENV_PYTHON = PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
 
 ALLOWED_GAME_OPTIONS = {"auto", "539", "天天樂", "zhupeng"}
 
+
+def _assist_panel_url_for_server(server_address: Any) -> str:
+    """Return the assist-panel URL for the HTTP server actually in use."""
+    host = str(server_address[0])
+    port = int(server_address[1])
+    if host in {"", "0.0.0.0", "::"}:
+        host = "127.0.0.1"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{port}/assist-panel"
+
 # Flags that the workbench will NEVER pass to the CLI, even if a test or
 # refactor accidentally tries to.  See HARD RULES in the module docstring.
 FORBIDDEN_FLAGS = frozenset(
@@ -1485,6 +1496,9 @@ def build_workbench_handler(
                             "amounts": amounts,
                             "url": "https://www.gts362.com",
                             "game": candidate.get("game", "539"),
+                            "assist_panel_url": _assist_panel_url_for_server(
+                                self.server.server_address
+                            ),
                         }
                         start_result = worker.dispatch(CMD_START, start_payload)
                         if not start_result.get("ok"):
@@ -1610,6 +1624,9 @@ def build_workbench_handler(
                     "amounts": zhu_item.get("amounts", {}),
                     "url": validation.get("url", "https://www.gts362.com"),
                     "game": zhu_item.get("game", "539"),
+                    "assist_panel_url": _assist_panel_url_for_server(
+                        self.server.server_address
+                    ),
                 }
                 start_result = worker.dispatch(CMD_START, start_payload)
                 if not start_result.get("ok"):
@@ -1671,6 +1688,9 @@ def build_workbench_handler(
                 "amounts": validation["amounts"],
                 "url": "https://www.gts362.com",
                 "game": validation.get("game", "539"),
+                "assist_panel_url": _assist_panel_url_for_server(
+                    self.server.server_address
+                ),
             })
             print(f"[assist] start: ok={start_result.get('ok')} state={start_result.get('state')}", flush=True)
             if not start_result.get("ok"):
@@ -2464,6 +2484,9 @@ window.assistPanelFill = assistPanelFill;
                 "amounts": {},
                 "url": "https://www.gts362.com",
                 "open_site_only": True,
+                "assist_panel_url": _assist_panel_url_for_server(
+                    self.server.server_address
+                ),
             })
             self._send_json(result)
 

@@ -572,6 +572,8 @@ def test_invalid_qwen_response_displays_failure_and_review_state() -> None:
     assert 'result.status !== "completed"' in renderer
     assert "!sections.length || !lines.length" in renderer
     assert "invalid Qwen response schema" in renderer
+    assert "診斷編號：" in renderer
+    assert "failureDiagnostic.diagnostic_id || result.request_id" in renderer
 
 
 def test_structurally_valid_but_wrong_qwen_output_never_becomes_candidate() -> None:
@@ -1051,5 +1053,50 @@ def test_browser_invalid_qwen_result_displays_failure(page) -> None:
     page.wait_for_selector("#qwen-evidence-status")
     assert page.text_content("#qwen-evidence-status") == "Qwen 辨識失敗"
     assert "invalid Qwen response schema" in page.text_content("#vision-results-body")
+    assert "診斷編號：job-failed" in page.text_content(".qwen-failure-details")
     assert page.locator("#qwen-manual-reparse-btn").count() == 0
+    assert calls["manual"] == []
+
+
+def test_browser_truncated_qwen_result_has_safe_human_message_and_diagnostics(
+    page,
+) -> None:
+    failed = {
+        "request_id": "job-e52e3fcff11a4ae2b278596cc0d5ed17",
+        "status": "failed",
+        "provider": {"id": "qwen-dashscope", "model_name": "qwen3-vl-plus"},
+        "provider_error": {
+            "code": "QWEN_OUTPUT_TRUNCATED",
+            "message": "QWEN_OUTPUT_TRUNCATED",
+            "retryable": False,
+        },
+        "lines": [],
+        "preprocessing": {
+            "failure_diagnostic": {
+                "classification": "QWEN_OUTPUT_TRUNCATED",
+                "request_id": "job-e52e3fcff11a4ae2b278596cc0d5ed17",
+                "finish_reason": "length",
+            },
+            "human_confirmation_required": True,
+            "auto_confirm": False,
+            "auto_submit": False,
+        },
+    }
+    calls = _mount_qwen_ui(page, job_result=failed)
+
+    page.click("#vision-qwen-run-btn")
+    page.wait_for_selector("#qwen-evidence-status")
+
+    assert page.text_content("#qwen-failure-message") == (
+        "這張牌單內容較多，AI 回傳未完成。"
+        "目前無法完整辨識，請勿直接確認結果。"
+    )
+    advanced = page.text_content(".qwen-failure-details")
+    assert "QWEN_OUTPUT_TRUNCATED" in advanced
+    assert "request_id=job-e52e3fcff11a4ae2b278596cc0d5ed17" in advanced
+    assert "finish_reason=length" in advanced
+    assert "sections must be a non-empty list" not in advanced
+    assert page.get_attribute(".qwen-failure-details", "open") is None
+    assert page.locator("#qwen-manual-reparse-btn").count() == 0
+    assert page.evaluate("qwenGetReviewSession()") is None
     assert calls["manual"] == []

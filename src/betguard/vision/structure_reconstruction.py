@@ -67,7 +67,6 @@ def reconstruct_structure(
 
     qwen_response = _mapping(result_dict.get("preprocessing")).get("qwen_response")
     model_sections = _model_sections(qwen_response)
-    model_by_line_id = _model_evidence_by_line_id(qwen_response)
     raw_lines = result_dict.get("lines")
     lines = raw_lines if isinstance(raw_lines, list) else []
     source_image = _mapping(result_dict.get("source_image"))
@@ -84,6 +83,12 @@ def reconstruct_structure(
         line_id = str(line.get("line_id") or "")
         if line_id and line_id not in line_by_id:
             line_by_id[line_id] = line
+
+    model_sections = _coalesce_duplicate_number_sections(
+        model_sections,
+        line_by_id=line_by_id,
+    )
+    model_by_line_id = _model_evidence_by_sections(model_sections)
 
     output: list[dict[str, Any]] = [
         _line_id_missing_evidence(line, game=game, image_width=image_width)
@@ -116,17 +121,22 @@ def reconstruct_structure(
                 member_line_ids,
                 line_by_id,
             )
-            aggregated_model = _aggregate_section_model_evidence(section)
+            aggregated_model = _aggregate_section_model_evidence(
+                section,
+                line_by_id=line_by_id,
+            )
             missing = [line_id for line_id in member_line_ids if line_id not in line_by_id]
+            aggregation_warnings = list(aggregated_model.pop("_blocking_warnings", []))
             primary = _reconstruct_line(
                 combined_line,
                 model_by_line_id={primary_line_id: aggregated_model},
                 duplicate_line_id=any(line_id_counts[line_id] > 1 for line_id in member_line_ids),
                 game=game,
                 image_width=image_width,
-                force_column=True,
+                force_column=not bool(section.get("coalesced_structure_ids")),
                 extra_blocking_warnings=[
-                    f"member_line_missing:{line_id}" for line_id in missing
+                    *[f"member_line_missing:{line_id}" for line_id in missing],
+                    *aggregation_warnings,
                 ],
             )
             _add_structure_identity(
@@ -234,6 +244,7 @@ def _reconstruct_line(
     geometry_tokens: list[dict[str, Any]] = []
     number_tokens: list[dict[str, Any]] = []
     separator_tokens: list[dict[str, Any]] = []
+    number_group_separator_tokens: list[dict[str, Any]] = []
     collision_tokens: list[dict[str, Any]] = []
     play_category_tokens: list[dict[str, Any]] = []
     complete_multiplier_texts: list[str] = []
@@ -313,6 +324,8 @@ def _reconstruct_line(
                 _warn(warnings, blocking, f"number_out_of_range:{token_id}")
         elif zone == "play" and text in {"/", "."}:
             classification = "multiplier_fragment"
+        elif zone == "main" and text == "/":
+            classification = "number_group_separator"
         elif zone == "play" and _SINGLE_DIGIT_RE.fullmatch(text):
             classification = "multiplier_fragment_candidate"
             if text in {"2", "3", "4"}:
@@ -395,6 +408,9 @@ def _reconstruct_line(
         elif classification == "column_separator":
             separator_tokens.append(geometry_token)
             geometry_tokens.append(geometry_token)
+        elif classification == "number_group_separator":
+            number_group_separator_tokens.append(geometry_token)
+            geometry_tokens.append(geometry_token)
         elif classification == "collision_or_partial_multiplier_evidence":
             collision_tokens.append(geometry_token)
             geometry_tokens.append(geometry_token)
@@ -440,7 +456,12 @@ def _reconstruct_line(
 
     if column_intent:
         layout = "column_bet"
-        number_groups = grid_groups
+        slash_group_geometry = _slash_group_geometry_is_unambiguous(
+            number_group_separator_tokens,
+            number_tokens,
+            bbox_groups=bbox_groups,
+        )
+        number_groups = bbox_groups if slash_group_geometry else grid_groups
         collision_value = grid.get("collision_raw")
         collision = str(collision_value) if collision_value else None
         if len(number_groups) < 2:
@@ -449,8 +470,12 @@ def _reconstruct_line(
             _warn(warnings, blocking, "empty_column")
         if any(len(group) != len(set(group)) for group in number_groups):
             _warn(warnings, blocking, "duplicate_number_in_column")
-        if grid_groups != bbox_groups:
+        if grid_groups != bbox_groups and not slash_group_geometry:
             _warn(warnings, blocking, "column_geometry_disagreement")
+        elif grid_groups != bbox_groups:
+            warnings.append("slash_number_group_reconstructed_from_bbox")
+        if _mapping(grid.get("_debug")).get("alignment_ambiguous"):
+            _warn(warnings, blocking, "column_continuation_alignment_ambiguous")
         if len(number_tokens) == 2 and not separator_between_numbers:
             _warn(warnings, blocking, "column_separator_missing")
     elif number_tokens:
@@ -622,6 +647,9 @@ def _reconstruct_line(
         "global_play_zone_boundary_x": play_boundary["global_boundary_x"],
         "number_boundary_source": play_boundary["number_boundary_source"],
         "matched_number_token_ids": play_boundary["matched_number_token_ids"],
+        "recovered_number_token_ids": play_boundary[
+            "recovered_number_token_ids"
+        ],
         "unmatched_model_number_values": play_boundary["unmatched_model_number_values"],
         "local_play_boundary_x": play_boundary["local_play_boundary_x"],
         "global_play_boundary_x": play_boundary["global_boundary_x"],
@@ -637,6 +665,11 @@ def _reconstruct_line(
         "row_first": grid,
         "x_clustered": bbox_columns,
         "separator_between_numbers": separator_between_numbers,
+        "slash_number_group_geometry": _slash_group_geometry_is_unambiguous(
+            number_group_separator_tokens,
+            number_tokens,
+            bbox_groups=bbox_groups,
+        ),
         "combination_count": combination_count(
             [[int(value) for value in group] for group in number_groups]
         ) if number_groups else 0,
@@ -699,9 +732,132 @@ def _model_sections(value: Any) -> list[dict[str, Any]]:
     return output
 
 
+def _coalesce_duplicate_number_sections(
+    sections: list[dict[str, Any]],
+    *,
+    line_by_id: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Join only adjacent sections proven to describe one physical number row.
+
+    Qwen can repeat an identical number row in two sections when two multiplier
+    lines are written beside it.  Exact number text *and* exact token geometry
+    are required; anything less remains as separate evidence.
+    """
+    output: list[dict[str, Any]] = []
+    index = 0
+    while index < len(sections):
+        current = dict(sections[index])
+        current_signature = _single_section_number_signature(
+            current,
+            line_by_id=line_by_id,
+        )
+        current_rules = _single_section_complete_rules(current)
+        next_index = index + 1
+        while next_index < len(sections):
+            following = sections[next_index]
+            following_signature = _single_section_number_signature(
+                following,
+                line_by_id=line_by_id,
+            )
+            following_rules = _single_section_complete_rules(following)
+            if (
+                current_signature is None
+                or following_signature != current_signature
+                or not current_rules
+                or not following_rules
+                or set(current_rules) & set(following_rules)
+                or current.get("shared_multiplier") is not None
+                or following.get("shared_multiplier") is not None
+            ):
+                break
+            current["member_line_ids"] = [
+                *list(current.get("member_line_ids") or []),
+                *list(following.get("member_line_ids") or []),
+            ]
+            current["rows"] = [
+                *list(current.get("rows") or []),
+                *list(following.get("rows") or []),
+            ]
+            current["coalesced_structure_ids"] = [
+                *list(
+                    current.get("coalesced_structure_ids")
+                    or [current.get("structure_id")]
+                ),
+                following.get("structure_id"),
+            ]
+            current_rules = [*current_rules, *following_rules]
+            next_index += 1
+        output.append(current)
+        index = next_index
+    return output
+
+
+def _single_section_number_signature(
+    section: Mapping[str, Any],
+    *,
+    line_by_id: Mapping[str, Mapping[str, Any]],
+) -> tuple[tuple[str, tuple[float, ...], str], ...] | None:
+    member_line_ids = list(section.get("member_line_ids") or [])
+    rows = list(section.get("rows") or [])
+    if len(member_line_ids) != 1 or len(rows) != 1:
+        return None
+    line = line_by_id.get(str(member_line_ids[0]))
+    if not isinstance(line, Mapping):
+        return None
+    expected = [
+        str(value)
+        for group in (_mapping(rows[0]).get("numbers") or [])
+        if isinstance(group, list)
+        for value in group
+    ]
+    if not expected:
+        return None
+    available = [
+        token for token in (line.get("tokens") or []) if isinstance(token, Mapping)
+    ]
+    used: set[int] = set()
+    signature: list[tuple[str, tuple[float, ...], str]] = []
+    for value in expected:
+        match_index = next(
+            (
+                token_index
+                for token_index, token in enumerate(available)
+                if token_index not in used
+                and str(token.get("text") or "") == value
+            ),
+            None,
+        )
+        if match_index is None:
+            return None
+        bbox, coordinate_space, issue = _bbox_xyxy(
+            available[match_index].get("bounding_box")
+        )
+        if bbox is None or issue is not None or coordinate_space is None:
+            return None
+        used.add(match_index)
+        signature.append((value, tuple(bbox), coordinate_space))
+    return tuple(sorted(signature))
+
+
+def _single_section_complete_rules(section: Mapping[str, Any]) -> list[str]:
+    rows = list(section.get("rows") or [])
+    if len(rows) != 1:
+        return []
+    raw_multiplier = _mapping(rows[0]).get("multiplier")
+    if not isinstance(raw_multiplier, str) or partial_tokens(raw_multiplier):
+        return []
+    return split_complete_rules(raw_multiplier)
+
+
 def _model_evidence_by_line_id(value: Any) -> dict[str, dict[str, Any]]:
+    return _model_evidence_by_sections(_model_sections(value))
+
+
+def _model_evidence_by_sections(
+    sections: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
     evidence: dict[str, dict[str, Any]] = {}
-    for section in _model_sections(value):
+    for section in sections:
         for line_id, row in zip(section["member_line_ids"], section["rows"]):
             evidence[line_id] = {
                 "row": row,
@@ -712,14 +868,37 @@ def _model_evidence_by_line_id(value: Any) -> dict[str, dict[str, Any]]:
 
 def _aggregate_section_model_evidence(
     section: Mapping[str, Any],
+    *,
+    line_by_id: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
     rows = section.get("rows")
     model_rows = rows if isinstance(rows, list) else []
+    if section.get("coalesced_structure_ids") and model_rows:
+        row = dict(_mapping(model_rows[0]))
+        multiplier_parts = [
+            str(multiplier)
+            for raw_row in model_rows
+            if isinstance(
+                (multiplier := _mapping(raw_row).get("multiplier")),
+                str,
+            )
+            and multiplier.strip()
+        ]
+        row["multiplier"] = " ".join(multiplier_parts) if multiplier_parts else None
+        return {
+            "row": row,
+            "shared_multiplier": section.get("shared_multiplier"),
+            "_blocking_warnings": [],
+        }
     row_cells: list[list[list[str]]] = []
+    geometry_cells: list[dict[str, Any]] = []
+    blocking_warnings: list[str] = []
     multiplier_parts: list[str] = []
     collision: Any = None
 
-    for raw_row in model_rows:
+    member_line_ids = list(section.get("member_line_ids") or [])
+    seen_geometry_cells: set[tuple[str, tuple[float, ...]]] = set()
+    for row_index, raw_row in enumerate(model_rows):
         row = _mapping(raw_row)
         raw_numbers = row.get("numbers")
         groups = raw_numbers if isinstance(raw_numbers, list) else []
@@ -734,18 +913,67 @@ def _aggregate_section_model_evidence(
                     else []
                 )
         row_cells.append(cells)
+        line_id = member_line_ids[row_index] if row_index < len(member_line_ids) else ""
+        line = line_by_id.get(line_id, {})
+        available_tokens = [
+            token for token in (line.get("tokens") if isinstance(line.get("tokens"), list) else [])
+            if isinstance(token, Mapping)
+        ]
+        used_token_indexes: set[int] = set()
+        for cell in cells:
+            matched_cell_tokens: list[dict[str, Any]] = []
+            for value in cell:
+                match_index = next(
+                    (
+                        index
+                        for index, token in enumerate(available_tokens)
+                        if index not in used_token_indexes
+                        and str(token.get("text") or "") == value
+                    ),
+                    None,
+                )
+                if match_index is None:
+                    matched_cell_tokens = []
+                    break
+                bbox, coordinate_space, issue = _bbox_xyxy(
+                    available_tokens[match_index].get("bounding_box")
+                )
+                if bbox is None or issue is not None:
+                    matched_cell_tokens = []
+                    break
+                used_token_indexes.add(match_index)
+                matched_cell_tokens.append({
+                    "text": value,
+                    "bbox": bbox,
+                    "coordinate_space": coordinate_space,
+                })
+            if not matched_cell_tokens:
+                blocking_warnings.append("model_column_geometry_unavailable")
+                continue
+            bbox = _bbox_union([token["bbox"] for token in matched_cell_tokens])
+            geometry_key = ("/".join(cell), tuple(bbox))
+            if geometry_key in seen_geometry_cells:
+                continue
+            seen_geometry_cells.add(geometry_key)
+            for matched_token in matched_cell_tokens:
+                geometry_cells.append({
+                    "text": matched_token["text"],
+                    "bbox": matched_token["bbox"],
+                    "coordinate_space": matched_token["coordinate_space"],
+                    "source_line_id": line_id,
+                })
         multiplier = row.get("multiplier")
         if isinstance(multiplier, str) and multiplier.strip():
             multiplier_parts.append(multiplier)
         if collision is None and row.get("collision") is not None:
             collision = row.get("collision")
 
-    column_count = max((len(cells) for cells in row_cells), default=0)
-    columns: list[list[str]] = [[] for _ in range(column_count)]
-    for cells in row_cells:
-        offset = column_count - len(cells)
-        for index, cell in enumerate(cells):
-            columns[offset + index].extend(cell)
+    geometry_grid = build_grid_from_rows(geometry_cells)
+    columns = _columns_as_groups(geometry_grid)
+    if _mapping(geometry_grid.get("_debug")).get("alignment_ambiguous"):
+        blocking_warnings.append("model_column_alignment_ambiguous")
+    if not columns and any(row_cells):
+        blocking_warnings.append("model_column_geometry_unavailable")
 
     row: dict[str, Any] = {
         "numbers": columns,
@@ -757,6 +985,7 @@ def _aggregate_section_model_evidence(
     return {
         "row": row,
         "shared_multiplier": section.get("shared_multiplier"),
+        "_blocking_warnings": _unique(blocking_warnings),
     }
 
 
@@ -767,12 +996,23 @@ def _combined_section_line(
 ) -> dict[str, Any]:
     member_lines = [line_by_id[line_id] for line_id in member_line_ids if line_id in line_by_id]
     tokens: list[Any] = []
+    seen_exact_tokens: set[tuple[str, tuple[float, ...]]] = set()
     for line in member_lines:
         raw_tokens = line.get("tokens")
         if isinstance(raw_tokens, list):
             source_line_id = str(line.get("line_id") or "")
             for raw_token in raw_tokens:
                 token = dict(_mapping(raw_token))
+                bbox, _coordinate_space, _issue = _bbox_xyxy(
+                    token.get("bounding_box")
+                )
+                exact_key = (
+                    str(token.get("text") or ""),
+                    tuple(bbox) if bbox is not None else (),
+                )
+                if exact_key in seen_exact_tokens:
+                    continue
+                seen_exact_tokens.add(exact_key)
                 token["_source_line_id"] = source_line_id
                 tokens.append(token)
     return {
@@ -1054,6 +1294,28 @@ def _structure_play_boundary(
         and len(number_spaces) == 1
         and "" not in number_spaces
     )
+    recovered_number_tokens: list[dict[str, Any]] = []
+    recovery_ambiguous_ids: list[str] = []
+    if reliable_model_match:
+        recovered_number_tokens, recovery_ambiguous_ids = (
+            _recover_slash_group_number_tokens(
+                prepared_tokens,
+                matched_number_tokens=number_tokens,
+                game=game,
+            )
+        )
+        if recovered_number_tokens:
+            number_tokens = [*number_tokens, *recovered_number_tokens]
+            number_tokens.sort(key=_prepared_token_geometry_key)
+            number_spaces = {
+                str(token.get("coordinate_space") or "")
+                for token in number_tokens
+                if token.get("bbox") is not None
+            }
+        ambiguous_token_ids = _unique([
+            *ambiguous_token_ids,
+            *recovery_ambiguous_ids,
+        ])
     matched_token_ids = [str(token.get("token_id") or "") for token in number_tokens]
     if reliable_model_match:
         rightmost_x2 = max(float(token["bbox"][2]) for token in number_tokens)
@@ -1061,11 +1323,19 @@ def _structure_play_boundary(
             "boundary_x": rightmost_x2,
             "coordinate_space": next(iter(number_spaces)),
             "source": "structure_relative_rightmost_number_x2",
-            "number_boundary_source": "model_number_multiset",
+            "number_boundary_source": (
+                "model_number_multiset_plus_slash_group_geometry"
+                if recovered_number_tokens
+                else "model_number_multiset"
+            ),
             "zone_rule": "token_bbox_x1_gt_structure_rightmost_number_x2",
             "global_boundary_x": global_boundary,
             "local_play_boundary_x": rightmost_x2,
             "matched_number_token_ids": matched_token_ids,
+            "recovered_number_token_ids": [
+                str(token.get("token_id") or "")
+                for token in recovered_number_tokens
+            ],
             "unmatched_model_number_values": [],
             "fallback_reason": None,
             "ambiguous_number_play_token_ids": ambiguous_token_ids,
@@ -1096,6 +1366,7 @@ def _structure_play_boundary(
         "global_boundary_x": global_boundary,
         "local_play_boundary_x": None,
         "matched_number_token_ids": matched_token_ids,
+        "recovered_number_token_ids": [],
         "unmatched_model_number_values": unmatched_model_values,
         "fallback_reason": fallback_reason,
         "ambiguous_number_play_token_ids": ambiguous_token_ids,
@@ -1103,6 +1374,71 @@ def _structure_play_boundary(
         "rightmost_number_x2": None,
         "rightmost_number_token_ids": [],
     }
+
+
+def _recover_slash_group_number_tokens(
+    prepared_tokens: list[dict[str, Any]],
+    *,
+    matched_number_tokens: list[dict[str, Any]],
+    game: str,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Recover an explicit ``NN / NN`` cell before a later full play rule.
+
+    This does not synthesize a number: the two-digit token, slash geometry and
+    a separate complete multiplier span must all be present on the same source
+    line.  Multiple plausible recoveries fail closed.
+    """
+    matched_ids = {
+        str(token.get("token_id") or "") for token in matched_number_tokens
+    }
+    by_source_line: dict[str, list[dict[str, Any]]] = {}
+    for token in prepared_tokens:
+        if token.get("bbox") is None or not str(token.get("source_line_id") or ""):
+            continue
+        by_source_line.setdefault(str(token["source_line_id"]), []).append(token)
+
+    plausible: list[dict[str, Any]] = []
+    for line_tokens in by_source_line.values():
+        ordered = sorted(line_tokens, key=lambda token: _center(token["bbox"])[0])
+        meaningful = [token for token in ordered if str(token.get("text") or "").strip()]
+        for index in range(2, len(meaningful)):
+            left, slash, candidate = meaningful[index - 2:index + 1]
+            if (
+                str(left.get("token_id") or "") not in matched_ids
+                or str(slash.get("text") or "") != "/"
+                or not _TWO_DIGIT_RE.fullmatch(str(candidate.get("text") or ""))
+                or not _number_is_valid(str(candidate.get("text") or ""), game=game)
+                or str(candidate.get("token_id") or "") in matched_ids
+                or left.get("coordinate_space") != candidate.get("coordinate_space")
+            ):
+                continue
+            left_center = _center(left["bbox"])
+            candidate_center = _center(candidate["bbox"])
+            if candidate_center[0] - left_center[0] > 60.0:
+                continue
+            tail = [
+                token for token in meaningful[index + 1:]
+                if str(token.get("text") or "") in {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "/", ".", "x", "X", "×"}
+            ]
+            complete_tail_rules = [
+                parsed
+                for tail_index in range(len(tail))
+                if (parsed := _parse_fragment_rule(tail, tail_index)) is not None
+            ]
+            if len(complete_tail_rules) != 1:
+                continue
+            plausible.append(candidate)
+
+    unique = {
+        str(token.get("token_id") or ""): token
+        for token in plausible
+        if str(token.get("token_id") or "")
+    }
+    if len(unique) == 1:
+        return list(unique.values()), []
+    if len(unique) > 1:
+        return [], sorted(unique)
+    return [], []
 
 
 def _match_model_number_tokens(
@@ -1282,21 +1618,18 @@ def _compose_fragmented_multiplier_rules(
 
     base_candidates: list[dict[str, Any]] = []
     for source_line_id in sorted(by_source_line):
-        ordered = sorted(
-            by_source_line[source_line_id],
-            key=lambda token: (
-                _center(token["bbox"])[0],
-                _center(token["bbox"])[1],
-                str(token.get("token_id") or ""),
-            ),
-        )
-        for index in range(len(ordered)):
-            if _category_start_is_continuation(ordered, index):
-                continue
-            candidate = _parse_fragment_rule(ordered, index)
-            if candidate is None:
-                continue
-            base_candidates.append(candidate)
+        for band_index, ordered in enumerate(
+            _fragment_y_bands(by_source_line[source_line_id]),
+            start=1,
+        ):
+            for index in range(len(ordered)):
+                if _category_start_is_continuation(ordered, index):
+                    continue
+                candidate = _parse_fragment_rule(ordered, index)
+                if candidate is None:
+                    continue
+                candidate["source_y_band"] = band_index
+                base_candidates.append(candidate)
 
     unique_base_candidates: list[dict[str, Any]] = []
     seen_candidates: set[tuple[str, tuple[str, ...]]] = set()
@@ -1382,6 +1715,7 @@ def _compose_fragmented_multiplier_rules(
                 "category": candidate["category"],
                 "value": candidate["value"],
                 "source_line_id": candidate["source_line_id"],
+                "source_y_band": candidate.get("source_y_band"),
                 "token_ids": list(candidate["token_ids"]),
                 "stacked_category_token_ids": list(
                     candidate["stacked_category_token_ids"]
@@ -1395,6 +1729,42 @@ def _compose_fragmented_multiplier_rules(
         "issues": _unique(issues),
     }
     return rules, resolved, _unique(issues), debug
+
+
+def _fragment_y_bands(
+    tokens: list[dict[str, Any]],
+) -> list[list[dict[str, Any]]]:
+    bands: list[list[dict[str, Any]]] = []
+    for token in sorted(
+        tokens,
+        key=lambda item: (
+            _center(item["bbox"])[1],
+            _center(item["bbox"])[0],
+            str(item.get("token_id") or ""),
+        ),
+    ):
+        token_center_y = _center(token["bbox"])[1]
+        token_height = token["bbox"][3] - token["bbox"][1]
+        if bands:
+            band_center_y = sum(
+                _center(item["bbox"])[1] for item in bands[-1]
+            ) / len(bands[-1])
+            band_height = max(
+                item["bbox"][3] - item["bbox"][1] for item in bands[-1]
+            )
+            if abs(token_center_y - band_center_y) <= max(
+                token_height,
+                band_height,
+            ) * 0.75:
+                bands[-1].append(token)
+                continue
+        bands.append([token])
+    for band in bands:
+        band.sort(key=lambda item: (
+            _center(item["bbox"])[0],
+            str(item.get("token_id") or ""),
+        ))
+    return bands
 
 
 def _parse_fragment_rule(
@@ -1901,6 +2271,44 @@ def _separator_between_numbers(
     number_centers = sorted(_center(token["bbox"])[0] for token in numbers)
     left, right = number_centers[0], number_centers[-1]
     return any(left < _center(token["bbox"])[0] < right for token in separators)
+
+
+def _slash_group_geometry_is_unambiguous(
+    slashes: list[dict[str, Any]],
+    numbers: list[dict[str, Any]],
+    *,
+    bbox_groups: list[list[str]],
+) -> bool:
+    if len(slashes) != 1 or len(numbers) < 2:
+        return False
+    slash = slashes[0]
+    slash_center = _center(slash["bbox"])
+    same_line_numbers = sorted(
+        (
+            token for token in numbers
+            if token.get("source_line_id") == slash.get("source_line_id")
+            and abs(_center(token["bbox"])[1] - slash_center[1])
+            <= max(
+                token["bbox"][3] - token["bbox"][1],
+                slash["bbox"][3] - slash["bbox"][1],
+            )
+        ),
+        key=lambda token: _center(token["bbox"])[0],
+    )
+    left = [token for token in same_line_numbers if _center(token["bbox"])[0] < slash_center[0]]
+    right = [token for token in same_line_numbers if _center(token["bbox"])[0] > slash_center[0]]
+    if not left or not right:
+        return False
+    left_token = left[-1]
+    right_token = right[0]
+    if (
+        slash["bbox"][0] < left_token["bbox"][2] - 1.0
+        or slash["bbox"][2] > right_token["bbox"][0] + 1.0
+        or _center(right_token["bbox"])[0] - _center(left_token["bbox"])[0] > 60.0
+    ):
+        return False
+    pair = [str(left_token["text"]), str(right_token["text"])]
+    return sum(1 for group in bbox_groups if group == pair) == 1
 
 
 def _has_bbox_overlap(tokens: list[dict[str, Any]]) -> bool:

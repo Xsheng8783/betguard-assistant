@@ -132,11 +132,11 @@ def parse_multiplier(tokens: list[Token]) -> float | None:
 
 
 def build_grid_from_rows(token_dicts: list[dict[str, Any]], *, row_threshold: float = 18.0) -> dict[str, Any]:
-    """Rebuild columns by ROW first, then right-align partial rows.
+    """Rebuild columns by row and assign continuations to X anchors.
 
-    More robust to per-token X drift: numbers on the same horizontal line
-    (similar center_y) are grouped into a row, sorted by center_x; a row with
-    fewer numbers right-aligns to the last columns (real slips' pattern).
+    The widest physical row establishes the column anchors.  Short rows are
+    assigned only when every token has one unique nearby X anchor.  Ambiguous
+    rows are retained in debug evidence but are not guessed into a column.
     """
     tokens = [token_from_dict(d) for d in token_dicts]
     classified = classify_tokens(tokens)
@@ -151,10 +151,54 @@ def build_grid_from_rows(token_dicts: list[dict[str, Any]], *, row_threshold: fl
         row.sort(key=lambda t: t.center_x)
     n_cols = max(len(r) for r in rows) if rows else 0
     columns: list[list[str]] = [[] for _ in range(n_cols)]
+    alignment_ambiguous: list[list[tuple[str, list[int], float, float]]] = []
+    anchor_row = next((row for row in rows if len(row) == n_cols), [])
+    anchor_centers = [token.center_x for token in anchor_row]
+    minimum_anchor_gap = min(
+        (
+            right - left
+            for left, right in zip(anchor_centers, anchor_centers[1:])
+            if right > left
+        ),
+        default=75.0,
+    )
+    assignment_limit = min(60.0, minimum_anchor_gap * 0.8)
+    ambiguity_margin = max(2.0, minimum_anchor_gap * 0.1)
+
     for row in rows:
-        offset = n_cols - len(row)
-        for i, t in enumerate(row):
-            columns[offset + i].append(t.text)
+        if row is anchor_row:
+            assignments = list(range(n_cols))
+        else:
+            assignments = []
+            row_is_ambiguous = False
+            for token in row:
+                ranked = sorted(
+                    (
+                        (abs(token.center_x - anchor_x), index)
+                        for index, anchor_x in enumerate(anchor_centers)
+                    ),
+                    key=lambda item: (item[0], item[1]),
+                )
+                if not ranked or ranked[0][0] > assignment_limit:
+                    row_is_ambiguous = True
+                    break
+                if (
+                    len(ranked) > 1
+                    and ranked[1][0] - ranked[0][0] <= ambiguity_margin
+                ):
+                    row_is_ambiguous = True
+                    break
+                assignments.append(ranked[0][1])
+            if len(assignments) != len(set(assignments)):
+                row_is_ambiguous = True
+            if row_is_ambiguous:
+                alignment_ambiguous.append([
+                    (token.text, token.bbox, token.center_x, token.center_y)
+                    for token in row
+                ])
+                continue
+        for column_index, token in zip(assignments, row):
+            columns[column_index].append(token.text)
     for col in columns:
         col.sort(key=lambda _: 0)  # preserve top->bottom row order already
     collision_raw, collision = parse_collision(classified["collision"]) or (None, None)
@@ -171,6 +215,9 @@ def build_grid_from_rows(token_dicts: list[dict[str, Any]], *, row_threshold: fl
             "collision_tokens": [(t.text, t.bbox) for t in classified["collision"]],
             "multiplier_tokens": [(t.text, t.bbox) for t in classified["multiplier"]],
             "separator_tokens": [t.text for t in classified["separators"]],
+            "column_anchor_centers_x": anchor_centers,
+            "continuation_assignment_limit": assignment_limit,
+            "alignment_ambiguous": alignment_ambiguous,
         },
     }
 

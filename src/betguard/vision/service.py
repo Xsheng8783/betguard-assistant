@@ -6,7 +6,9 @@ Does NOT import parser, validator, webfill, or Playwright.
 
 from __future__ import annotations
 
+import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from betguard.vision.contracts import (
@@ -15,6 +17,14 @@ from betguard.vision.contracts import (
     RecognitionStatus,
 )
 from betguard.vision.errors import ErrorCode
+from betguard.vision.evidence_comparison import compare_ppocr_to_qwen
+from betguard.vision.gemma_shadow import (
+    ENABLED_ENV as GEMMA_SHADOW_ENABLED_ENV,
+    PROVIDER_ID as GEMMA_SHADOW_PROVIDER_ID,
+    compare_multi_model_evidence,
+    get_gemma_shadow_config,
+    run_gemma_shadow,
+)
 from betguard.vision.image_intake import (
     ImageMetadata,
     delete_image,
@@ -37,6 +47,12 @@ from betguard.vision.providers.qwen_dashscope import (
     PROVIDER_ID as QWEN_PROVIDER_ID,
     QwenDashScopeProvider,
     has_api_key as has_qwen_api_key,
+)
+from betguard.vision.ppocr_shadow import (
+    ENABLED_ENV as PPOCR_SHADOW_ENABLED_ENV,
+    PROVIDER_ID as PPOCR_SHADOW_PROVIDER_ID,
+    get_ppocr_shadow_config,
+    run_ppocr_shadow,
 )
 from betguard.vision.structure_reconstruction import reconstruct_structure
 
@@ -74,6 +90,8 @@ def _safe_error(code: str, message: str) -> dict[str, Any]:
 
 def list_providers() -> dict[str, Any]:
     """Return available vision providers."""
+    ppocr_shadow_config = get_ppocr_shadow_config()
+    gemma_shadow_config = get_gemma_shadow_config()
     return _ok({
         "providers": [
             {
@@ -94,6 +112,39 @@ def list_providers() -> dict[str, Any]:
                 "external_network": True,
                 "requires_env": [QWEN_API_KEY_ENV],
                 "configured": has_qwen_api_key(),
+                "human_confirmation_required": True,
+                "auto_submit": False,
+                "auto_confirm": False,
+            },
+            {
+                "id": PPOCR_SHADOW_PROVIDER_ID,
+                "mode": "local_subprocess_shadow",
+                "real_ocr": True,
+                "external_network": False,
+                "requires_env": [PPOCR_SHADOW_ENABLED_ENV],
+                "configured": (
+                    ppocr_shadow_config.enabled
+                    and ppocr_shadow_config.configured
+                ),
+                "enabled": ppocr_shadow_config.enabled,
+                "selectable": False,
+                "evidence_only": True,
+                "primary_provider": QWEN_PROVIDER_ID,
+                "human_confirmation_required": True,
+                "auto_submit": False,
+                "auto_confirm": False,
+            },
+            {
+                "id": GEMMA_SHADOW_PROVIDER_ID,
+                "mode": "external_api_shadow",
+                "real_ocr": True,
+                "external_network": True,
+                "requires_env": [GEMMA_SHADOW_ENABLED_ENV, "GEMINI_API_KEY"],
+                "configured": gemma_shadow_config.configured,
+                "enabled": gemma_shadow_config.enabled,
+                "selectable": False,
+                "evidence_only": True,
+                "primary_provider": QWEN_PROVIDER_ID,
                 "human_confirmation_required": True,
                 "auto_submit": False,
                 "auto_confirm": False,
@@ -219,8 +270,65 @@ def run_job(
 
     if provider_id == QWEN_PROVIDER_ID:
         try:
-            result = QwenDashScopeProvider().recognize(request)
+            vision_started = time.perf_counter()
+            shadow_evidence: dict[str, Any] | None = None
+            gemma_shadow_evidence: dict[str, Any] | None = None
+            try:
+                shadow_config = get_ppocr_shadow_config()
+            except Exception as exc:
+                shadow_config = None
+                shadow_evidence = _unexpected_shadow_failure(exc)
+            try:
+                gemma_shadow_config = get_gemma_shadow_config()
+            except Exception as exc:
+                gemma_shadow_config = None
+                gemma_shadow_evidence = _unexpected_gemma_shadow_failure(exc)
+            ppocr_enabled = bool(shadow_config and shadow_config.enabled)
+            gemma_enabled = bool(gemma_shadow_config and gemma_shadow_config.enabled)
+            parallel_execution = ppocr_enabled or gemma_enabled
+            if parallel_execution:
+                with ThreadPoolExecutor(
+                    max_workers=1 + int(ppocr_enabled) + int(gemma_enabled),
+                    thread_name_prefix="vision-shadow",
+                ) as executor:
+                    qwen_future = executor.submit(_run_qwen_primary, request)
+                    ppocr_future = (
+                        executor.submit(run_ppocr_shadow, request, config=shadow_config)
+                        if ppocr_enabled else None
+                    )
+                    gemma_future = (
+                        executor.submit(
+                            run_gemma_shadow,
+                            request,
+                            config=gemma_shadow_config,
+                        )
+                        if gemma_enabled else None
+                    )
+                    result, qwen_latency_ms = qwen_future.result()
+                    if ppocr_future is not None:
+                        try:
+                            shadow_evidence = ppocr_future.result()
+                        except Exception as exc:
+                            shadow_evidence = _unexpected_shadow_failure(exc)
+                    if gemma_future is not None:
+                        try:
+                            gemma_shadow_evidence = gemma_future.result()
+                        except Exception as exc:
+                            gemma_shadow_evidence = _unexpected_gemma_shadow_failure(exc)
+            else:
+                result, qwen_latency_ms = _run_qwen_primary(request)
+            if shadow_evidence is not None and not isinstance(shadow_evidence, dict):
+                shadow_evidence = _unexpected_shadow_failure(
+                    TypeError("PP-OCR shadow result must be an object")
+                )
+            if gemma_shadow_evidence is not None and not isinstance(
+                gemma_shadow_evidence, dict
+            ):
+                gemma_shadow_evidence = _unexpected_gemma_shadow_failure(
+                    TypeError("Gemma shadow result must be an object")
+                )
             payload: dict[str, Any] = {"result": result.to_dict()}
+            comparison_latency_ms = 0.0
             if result.status == RecognitionStatus.COMPLETED:
                 try:
                     payload["structure_evidence"] = reconstruct_structure(
@@ -232,6 +340,85 @@ def run_job(
                         result,
                         game=game,
                     )
+            if shadow_evidence is not None:
+                if (
+                    result.status == RecognitionStatus.COMPLETED
+                    and shadow_evidence.get("status") == "completed"
+                ):
+                    try:
+                        source_image = payload["result"].get("source_image", {})
+                        comparison = compare_ppocr_to_qwen(
+                            payload["result"],
+                            shadow_evidence.get("regions", []),
+                            image_width=int(source_image.get("width") or meta.width),
+                            image_height=int(source_image.get("height") or meta.height),
+                        )
+                        comparison_latency_ms = float(comparison.get("latency_ms") or 0.0)
+                        shadow_evidence = {**shadow_evidence, "comparison": comparison}
+                    except Exception as exc:
+                        shadow_evidence = {
+                            **shadow_evidence,
+                            "comparison": _unexpected_comparison_failure(exc),
+                        }
+                payload["shadow_evidence"] = shadow_evidence
+                payload["vision_latency"] = {
+                    "pp_latency_ms": float(shadow_evidence.get("latency_ms") or 0.0),
+                    "qwen_latency_ms": qwen_latency_ms,
+                    "comparison_latency_ms": comparison_latency_ms,
+                    "total_vision_latency_ms": round(
+                        (time.perf_counter() - vision_started) * 1000.0,
+                        3,
+                    ),
+                    "parallel_execution": parallel_execution,
+                }
+            if gemma_shadow_evidence is not None:
+                payload["gemma_shadow_evidence"] = gemma_shadow_evidence
+                try:
+                    multi_comparison_started = time.perf_counter()
+                    payload["multi_model_comparison"] = compare_multi_model_evidence(
+                        payload["result"],
+                        shadow_evidence,
+                        gemma_shadow_evidence,
+                    )
+                    comparison_latency_ms += round(
+                        (time.perf_counter() - multi_comparison_started) * 1000.0,
+                        3,
+                    )
+                except Exception as exc:
+                    comparison_latency_ms += round(
+                        (time.perf_counter() - multi_comparison_started) * 1000.0,
+                        3,
+                    )
+                    payload["multi_model_comparison"] = {
+                        "schema_version": "betguard.vision.multi-model-evidence-comparison.v1",
+                        "status": "failed",
+                        "classification": "MULTI_MODEL_COMPARISON_UNAVAILABLE",
+                        "error": {
+                            "code": "MULTI_MODEL_COMPARISON_FAILED",
+                            "detail": type(exc).__name__,
+                        },
+                        "authority": QWEN_PROVIDER_ID,
+                        "needs_review": True,
+                        "evidence_only": True,
+                        "human_confirmation_required": True,
+                        "auto_apply": False,
+                        "auto_confirm": False,
+                        "auto_submit": False,
+                    }
+                latency = payload.setdefault("vision_latency", {
+                    "pp_latency_ms": 0.0,
+                    "qwen_latency_ms": qwen_latency_ms,
+                    "comparison_latency_ms": 0.0,
+                    "parallel_execution": parallel_execution,
+                })
+                latency["gemma_latency_ms"] = float(
+                    gemma_shadow_evidence.get("latency_ms") or 0.0
+                )
+                latency["comparison_latency_ms"] = comparison_latency_ms
+                latency["total_vision_latency_ms"] = round(
+                    (time.perf_counter() - vision_started) * 1000.0,
+                    3,
+                )
             return _ok(payload)
         except Exception:
             return _error(
@@ -258,6 +445,75 @@ def run_job(
             "辨識工作執行失敗",
             retryable=False,
         )
+
+
+def _run_qwen_primary(
+    request: RecognitionRequest,
+) -> tuple[RecognitionResult, float]:
+    started = time.perf_counter()
+    result = QwenDashScopeProvider().recognize(request)
+    return result, round((time.perf_counter() - started) * 1000.0, 3)
+
+
+def _unexpected_shadow_failure(exc: Exception) -> dict[str, Any]:
+    """Keep an unexpected optional worker error outside the primary flow."""
+    return {
+        "schema_version": "betguard.vision.ppocr-shadow-evidence.v1",
+        "status": "failed",
+        "provider": {"id": PPOCR_SHADOW_PROVIDER_ID},
+        "error": {
+            "code": "PPOCR_SHADOW_INTERNAL_FAILURE",
+            "detail": type(exc).__name__,
+        },
+        "evidence_only": True,
+        "authority": QWEN_PROVIDER_ID,
+        "human_confirmation_required": True,
+        "auto_apply": False,
+        "auto_confirm": False,
+        "auto_submit": False,
+        "latency_ms": 0.0,
+    }
+
+
+def _unexpected_gemma_shadow_failure(exc: Exception) -> dict[str, Any]:
+    """Keep unexpected Gemma evidence errors outside the primary flow."""
+    return {
+        "schema_version": "betguard.vision.gemma-shadow-evidence.v2",
+        "status": "failed",
+        "provider": {"id": GEMMA_SHADOW_PROVIDER_ID},
+        "model": "gemma-4-26b-a4b-it",
+        "error": {
+            "code": "GEMMA_SHADOW_INTERNAL_FAILURE",
+            "detail": type(exc).__name__,
+        },
+        "evidence_only": True,
+        "machine_suggestion": True,
+        "human_confirmed": False,
+        "authority": QWEN_PROVIDER_ID,
+        "human_confirmation_required": True,
+        "auto_apply": False,
+        "auto_confirm": False,
+        "auto_submit": False,
+        "latency_ms": 0.0,
+    }
+
+
+def _unexpected_comparison_failure(exc: Exception) -> dict[str, Any]:
+    return {
+        "schema_version": "betguard.vision.ocr-shadow-comparison.v1",
+        "status": "failed",
+        "error": {
+            "code": "PPOCR_COMPARISON_FAILED",
+            "detail": type(exc).__name__,
+        },
+        "authority": QWEN_PROVIDER_ID,
+        "records": [],
+        "needs_review": True,
+        "human_confirmation_required": True,
+        "auto_apply": False,
+        "auto_confirm": False,
+        "auto_submit": False,
+    }
 
 
 def _failed_structure_evidence(

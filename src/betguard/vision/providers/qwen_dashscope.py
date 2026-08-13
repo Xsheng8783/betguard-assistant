@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from io import BytesIO
 from json.decoder import JSONDecoder
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from betguard.vision.contracts import (
     BoundingBox,
@@ -36,6 +36,12 @@ from betguard.vision.contracts import (
 )
 from betguard.vision.errors import ErrorCode, ProviderError
 from betguard.vision.qwen_cache import QwenCacheIdentity, QwenResponseCache
+from betguard.vision.qwen_diagnostics import (
+    NESTED_JSON_SALVAGE_MISLEADING_ERROR,
+    QWEN_OUTPUT_TRUNCATED,
+    QwenFailureDiagnosticStore,
+    inspect_json_extraction,
+)
 from betguard.vision.qwen_prompts import (
     PROMPT,
     PROMPT_VERSION,
@@ -120,11 +126,43 @@ class QwenSchemaError(QwenClientError):
     pass
 
 
+class QwenOutputTruncatedError(QwenSchemaError):
+    """A full-page response ended before its top-level JSON was complete."""
+
+    classification = QWEN_OUTPUT_TRUNCATED
+
+    def __init__(
+        self,
+        message: str = QWEN_OUTPUT_TRUNCATED,
+        *,
+        secondary_classifications: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(message, retryable=False)
+        self.secondary_classifications = secondary_classifications
+
+
 class QwenTimeoutError(QwenClientError):
     pass
 
 
 Transport = Callable[[dict[str, Any], str, QwenDashScopeConfig], dict[str, Any]]
+
+
+class _QwenCallMetadata(dict[str, Any]):
+    """Public metadata keys plus non-serialized failure diagnostic context."""
+
+    diagnostic_identity: dict[str, Any]
+    response_metadata: dict[str, Any]
+
+
+class _HTTPResponseEnvelope(dict[str, Any]):
+    """Parsed response body carrying HTTP status outside its JSON keys."""
+
+    http_status: int | None
+
+    def __init__(self, value: dict[str, Any], *, http_status: int | None) -> None:
+        super().__init__(value)
+        self.http_status = http_status
 
 
 class QwenDashScopeClient:
@@ -135,11 +173,13 @@ class QwenDashScopeClient:
         *,
         config: QwenDashScopeConfig | None = None,
         cache: QwenResponseCache | None = None,
+        diagnostic_store: QwenFailureDiagnosticStore | None = None,
         transport: Transport | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.config = config or QwenDashScopeConfig.from_env()
         self.cache = cache or QwenResponseCache()
+        self.diagnostic_store = diagnostic_store or QwenFailureDiagnosticStore()
         self._transport = transport or _post_chat_completions
         self._sleep = sleep
 
@@ -189,7 +229,7 @@ class QwenDashScopeClient:
             endpoint_url=self.config.url,
         )
         retry_limit = self.config.max_retries if retries is None else max(0, int(retries))
-        meta: dict[str, Any] = {
+        meta = _QwenCallMetadata({
             "request_id": rid,
             "model": self.config.model,
             "prompt_version": prompt_version,
@@ -205,7 +245,9 @@ class QwenDashScopeClient:
             "latency_s": None,
             "cache_hit": False,
             "response_schema_valid": False,
-        }
+        })
+        meta.diagnostic_identity = identity.to_dict()
+        meta.response_metadata = {}
 
         cached = self.cache.get(identity)
         if cached is not None:
@@ -237,14 +279,41 @@ class QwenDashScopeClient:
                 data = self._transport(payload, api_key, self.config)
                 meta["latency_s"] = round(time.time() - started, 2)
                 meta["retries"] = attempt
-                content = _response_content(data, request_id=rid)
+                meta.response_metadata = _response_metadata(
+                    data,
+                    latency_s=meta["latency_s"],
+                    attempt=attempt,
+                )
+                content = _response_content_candidate(data)
                 try:
-                    validated = validate_task_response(content, task_type)
-                except QwenSchemaError:
+                    content = _response_content(data, request_id=rid)
+                    validated = validate_task_response(
+                        content,
+                        task_type,
+                        response_metadata=meta.response_metadata,
+                    )
+                except QwenSchemaError as exc:
+                    if not isinstance(exc, QwenOutputTruncatedError):
+                        truncation_error = _full_page_truncation_error(
+                            content or "",
+                            task_type=task_type,
+                            response_metadata=meta.response_metadata,
+                        )
+                        if truncation_error is not None:
+                            exc = truncation_error
+                    diagnostic = self._preserve_schema_failure(
+                        meta=meta,
+                        content=content,
+                        error=exc,
+                    )
+                    if diagnostic is not None:
+                        meta["failure_diagnostic"] = diagnostic
                     # Debug callers historically receive model content even
                     # when its inner JSON is invalid.  Do not cache it; the
                     # first-class provider validates again and fails closed.
-                    return content, meta
+                    if content is not None and content.strip():
+                        return content, meta
+                    raise exc
                 meta["response_schema_valid"] = True
                 try:
                     self.cache.put_validated(
@@ -270,6 +339,25 @@ class QwenDashScopeClient:
             retryable=True,
         )
 
+    def _preserve_schema_failure(
+        self,
+        *,
+        meta: _QwenCallMetadata,
+        content: str | None,
+        error: QwenSchemaError,
+    ) -> dict[str, Any] | None:
+        try:
+            return self.diagnostic_store.preserve(
+                request_metadata=meta,
+                cache_identity=meta.diagnostic_identity,
+                response_content=content,
+                response_metadata=meta.response_metadata,
+                schema_error=error,
+            )
+        except Exception as exc:
+            meta["failure_diagnostic_write_error"] = type(exc).__name__
+            return None
+
 
 class QwenDashScopeProvider:
     """Image request -> validated response -> RecognitionResult only."""
@@ -282,6 +370,8 @@ class QwenDashScopeProvider:
     def recognize(self, request: RecognitionRequest) -> RecognitionResult:
         started = time.time()
         source = _source_image_from_request(request)
+        content: str | None = None
+        meta: dict[str, Any] = {}
         try:
             image, png_bytes = load_normalized_image(Path(request.image_path))
             sent_sha = hashlib.sha256(png_bytes).hexdigest()
@@ -310,7 +400,15 @@ class QwenDashScopeProvider:
                 request_id=request.request_id,
             )
             source.cloud_uploaded = not bool(meta.get("cache_hit"))
-            parsed = validate_task_response(content, TASK_TYPE_FULL_PAGE)
+            parsed = validate_task_response(
+                content,
+                TASK_TYPE_FULL_PAGE,
+                response_metadata=(
+                    meta.response_metadata
+                    if isinstance(meta, _QwenCallMetadata)
+                    else None
+                ),
+            )
             try:
                 lines = _lines_from_full_page_response(parsed)
             except ValueError as exc:
@@ -318,12 +416,27 @@ class QwenDashScopeProvider:
             if not lines:
                 raise QwenSchemaError("Qwen response contains no recognized rows")
         except Exception as exc:
+            diagnostic = meta.get("failure_diagnostic")
+            if (
+                diagnostic is None
+                and isinstance(exc, QwenSchemaError)
+                and isinstance(content, str)
+                and isinstance(meta, _QwenCallMetadata)
+            ):
+                diagnostic = self._client._preserve_schema_failure(
+                    meta=meta,
+                    content=content,
+                    error=exc,
+                )
             return _failed_result(
                 request,
                 source=source,
                 error=exc,
                 model=self._client.config.model,
                 latency_ms=(time.time() - started) * 1000,
+                failure_diagnostic=(
+                    diagnostic if isinstance(diagnostic, dict) else None
+                ),
             )
 
         preprocessing: dict[str, Any] = {
@@ -355,9 +468,17 @@ class QwenDashScopeProvider:
         )
 
 
-def validate_task_response(content: str, task_type: str) -> dict[str, Any]:
+def validate_task_response(
+    content: str,
+    task_type: str,
+    *,
+    response_metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Validate only the JSON structure required by a Qwen task."""
-    obj = extract_json(content)
+    if task_type == TASK_TYPE_FULL_PAGE:
+        obj = _strict_full_page_root(content, response_metadata=response_metadata)
+    else:
+        obj = extract_json(content)
     if obj is None:
         raise QwenSchemaError("Qwen content is not a JSON object")
     if task_type == TASK_TYPE_FULL_PAGE:
@@ -371,6 +492,64 @@ def validate_task_response(content: str, task_type: str) -> dict[str, Any]:
     else:
         raise QwenSchemaError(f"unsupported Qwen task_type: {task_type}")
     return obj
+
+
+def _strict_full_page_root(
+    content: str,
+    *,
+    response_metadata: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Require a complete top-level object; nested salvage is never a root."""
+    truncation_error = _full_page_truncation_error(
+        content,
+        task_type=TASK_TYPE_FULL_PAGE,
+        response_metadata=response_metadata,
+    )
+    if truncation_error is not None:
+        raise truncation_error
+
+    try:
+        obj = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise QwenSchemaError(
+            "full-page response must be a complete top-level JSON object"
+        ) from exc
+    if not isinstance(obj, dict):
+        raise QwenSchemaError("full-page response root must be a JSON object")
+    return obj
+
+
+def _full_page_truncation_error(
+    content: str,
+    *,
+    task_type: str,
+    response_metadata: Mapping[str, Any] | None,
+) -> QwenOutputTruncatedError | None:
+    if task_type != TASK_TYPE_FULL_PAGE:
+        return None
+    observation = inspect_json_extraction(content)
+    finish_reason = (
+        response_metadata.get("finish_reason")
+        if isinstance(response_metadata, Mapping)
+        else None
+    )
+    incomplete_root = (
+        not observation["strict_json_parse_ok"]
+        and (
+            observation["braces_balance"] > 0
+            or observation["brackets_balance"] > 0
+        )
+    )
+    if finish_reason == "length" or incomplete_root:
+        secondary = (
+            (NESTED_JSON_SALVAGE_MISLEADING_ERROR,)
+            if observation["salvage_success"]
+            else ()
+        )
+        return QwenOutputTruncatedError(
+            secondary_classifications=secondary,
+        )
+    return None
 
 
 def extract_json(text: str) -> dict[str, Any] | None:
@@ -436,8 +615,15 @@ def _post_chat_completions(
             "Authorization": f"Bearer {api_key}",
         },
     )
+    http_status: int | None = None
     try:
         with urllib.request.urlopen(request, timeout=config.timeout_seconds) as response:
+            http_status = getattr(response, "status", None)
+            if http_status is None:
+                try:
+                    http_status = int(response.getcode())
+                except (AttributeError, TypeError, ValueError):
+                    http_status = None
             raw = response.read()
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")[:300]
@@ -469,7 +655,28 @@ def _post_chat_completions(
         raise QwenSchemaError("Qwen HTTP response is not valid JSON") from exc
     if not isinstance(data, dict):
         raise QwenSchemaError("Qwen HTTP response is not a JSON object")
-    return data
+    return _HTTPResponseEnvelope(data, http_status=http_status)
+
+
+def _response_metadata(
+    data: dict[str, Any],
+    *,
+    latency_s: int | float | None,
+    attempt: int,
+) -> dict[str, Any]:
+    choice: dict[str, Any] = {}
+    choices = data.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        choice = choices[0]
+    usage = data.get("usage")
+    return {
+        "latency_s": latency_s,
+        "attempt_count": attempt + 1,
+        "retry_count": attempt,
+        "http_status": getattr(data, "http_status", None) or 200,
+        "finish_reason": choice.get("finish_reason"),
+        "usage": usage if isinstance(usage, dict) else None,
+    }
 
 
 def _response_content(data: dict[str, Any], *, request_id: str) -> str:
@@ -484,6 +691,15 @@ def _response_content(data: dict[str, Any], *, request_id: str) -> str:
             f"Qwen 回傳空 content（request_id={request_id}）；raw={str(data)[:300]}"
         )
     return content
+
+
+def _response_content_candidate(data: dict[str, Any]) -> str | None:
+    """Return string content, including empty content, for failure observation."""
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    return content if isinstance(content, str) else None
 
 
 def _validate_full_page(obj: dict[str, Any]) -> None:
@@ -645,8 +861,19 @@ def _failed_result(
     error: Exception,
     model: str,
     latency_ms: float,
+    failure_diagnostic: dict[str, Any] | None = None,
 ) -> RecognitionResult:
     code, retryable, status = _provider_error_details(error)
+    preprocessing: dict[str, Any] = {
+        **_SAFETY_METADATA,
+        "prompt_version": PROMPT_VERSION,
+        "prompt_sha256": prompt_sha256(PROMPT),
+        "task_type": TASK_TYPE_FULL_PAGE,
+        "request_schema_version": REQUEST_SCHEMA_VERSION,
+        "response_schema_valid": False,
+    }
+    if failure_diagnostic is not None:
+        preprocessing["failure_diagnostic"] = dict(failure_diagnostic)
     return RecognitionResult(
         recognition_id=f"{request.request_id}:qwen-dashscope:failed",
         request_id=request.request_id,
@@ -658,14 +885,7 @@ def _failed_result(
             adapter_version=ADAPTER_VERSION,
         ),
         source_image=source,
-        preprocessing={
-            **_SAFETY_METADATA,
-            "prompt_version": PROMPT_VERSION,
-            "prompt_sha256": prompt_sha256(PROMPT),
-            "task_type": TASK_TYPE_FULL_PAGE,
-            "request_schema_version": REQUEST_SCHEMA_VERSION,
-            "response_schema_valid": False,
-        },
+        preprocessing=preprocessing,
         raw_text="",
         lines=[],
         warnings=[],
@@ -684,6 +904,8 @@ def _provider_error_details(error: Exception) -> tuple[str, bool, int | None]:
         return ErrorCode.AUTHENTICATION_FAILED.value, False, None
     if isinstance(error, QwenTimeoutError):
         return ErrorCode.TIMEOUT.value, True, None
+    if isinstance(error, QwenOutputTruncatedError):
+        return QWEN_OUTPUT_TRUNCATED, False, error.http_status
     if isinstance(error, QwenSchemaError):
         return ErrorCode.INTERNAL_ERROR.value, False, error.http_status
     if isinstance(error, QwenClientError):
