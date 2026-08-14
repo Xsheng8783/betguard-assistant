@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://betguard.local/schemas/vision-candidate-lifecycle-event-v1.json",
+  "title": "Betguard Vision Candidate Lifecycle Event V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "event_id", "candidate_id", "candidate_revision",
+    "event_sequence", "event_type", "candidate_content_hash", "reason_code",
+    "occurred_at", "actor"
+  ],
+  "properties": {
+    "schema_version": {"const": "vision-candidate-lifecycle-event-v1"},
+    "event_id": {"type": "string", "pattern": "^vce-[a-f0-9]{32}$"},
+    "candidate_id": {"type": "string", "pattern": "^vc-[a-f0-9]{32}$"},
+    "candidate_revision": {"type": "integer", "minimum": 1},
+    "event_sequence": {"type": "integer", "minimum": 1},
+    "event_type": {"enum": ["CREATED", "STALE", "INVALIDATED", "SUPERSEDED", "REVOKED"]},
+    "candidate_content_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "reason_code": {"type": ["string", "null"]},
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "actor": {"type": "string", "minLength": 1},
+    "superseded_by_revision": {"type": ["integer", "null"], "minimum": 1}
+  }
+}

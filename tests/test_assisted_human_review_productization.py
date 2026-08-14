@@ -20,6 +20,8 @@ from tests.test_gemma_assisted_human_review import (
     _sample008_gemma,
 )
 from tests.test_vision_review_session_gate3a import (
+    _confirm_structure,
+    _create_candidate,
     _job_result,
     _mount,
     _run_qwen,
@@ -121,11 +123,11 @@ def test_navigation_ctrl_enter_counters_and_auto_next(page) -> None:
     _mount(page)
     _run_qwen(page)
     assert page.evaluate("qwenGetReviewSession().active_structure_id") == "S01"
-    page.click('.qwen-review-card[data-structure-id="S01"] .qwen-confirm-structure')
+    _confirm_structure(page, "S01")
     assert page.evaluate("qwenGetReviewSession().active_structure_id") == "S02"
     assert "unresolved=1" in page.text_content("#qwen-review-counts")
     page.keyboard.press("Control+Enter")
-    assert page.evaluate("qwenGetReviewSession().structures[1].human_confirmed") is True
+    page.wait_for_function("qwenGetReviewSession().structures[1].human_confirmed === true")
     assert page.locator("#qwen-complete-review").count() == 1
     page.click("#qwen-review-previous")
     assert page.evaluate("qwenGetReviewSession().active_structure_id") == "S01"
@@ -133,24 +135,32 @@ def test_navigation_ctrl_enter_counters_and_auto_next(page) -> None:
     assert page.evaluate("qwenGetReviewSession().active_structure_id") == "S02"
 
 
-def test_candidate_boundary_is_only_a_ready_signal_with_zero_side_effect(page) -> None:
+def test_candidate_boundary_creates_only_server_candidate_with_zero_fill_side_effect(page) -> None:
     calls = _mount(page)
     _run_qwen(page)
     assert page.locator("#qwen-complete-review").count() == 0
     for structure_id in ("S01", "S02"):
-        page.click(f'.qwen-review-card[data-structure-id="{structure_id}"] .qwen-confirm-structure')
+        _confirm_structure(page, structure_id)
     urls_before = list(calls["urls"])
-    page.click("#qwen-complete-review")
-    assert calls["urls"] == urls_before
+    candidate = _create_candidate(page)
+    assert calls["urls"][len(urls_before):] == [
+        "http://gate3a.test/api/vision/v1/candidates"
+    ]
     signal = page.evaluate("qwenGetReviewSession().boundary_signal")
     assert signal == {
-        "status": "ready_not_created",
-        "signaled_at": signal["signaled_at"],
-        "candidate_created": False,
+        "status": "candidate_created",
+        "candidate_id": candidate["candidate_id"],
+        "candidate_revision": candidate["revision"],
+        "replayed": False,
         "queue_written": False,
         "external_fill_called": False,
     }
-    assert page.evaluate("qwenGetReviewSummary().registration_state") == "candidate_boundary_ready_not_created"
+    assert candidate["safety"]["candidate_only"] is True
+    assert candidate["safety"]["approved_for_fill"] is False
+    assert not any(
+        "queue" in url or "webfill" in url or "assist-fill" in url
+        for url in calls["urls"]
+    )
 
 
 def test_sample007_qwen_failure_can_finish_by_explicit_manual_entry(page) -> None:
@@ -161,19 +171,24 @@ def test_sample007_qwen_failure_can_finish_by_explicit_manual_entry(page) -> Non
     assert page.get_attribute("#qwen-advanced-evidence", "open") is None
     assert page.locator("#gemma-shadow-evidence").count() == 1
     page.click("#qwen-add-manual-structure")
+    page.wait_for_selector('.qwen-card-editable[data-card-index="0"]')
     page.fill('.qwen-card-editable[data-card-index="0"]', "05 09 17 28 2/3X1")
     page.click('.qwen-card-editable[data-card-index="0"] + div .qwen-card-reparse')
     page.wait_for_selector(".qwen-adopt-edit")
     page.click(".qwen-adopt-edit")
     assert page.evaluate("qwenGetReviewSession().structures[0].human_confirmed") is False
-    page.click(".qwen-confirm-structure")
+    _confirm_structure(page, "MANUAL-01")
     assert page.locator("#qwen-complete-review").count() == 1
     assert calls["manual"] == [{
         "text": "05 09 17 28 2/3X1",
         "game": "539",
         "register_candidate": False,
     }]
-    assert not any(word in url.lower() for url in calls["urls"] for word in ("candidate", "queue", "webfill"))
+    assert not any(
+        word in url.lower()
+        for url in calls["urls"]
+        for word in ("queue", "webfill", "assist-fill")
+    )
 
 
 def test_sample010_special_scope_fields_survive_manual_edit_and_summary(page) -> None:
@@ -201,11 +216,11 @@ def test_sample010_special_scope_fields_survive_manual_edit_and_summary(page) ->
     staged = page.evaluate("qwenGetReviewSession().structures[0].staged_structure")
     for key in ("continuation", "tail", "car", "half_car", "each", "special_text", "scope"):
         assert staged[key] == candidate[key]
-    page.click(".qwen-confirm-structure")
-    page.click("#qwen-complete-review")
-    human = page.evaluate("qwenGetReviewSummary().confirmed_structures[0].human_answer")
-    assert human["special_text"] == "各半車"
-    assert human["continuation"] == candidate["continuation"]
+    _confirm_structure(page, "S10")
+    human = _create_candidate(page)["active_bets"][0]
+    special = json.loads(human["special_play"]["raw_text"])
+    assert special["special_text"] == "各半車"
+    assert human["continuation"]["present"] is True
 
 
 def test_special_scope_controls_are_browser_local_pending_and_preserved(page) -> None:
@@ -223,7 +238,7 @@ def test_special_scope_controls_are_browser_local_pending_and_preserved(page) ->
     }
     _mount(page, structure_evidence=_single_structure("S10", candidate))
     _run_qwen(page)
-    page.click(".qwen-confirm-structure")
+    _confirm_structure(page, "S10")
     page.click(".qwen-edit-structure")
     page.uncheck(".qwen-special-continuation")
     page.fill(".qwen-special-tail", "尾二")
@@ -246,11 +261,11 @@ def test_special_scope_controls_are_browser_local_pending_and_preserved(page) ->
     assert {item["field"] for item in card["field_corrections"]} >= {
         "continuation", "tail", "car", "half_car", "each", "special_text", "scope"
     }
-    page.click(".qwen-confirm-structure")
-    page.click("#qwen-complete-review")
-    human = page.evaluate("qwenGetReviewSummary().confirmed_structures[0].human_answer")
-    assert human["scope"] == "next_group"
-    assert human["special_text"] == "人工特殊玩法"
+    _confirm_structure(page, "S10")
+    human = _create_candidate(page)["active_bets"][0]
+    special = json.loads(human["special_play"]["raw_text"])
+    assert human["special_play"]["scope"] == "next_group"
+    assert special["special_text"] == "人工特殊玩法"
 
 
 def test_sample011_columns_are_never_flattened(page) -> None:
@@ -274,13 +289,12 @@ def test_sample014_cancelled_is_not_active_and_scope_does_not_move(page) -> None
     assert session["structures"][0]["staged_structure"]["scope"] == "unresolved_region"
     assert session["structures"][1]["staged_structure"] == original_second
     assert "總共 1 active" in page.text_content("#qwen-review-progress")
-    page.click('.qwen-review-card[data-structure-id="S01"] .qwen-confirm-structure')
-    page.click('.qwen-review-card[data-structure-id="S02"] .qwen-confirm-structure')
-    page.click("#qwen-complete-review")
-    summary = page.evaluate("qwenGetReviewSummary()")
-    assert len(summary["confirmed_structures"]) == 1
-    assert len(summary["cancelled_structures"]) == 1
-    assert summary["cancelled_structures"][0]["cancelled"] is True
+    _confirm_structure(page, "S01")
+    _confirm_structure(page, "S02")
+    summary = _create_candidate(page)
+    assert len(summary["active_bets"]) == 1
+    assert len(summary["cancelled_audit"]) == 1
+    assert summary["cancelled_audit"][0]["cancelled"] is True
 
 
 def test_machine_evidence_remains_deep_equal_across_product_review(page) -> None:

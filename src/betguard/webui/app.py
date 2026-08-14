@@ -963,6 +963,21 @@ def _find_latest_unrecognized() -> Path | None:
 _manual_candidates: dict[str, dict[str, Any]] = {}
 # Server-side assist-panel state (cross-browser sync)
 _ASSIST_PANEL_STATE: dict[str, Any] = {}
+# Lazily constructed so importing the web UI never creates persistence paths.
+# Tests replace this singleton with a tmp_path-backed store.
+_VISION_CANDIDATE_AUTHORITY_STORE: Any | None = None
+
+
+def _get_vision_candidate_authority_store() -> Any:
+    global _VISION_CANDIDATE_AUTHORITY_STORE
+    if _VISION_CANDIDATE_AUTHORITY_STORE is None:
+        from betguard.user_data import get_data_dir
+        from betguard.vision.candidate_authority import VisionCandidateAuthorityStore
+
+        _VISION_CANDIDATE_AUTHORITY_STORE = VisionCandidateAuthorityStore(
+            Path(get_data_dir()) / "vision" / "candidate-authority"
+        )
+    return _VISION_CANDIDATE_AUTHORITY_STORE
 
 def _register_manual_candidate(candidate: dict[str, Any]) -> str:
     """Register a manually corrected candidate and return its unique ID."""
@@ -1166,6 +1181,13 @@ def build_workbench_handler(
             if path == "/api/vision/v1/providers":
                 self._handle_vision_providers()
                 return
+            if path.startswith("/api/vision/v1/review-sessions/"):
+                review_session_id = urllib.parse.unquote(
+                    path[len("/api/vision/v1/review-sessions/"):]
+                )
+                if review_session_id and "/" not in review_session_id:
+                    self._handle_vision_review_get(review_session_id)
+                    return
             if path.startswith("/api/vision/v1/images/"):
                 image_id = path[len("/api/vision/v1/images/"):]
                 if image_id and "/" not in image_id:
@@ -1302,8 +1324,46 @@ def build_workbench_handler(
             if path == "/api/vision/v1/jobs":
                 self._handle_vision_job()
                 return
+            if path == "/api/vision/v1/review-sessions":
+                self._handle_vision_review_create()
+                return
+            if path.startswith("/api/vision/v1/review-sessions/"):
+                review_action = path[len("/api/vision/v1/review-sessions/"):]
+                if review_action.endswith("/confirmations"):
+                    review_session_id = urllib.parse.unquote(
+                        review_action[:-len("/confirmations")]
+                    )
+                    if review_session_id and "/" not in review_session_id:
+                        self._handle_vision_review_confirmation(
+                            review_session_id, confirmed=True
+                        )
+                        return
+                if review_action.endswith("/unconfirmations"):
+                    review_session_id = urllib.parse.unquote(
+                        review_action[:-len("/unconfirmations")]
+                    )
+                    if review_session_id and "/" not in review_session_id:
+                        self._handle_vision_review_confirmation(
+                            review_session_id, confirmed=False
+                        )
+                        return
+            if path == "/api/vision/v1/candidates":
+                self._handle_vision_candidate_create()
+                return
             # --- end Vision API ---
 
+            self._send_text("not found", status=404)
+
+        def do_PATCH(self) -> None:  # noqa: N802 -- stdlib name
+            parsed = urllib.parse.urlparse(self.path)
+            path = parsed.path
+            if path.startswith("/api/vision/v1/review-sessions/"):
+                review_session_id = urllib.parse.unquote(
+                    path[len("/api/vision/v1/review-sessions/"):]
+                )
+                if review_session_id and "/" not in review_session_id:
+                    self._handle_vision_review_replace(review_session_id)
+                    return
             self._send_text("not found", status=404)
 
         # ----------------------------------------------------------------
@@ -1321,6 +1381,239 @@ def build_workbench_handler(
             except (UnicodeDecodeError, json.JSONDecodeError):
                 self._send_json({"ok": False, "error": "invalid JSON"})
                 return None
+
+        @staticmethod
+        def _vision_authority_safety() -> dict[str, Any]:
+            return {
+                "candidate_only": True,
+                "approved_for_fill": False,
+                "queue_written": False,
+                "auto_confirm": False,
+                "auto_submit": False,
+                "webfill_called": False,
+            }
+
+        def _send_vision_authority_error(self, exc: Exception) -> None:
+            from betguard.vision.candidate_authority import CandidateAuthorityError
+
+            if isinstance(exc, CandidateAuthorityError):
+                code = exc.code
+                message = exc.message
+                status = exc.http_status
+            else:
+                code = "CANDIDATE_AUTHORITY_INTERNAL"
+                message = "candidate authority operation failed"
+                status = 500
+            self._send_json(
+                {
+                    "ok": False,
+                    "code": code,
+                    "error": {"code": code, "message": message},
+                    "safety": self._vision_authority_safety(),
+                },
+                status=status,
+            )
+
+        def _require_exact_json_fields(
+            self,
+            data: Any,
+            *,
+            required: set[str],
+            optional: set[str] | None = None,
+        ) -> bool:
+            if not isinstance(data, dict):
+                self._send_json(
+                    {"ok": False, "code": "REQUEST_INVALID", "error": "JSON object required"},
+                    status=400,
+                )
+                return False
+            allowed = required | (optional or set())
+            missing = sorted(required - set(data))
+            unknown = sorted(set(data) - allowed)
+            if missing or unknown:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "code": "REQUEST_FIELDS_INVALID",
+                        "error": {
+                            "code": "REQUEST_FIELDS_INVALID",
+                            "message": "request fields do not match the versioned contract",
+                            "missing": missing,
+                            "unknown": unknown,
+                        },
+                        "safety": self._vision_authority_safety(),
+                    },
+                    status=400,
+                )
+                return False
+            return True
+
+        def _handle_vision_review_create(self) -> None:
+            data = self._read_json_body()
+            if data is None or not self._require_exact_json_fields(
+                data,
+                required={
+                    "review_session_id",
+                    "source_image_id",
+                    "source_image_hash",
+                    "game",
+                    "bets",
+                    "machine_evidence_refs",
+                    "blocking_unresolved_count",
+                },
+            ):
+                return
+            try:
+                review = _get_vision_candidate_authority_store().create_human_review(
+                    review_session_id=data["review_session_id"],
+                    source_image_id=data["source_image_id"],
+                    source_image_hash=data["source_image_hash"],
+                    game=data["game"],
+                    bets=data["bets"],
+                    machine_evidence_refs=data["machine_evidence_refs"],
+                    blocking_unresolved_count=data["blocking_unresolved_count"],
+                    actor="assist-panel-human",
+                )
+            except Exception as exc:
+                self._send_vision_authority_error(exc)
+                return
+            self._send_json(
+                {"ok": True, "review": review, "safety": self._vision_authority_safety()},
+                status=201,
+            )
+
+        def _handle_vision_review_get(self, review_session_id: str) -> None:
+            try:
+                store = _get_vision_candidate_authority_store()
+                review = store.get_human_review(review_session_id)
+                if review is None:
+                    from betguard.vision.candidate_authority import CandidateAuthorityError
+
+                    raise CandidateAuthorityError(
+                        "REVIEW_NOT_FOUND", "human review session not found", 404
+                    )
+                candidate = store.get_candidate_for_review(review_session_id)
+            except Exception as exc:
+                self._send_vision_authority_error(exc)
+                return
+            self._send_json(
+                {
+                    "ok": True,
+                    "review": review,
+                    "candidate": candidate,
+                    "safety": self._vision_authority_safety(),
+                }
+            )
+
+        def _handle_vision_review_replace(self, review_session_id: str) -> None:
+            data = self._read_json_body()
+            if data is None or not self._require_exact_json_fields(
+                data,
+                required={
+                    "expected_human_answer_revision",
+                    "expected_human_answer_hash",
+                    "bets",
+                    "machine_evidence_refs",
+                    "blocking_unresolved_count",
+                },
+            ):
+                return
+            try:
+                review = _get_vision_candidate_authority_store().replace_human_review(
+                    review_session_id=review_session_id,
+                    expected_revision=data["expected_human_answer_revision"],
+                    expected_human_answer_hash=data["expected_human_answer_hash"],
+                    bets=data["bets"],
+                    machine_evidence_refs=data["machine_evidence_refs"],
+                    blocking_unresolved_count=data["blocking_unresolved_count"],
+                    actor="assist-panel-human",
+                )
+                candidate = _get_vision_candidate_authority_store().get_candidate_for_review(
+                    review_session_id
+                )
+            except Exception as exc:
+                self._send_vision_authority_error(exc)
+                return
+            self._send_json(
+                {
+                    "ok": True,
+                    "review": review,
+                    "candidate": candidate,
+                    "safety": self._vision_authority_safety(),
+                }
+            )
+
+        def _handle_vision_candidate_create(self) -> None:
+            data = self._read_json_body()
+            if data is None or not self._require_exact_json_fields(
+                data,
+                required={
+                    "review_session_id",
+                    "expected_human_answer_revision",
+                    "expected_human_answer_hash",
+                    "idempotency_key",
+                },
+            ):
+                return
+            try:
+                result = _get_vision_candidate_authority_store().create_candidate(
+                    review_session_id=data["review_session_id"],
+                    expected_human_answer_revision=data[
+                        "expected_human_answer_revision"
+                    ],
+                    expected_human_answer_hash=data["expected_human_answer_hash"],
+                    idempotency_key=data["idempotency_key"],
+                    actor="assist-panel-human",
+                )
+            except Exception as exc:
+                self._send_vision_authority_error(exc)
+                return
+            self._send_json(
+                {"ok": True, **result, "safety": self._vision_authority_safety()},
+                status=201,
+            )
+
+        def _handle_vision_review_confirmation(
+            self, review_session_id: str, *, confirmed: bool
+        ) -> None:
+            data = self._read_json_body()
+            if data is None or not self._require_exact_json_fields(
+                data,
+                required={
+                    "expected_human_answer_revision",
+                    "expected_human_answer_hash",
+                    "human_bet_ids",
+                },
+            ):
+                return
+            try:
+                store = _get_vision_candidate_authority_store()
+                method_name = (
+                    "confirm_human_review_bets"
+                    if confirmed
+                    else "unconfirm_human_review_bets"
+                )
+                review = getattr(store, method_name)(
+                    review_session_id=review_session_id,
+                    expected_human_answer_revision=data[
+                        "expected_human_answer_revision"
+                    ],
+                    expected_human_answer_hash=data["expected_human_answer_hash"],
+                    human_bet_ids=data["human_bet_ids"],
+                    actor="assist-panel-human",
+                )
+                candidate = store.get_candidate_for_review(review_session_id)
+            except Exception as exc:
+                self._send_vision_authority_error(exc)
+                return
+            self._send_json(
+                {
+                    "ok": True,
+                    "review": review,
+                    "candidate": candidate,
+                    "safety": self._vision_authority_safety(),
+                }
+            )
 
         def _validate_candidate(
             self, data: dict[str, Any] | None = None

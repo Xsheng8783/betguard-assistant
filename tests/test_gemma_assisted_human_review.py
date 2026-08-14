@@ -14,10 +14,12 @@ except ImportError:
     HAS_PLAYWRIGHT = False
 
 from tests.test_vision_review_session_gate3a import (
+    _confirm_structure,
     _job_result,
     _mount,
     _run_qwen,
     _structure_evidence,
+    _wait_authority_ready,
 )
 
 
@@ -156,6 +158,7 @@ def test_sample008_s03_explicit_number_adoption_is_browser_local_and_pending(pag
     recognition_before = page.evaluate("qwenGetRecognitionResult()")
     urls_before = list(calls["urls"])
     _click_candidate(page, "S03", "GEMMA-0004", "numbers")
+    _wait_authority_ready(page)
     card = page.evaluate("qwenGetReviewSession().structures[0]")
     assert card["staged_structure"]["number_groups"] == [["08"], ["01", "04"]]
     assert card["staged_structure"]["multiplier_rules"] == ["2X5"]
@@ -166,7 +169,12 @@ def test_sample008_s03_explicit_number_adoption_is_browser_local_and_pending(pag
     assert card["human_confirmed"] is False
     assert card["suggestion_adoptions"][0]["human_confirmed"] is False
     assert page.evaluate("qwenGetRecognitionResult()") == recognition_before
-    assert calls["urls"] == urls_before
+    new_urls = calls["urls"][len(urls_before):]
+    assert len(new_urls) == 1
+    assert "/api/vision/v1/review-sessions/" in new_urls[0]
+    assert calls["review_replace"][-1]["bets"][0]["number_groups"] == [
+        ["08"], ["01", "04"]
+    ]
     assert calls["manual"] == []
     assert page.evaluate("qwenGetReviewSummary()") is None
 
@@ -209,7 +217,7 @@ def test_gemma_adoption_stays_editable_and_unconfirmed_until_explicit_confirm(pa
     assert page.input_value(editor) == "08 / 01 04 09 二X5"
     assert page.evaluate("qwenGetReviewSession().structures[0].human_confirmed") is False
     page.click('.qwen-review-card[data-structure-id="S03"] .qwen-card-cancel')
-    page.click('.qwen-review-card[data-structure-id="S03"] .qwen-confirm-structure')
+    _confirm_structure(page, "S03")
     assert page.evaluate("qwenGetReviewSession().structures[0].human_confirmed") is True
 
 

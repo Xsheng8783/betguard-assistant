@@ -220,12 +220,19 @@ def _mount(
     structure_evidence: list[dict] | None = None,
     gemma_evidence: dict | None = None,
 ):
-    calls: dict[str, list] = {"jobs": [], "manual": [], "urls": [], "uploads": []}
+    calls: dict[str, list] = {
+        "jobs": [], "manual": [], "urls": [], "uploads": [],
+        "review_create": [], "review_replace": [], "review_confirm": [],
+        "review_unconfirm": [], "candidate_create": [],
+    }
     upload_count = 0
     first = _png_bytes()
+    server_review: dict | None = None
+    server_candidate: dict | None = None
+    server_candidate_state: str | None = None
 
     def handle(route):
-        nonlocal upload_count
+        nonlocal upload_count, server_review, server_candidate, server_candidate_state
         request = route.request
         calls["urls"].append(request.url)
         if request.url == "http://gate3a.test/":
@@ -249,6 +256,135 @@ def _mount(
                     ],
                 }),
             )
+            return
+        if request.url.endswith("/api/vision/v1/review-sessions") and request.method == "POST":
+            payload = request.post_data_json
+            calls["review_create"].append(payload)
+            server_review = {
+                **payload,
+                "bets": [{**bet, "human_confirmed": False} for bet in payload["bets"]],
+                "human_answer_revision": 1,
+                "human_answer_hash": "a" * 64,
+                "created_at": "2026-08-15T00:00:00+00:00",
+                "updated_at": "2026-08-15T00:00:00+00:00",
+            }
+            route.fulfill(status=201, content_type="application/json", body=json.dumps({
+                "ok": True, "review": server_review,
+                "safety": {"candidate_only": True, "approved_for_fill": False, "queue_written": False, "auto_confirm": False, "auto_submit": False, "webfill_called": False},
+            }))
+            return
+        if "/api/vision/v1/review-sessions/" in request.url and request.url.endswith(("/confirmations", "/unconfirmations")) and request.method == "POST":
+            payload = request.post_data_json
+            confirmed = request.url.endswith("/confirmations")
+            calls["review_confirm" if confirmed else "review_unconfirm"].append(payload)
+            assert server_review is not None
+            selected = set(payload["human_bet_ids"])
+            server_review = {
+                **server_review,
+                "bets": [
+                    {**bet, "human_confirmed": confirmed}
+                    if bet["human_bet_id"] in selected else bet
+                    for bet in server_review["bets"]
+                ],
+                "human_answer_revision": server_review["human_answer_revision"] + 1,
+                "human_answer_hash": format(server_review["human_answer_revision"] + 1, "x")[-1] * 64,
+            }
+            if server_candidate is not None:
+                server_candidate_state = "STALE"
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                "ok": True,
+                "review": server_review,
+                "candidate": (
+                    {"candidate": server_candidate, "state": server_candidate_state}
+                    if server_candidate is not None else None
+                ),
+            }))
+            return
+        if "/api/vision/v1/review-sessions/" in request.url and request.method == "PATCH":
+            payload = request.post_data_json
+            calls["review_replace"].append(payload)
+            assert server_review is not None
+            server_review = {
+                **server_review,
+                "bets": payload["bets"],
+                "machine_evidence_refs": payload["machine_evidence_refs"],
+                "blocking_unresolved_count": payload["blocking_unresolved_count"],
+                "human_answer_revision": server_review["human_answer_revision"] + 1,
+                "human_answer_hash": format(server_review["human_answer_revision"] + 1, "x")[-1] * 64,
+            }
+            if server_candidate is not None:
+                server_candidate_state = "STALE"
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                "ok": True,
+                "review": server_review,
+                "candidate": (
+                    {"candidate": server_candidate, "state": server_candidate_state}
+                    if server_candidate is not None else None
+                ),
+            }))
+            return
+        if "/api/vision/v1/review-sessions/" in request.url and request.method == "GET":
+            if server_review is None:
+                route.fulfill(status=404, content_type="application/json", body='{"ok":false,"code":"REVIEW_NOT_FOUND"}')
+            else:
+                route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                    "ok": True,
+                    "review": server_review,
+                    "candidate": (
+                        {"candidate": server_candidate, "state": server_candidate_state}
+                        if server_candidate is not None else None
+                    ),
+                }))
+            return
+        if request.url.endswith("/api/vision/v1/candidates") and request.method == "POST":
+            payload = request.post_data_json
+            calls["candidate_create"].append(payload)
+            assert server_review is not None
+            active_bets = []
+            cancelled_audit = []
+            for bet in server_review["bets"]:
+                candidate_bet = {
+                    **bet,
+                    "executable": bet["active"] and bet["human_confirmed"],
+                    "value_authority": "human_answer",
+                }
+                candidate_bet.pop("human_confirmed", None)
+                (cancelled_audit if bet["cancelled"] else active_bets).append(candidate_bet)
+            server_candidate = {
+                "schema_version": "vision-candidate-authority-v1",
+                "candidate_id": "vc-" + "1" * 32,
+                "revision": 1,
+                "state_at_creation": "CURRENT",
+                "game": server_review["game"],
+                "source": {
+                    "review_session_id": server_review["review_session_id"],
+                    "human_answer_revision": server_review["human_answer_revision"],
+                    "human_answer_hash": server_review["human_answer_hash"],
+                    "source_image_id": server_review["source_image_id"],
+                    "source_image_hash": server_review["source_image_hash"],
+                },
+                "authority": {
+                    "value_authority": "human_answer",
+                    "all_active_confirmed": True,
+                    "blocking_unresolved_count": 0,
+                    "machine_evidence_refs": server_review["machine_evidence_refs"],
+                },
+                "active_bets": active_bets,
+                "cancelled_audit": cancelled_audit,
+                "canonical_content_hash": "c" * 64,
+                "safety": {
+                    "candidate_only": True,
+                    "approved_for_fill": False,
+                    "queue_written": False,
+                    "auto_confirm": False,
+                    "auto_submit": False,
+                    "webfill_called": False,
+                },
+            }
+            server_candidate_state = "CURRENT"
+            route.fulfill(status=201, content_type="application/json", body=json.dumps({
+                "ok": True, "candidate": server_candidate, "replayed": len(calls["candidate_create"]) > 1,
+            }))
             return
         if request.url.endswith("/api/vision/v1/images") and request.method == "POST":
             upload_count += 1
@@ -323,6 +459,33 @@ def _mount(
     )
     page.wait_for_selector("#vision-qwen-run-btn:visible")
     return calls
+
+
+def _wait_authority_ready(page) -> None:
+    page.wait_for_function(
+        "qwenGetReviewSession() && qwenGetReviewSession().server_state === 'ready'"
+    )
+
+
+def _confirm_structure(page, structure_id: str) -> None:
+    before = page.evaluate("qwenGetReviewSession().human_answer_revision")
+    page.click(
+        f'.qwen-review-card[data-structure-id="{structure_id}"] .qwen-confirm-structure'
+    )
+    page.wait_for_function(
+        "([structureId, revision]) => {"
+        "const session=qwenGetReviewSession();"
+        "return session && session.human_answer_revision > revision && "
+        "session.structures.some(card => card.structure_id === structureId && card.human_confirmed === true);"
+        "}",
+        arg=[structure_id, before],
+    )
+
+
+def _create_candidate(page) -> dict:
+    page.click("#qwen-complete-review")
+    page.wait_for_function("qwenGetReviewSummary() !== null")
+    return page.evaluate("qwenGetReviewSummary()")
 
 
 def _run_qwen(page) -> None:
@@ -464,11 +627,12 @@ def test_continuation_line_never_creates_an_independent_card(page) -> None:
 
 
 def test_pending_structure_changes_to_confirmed_only_in_session(page) -> None:
-    _mount(page)
+    calls = _mount(page)
     _run_qwen(page)
     assert page.get_attribute('.qwen-review-card[data-structure-id="S01"]', "data-review-state") == "pending"
-    page.click('.qwen-review-card[data-structure-id="S01"] .qwen-confirm-structure')
+    _confirm_structure(page, "S01")
     assert page.evaluate("qwenGetReviewSession().structures[0].review_state") == "confirmed"
+    assert calls["review_confirm"][-1]["human_bet_ids"] == ["H-001"]
     assert page.locator('.qwen-review-card[data-structure-id="S02"]').count() == 1
     assert "已確認 1 / 總共 2" in page.text_content("#qwen-review-progress")
 
@@ -515,57 +679,105 @@ def test_whole_review_cannot_finish_until_every_card_is_confirmed(page) -> None:
 
 
 def test_all_confirmed_cards_create_candidate_preview(page) -> None:
-    _mount(page)
+    calls = _mount(page)
     _run_qwen(page)
-    page.click('.qwen-review-card[data-structure-id="S01"] .qwen-confirm-structure')
-    page.click('.qwen-review-card[data-structure-id="S02"] .qwen-confirm-structure')
+    _confirm_structure(page, "S01")
+    _confirm_structure(page, "S02")
     assert page.is_enabled("#qwen-complete-review")
-    page.click("#qwen-complete-review")
-    summary = page.evaluate("qwenGetReviewSummary()")
-    assert summary["schema_version"] == "vision-review-candidate-preview-v1"
+    summary = _create_candidate(page)
+    assert summary["schema_version"] == "vision-candidate-authority-v1"
     assert summary["game"] == "539"
-    assert summary["source_image_id"] == "image-gate3a-1"
-    assert summary["image_sha256"] == "upload-sha-1"
-    assert len(summary["confirmed_structures"]) == 2
-    assert "Candidate 邊界已就緒（尚未建立）" in page.text_content("#qwen-review-complete-status")
+    assert summary["source"]["source_image_id"] == "image-gate3a-1"
+    assert summary["source"]["source_image_hash"] == "upload-sha-1"
+    assert len(summary["active_bets"]) == 2
+    assert set(calls["candidate_create"][0]) == {
+        "review_session_id",
+        "expected_human_answer_revision",
+        "expected_human_answer_hash",
+        "idempotency_key",
+    }
+    assert "Candidate" in page.text_content("#qwen-review-complete-status")
+    assert "vc-" + "1" * 32 in page.text_content("#qwen-created-candidate-metadata")
 
 
 def test_candidate_preview_never_writes_queue(page) -> None:
     calls = _mount(page)
     _run_qwen(page)
     for structure_id in ("S01", "S02"):
-        page.click(f'.qwen-review-card[data-structure-id="{structure_id}"] .qwen-confirm-structure')
+        _confirm_structure(page, structure_id)
     before = list(calls["urls"])
-    page.click("#qwen-complete-review")
-    assert calls["urls"] == before
-    assert not any("queue" in url for url in calls["urls"])
+    _create_candidate(page)
+    new_urls = calls["urls"][len(before):]
+    assert new_urls == ["http://gate3a.test/api/vision/v1/candidates"]
+    assert not any("queue" in url or "webfill" in url or "assist-fill" in url for url in calls["urls"])
 
 
 def test_candidate_preview_has_no_accepted_by_human_field(page) -> None:
     _mount(page)
     _run_qwen(page)
     for structure_id in ("S01", "S02"):
-        page.click(f'.qwen-review-card[data-structure-id="{structure_id}"] .qwen-confirm-structure')
-    page.click("#qwen-complete-review")
+        _confirm_structure(page, structure_id)
+    _create_candidate(page)
     assert "accepted_by_human" not in json.dumps(page.evaluate("qwenGetReviewSummary()"))
     assert "manual_candidate_id" not in json.dumps(page.evaluate("qwenGetReviewSummary()"))
 
 
-def test_adopted_manual_edit_is_retained_in_review_summary(page) -> None:
+def test_start_then_cancel_edit_preserves_server_confirmation(page) -> None:
+    calls = _mount(page)
+    _run_qwen(page)
+    _confirm_structure(page, "S01")
+    revision = page.evaluate("qwenGetReviewSession().human_answer_revision")
+    replace_count = len(calls["review_replace"])
+    unconfirm_count = len(calls["review_unconfirm"])
+
+    page.click('.qwen-review-compact-item[data-structure-id="S01"]')
+    page.click('.qwen-review-card[data-structure-id="S01"] .qwen-edit-structure')
+    assert page.evaluate("qwenGetReviewSession().structures[0].human_confirmed") is True
+    page.click('.qwen-review-card[data-structure-id="S01"] .qwen-card-cancel')
+
+    card = page.evaluate("qwenGetReviewSession().structures[0]")
+    assert card["human_confirmed"] is True
+    assert card["review_state"] == "confirmed"
+    assert page.evaluate("qwenGetReviewSession().human_answer_revision") == revision
+    assert len(calls["review_replace"]) == replace_count
+    assert len(calls["review_unconfirm"]) == unconfirm_count
+
+
+def test_reload_preserves_stale_candidate_wrapper_state(page) -> None:
     _mount(page)
+    _run_qwen(page)
+    _confirm_structure(page, "S01")
+    _confirm_structure(page, "S02")
+    candidate = _create_candidate(page)
+
+    page.click('.qwen-review-compact-item[data-structure-id="S01"]')
+    page.check('.qwen-review-card[data-structure-id="S01"] .qwen-card-cancelled')
+    _wait_authority_ready(page)
+    page.wait_for_selector('#qwen-existing-candidate-stale[data-candidate-state="STALE"]')
+    assert candidate["candidate_id"] in json.dumps(page.evaluate("qwenGetReviewSummary()"))
+
+    page.reload()
+    page.wait_for_selector('#qwen-existing-candidate-stale[data-candidate-state="STALE"]')
+    assert page.locator("#qwen-review-complete-status").count() == 0
+    assert page.get_attribute("#qwen-existing-candidate-stale", "data-candidate-state") == "STALE"
+
+
+def test_adopted_manual_edit_is_retained_in_review_summary(page) -> None:
+    calls = _mount(page)
     _run_qwen(page)
     page.click('.qwen-review-card[data-structure-id="S01"] .qwen-edit-structure')
     page.fill('.qwen-card-editable[data-card-index="0"]', "05 09 17 28 2/3X1")
     page.click('.qwen-card-editable[data-card-index="0"] + div .qwen-card-reparse')
     page.wait_for_selector(".qwen-adopt-edit")
     page.click(".qwen-adopt-edit")
-    page.click('.qwen-review-card[data-structure-id="S01"] .qwen-confirm-structure')
-    page.click('.qwen-review-card[data-structure-id="S02"] .qwen-confirm-structure')
-    page.click("#qwen-complete-review")
-    first = page.evaluate("qwenGetReviewSummary().confirmed_structures[0]")
+    _wait_authority_ready(page)
+    _confirm_structure(page, "S01")
+    _confirm_structure(page, "S02")
+    summary = _create_candidate(page)
+    first = summary["active_bets"][0]
     assert first["number_groups"] == [["05", "09", "17", "28"]]
-    assert first["multiplier_rules"] == ["2/3X1"]
-    assert first["manual_edits"][0]["canonical_text"] == "05 09 17 28 2/3X1"
+    assert first["multiplier"]["ordered_rules"] == ["2/3X1"]
+    assert calls["review_replace"][-1]["bets"][0]["number_groups"] == [["05", "09", "17", "28"]]
 
 
 def test_uploading_new_image_clears_old_session_state_and_preview(page) -> None:
@@ -636,21 +848,24 @@ def test_review_session_and_summary_keep_all_safety_flags(page) -> None:
         "auto_submit": False,
     }
     for structure_id in ("S01", "S02"):
-        page.click(f'.qwen-review-card[data-structure-id="{structure_id}"] .qwen-confirm-structure')
-    page.click("#qwen-complete-review")
-    summary = page.evaluate("qwenGetReviewSummary()")
-    assert summary["human_confirmation_required"] is True
-    assert summary["auto_apply"] is False
-    assert summary["auto_confirm"] is False
-    assert summary["auto_submit"] is False
+        _confirm_structure(page, structure_id)
+    summary = _create_candidate(page)
+    assert summary["safety"] == {
+        "candidate_only": True,
+        "approved_for_fill": False,
+        "queue_written": False,
+        "auto_confirm": False,
+        "auto_submit": False,
+        "webfill_called": False,
+    }
 
 
 def test_review_workflow_never_calls_webfill_or_paid_provider(page) -> None:
     calls = _mount(page)
     _run_qwen(page)
-    page.click('.qwen-review-card[data-structure-id="S01"] .qwen-confirm-structure')
-    page.click('.qwen-review-card[data-structure-id="S02"] .qwen-confirm-structure')
-    page.click("#qwen-complete-review")
+    _confirm_structure(page, "S01")
+    _confirm_structure(page, "S02")
+    _create_candidate(page)
     assert calls["jobs"] == [{
         "image_id": "image-gate3a-1",
         "provider_id": "qwen-dashscope",

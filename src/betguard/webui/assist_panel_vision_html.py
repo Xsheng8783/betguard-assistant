@@ -91,6 +91,8 @@ def render_vision_ui_section() -> str:
   var qwenRequestedGame = "";
   var uploadedImageMetadata = null;
   var visionUploadGeneration = 0;
+  var qwenAuthorityMutationChain = Promise.resolve();
+  var QWEN_REVIEW_STORAGE_KEY = "betguard.vision.review_session_id.v1";
 
   fetch("/api/vision/v1/providers").then(function(r) { return r.json(); }).then(function(data) {
     var providers = (data && data.providers) || [];
@@ -607,6 +609,387 @@ def render_vision_ui_section() -> str:
     return structure.cancelled === true || structure.cancelled === "yes";
   }
 
+  function _qwenHumanBetId(index) {
+    return "H-" + String(index + 1).padStart(3, "0");
+  }
+
+  function _qwenSpecialPlay(structure, resolved) {
+    structure = structure || {};
+    var values = {
+      tail: structure.tail == null ? null : structure.tail,
+      car: structure.car == null ? null : structure.car,
+      half_car: structure.half_car == null ? null : structure.half_car,
+      each: structure.each == null ? null : structure.each,
+      special_text: structure.special_text == null ? null : structure.special_text
+    };
+    var hasValue = Object.keys(values).some(function(key) {
+      return values[key] !== null && values[key] !== "" && values[key] !== false;
+    });
+    return {
+      kind: hasValue ? "structured_human_play" : "none",
+      raw_text: hasValue ? JSON.stringify(values) : null,
+      scope: structure.scope == null || structure.scope === "" ? null : String(structure.scope),
+      resolved: resolved === true
+    };
+  }
+
+  function _qwenAuthorityBet(card, index) {
+    var structure = (card || {}).staged_structure || {};
+    var cancelled = _qwenIsCancelledStructure(structure);
+    var resolved = card.blocking_resolved_by_human === true || card.source_status === "consistent";
+    return {
+      human_bet_id: String(card.human_bet_id || _qwenHumanBetId(index)),
+      bet_type: _qwenCanonicalLayout(structure.layout) === "column_bet" ? "column" : "normal",
+      number_groups: _qwenNormalizeGroups(structure.number_groups || []),
+      multiplier: {
+        ordered_rules: Array.isArray(structure.multiplier_rules) ? structure.multiplier_rules.map(String) : [],
+        scope: structure.multiplier_scope == null ? null : String(structure.multiplier_scope),
+        resolved: resolved && Array.isArray(structure.multiplier_rules) && structure.multiplier_rules.length > 0
+      },
+      special_play: _qwenSpecialPlay(structure, resolved),
+      continuation: {
+        present: !!structure.continuation,
+        resolved: resolved
+      },
+      cancelled: cancelled,
+      active: !cancelled,
+      human_confirmed: card.human_confirmed === true
+    };
+  }
+
+  function _qwenAuthorityBets() {
+    if (!qwenReviewSession) return [];
+    return qwenReviewSession.structures.map(_qwenAuthorityBet);
+  }
+
+  function _qwenAuthorityErrorCode(data) {
+    if (!data) return "CANDIDATE_AUTHORITY_ERROR";
+    if (data.code) return String(data.code);
+    if (data.error && data.error.code) return String(data.error.code);
+    return "CANDIDATE_AUTHORITY_ERROR";
+  }
+
+  function _qwenAuthorityErrorMessage(data) {
+    if (!data) return "server authority unavailable";
+    if (data.error && data.error.message) return String(data.error.message);
+    if (typeof data.error === "string") return data.error;
+    return String(data.message || _qwenAuthorityErrorCode(data));
+  }
+
+  function _qwenMachineEvidenceRefs() {
+    var refs = [];
+    var preprocessing = qwenEvidenceResult && qwenEvidenceResult.preprocessing || {};
+    var request = preprocessing.qwen_request || {};
+    var evidenceHash = String(preprocessing.qwen_response_sha256 || request.response_sha256 || "");
+    if (/^[a-f0-9]{64}$/.test(evidenceHash)) {
+      refs.push({
+        provider_id: "qwen-dashscope",
+        model: String((qwenEvidenceResult.provider || {}).model_name || request.model || "") || null,
+        request_id: String(request.request_id || qwenEvidenceResult.request_id || "") || null,
+        cache_hit: typeof request.cache_hit === "boolean" ? request.cache_hit : null,
+        evidence_hash: evidenceHash,
+        artifact_ref: null,
+        value_authority: false
+      });
+    }
+    [gemmaShadowEvidence, ppocrShadowEvidence].forEach(function(evidence) {
+      if (!evidence || typeof evidence !== "object") return;
+      var hash = String(evidence.evidence_hash || evidence.artifact_sha256 || "");
+      if (!/^[a-f0-9]{64}$/.test(hash)) return;
+      var provider = evidence.provider || {};
+      refs.push({
+        provider_id: String(provider.id || evidence.provider_id || "shadow-evidence"),
+        model: String(provider.model_name || evidence.model || "") || null,
+        request_id: String(evidence.request_id || "") || null,
+        cache_hit: typeof evidence.cache_hit === "boolean" ? evidence.cache_hit : null,
+        evidence_hash: hash,
+        artifact_ref: evidence.artifact_ref == null ? null : String(evidence.artifact_ref),
+        value_authority: false
+      });
+    });
+    return refs;
+  }
+
+  function _qwenRememberReviewSession(reviewSessionId) {
+    try {
+      if (reviewSessionId) localStorage.setItem(QWEN_REVIEW_STORAGE_KEY, reviewSessionId);
+      else localStorage.removeItem(QWEN_REVIEW_STORAGE_KEY);
+    } catch (_) {}
+  }
+
+  function _qwenApplyAuthorityReview(review) {
+    if (!qwenReviewSession || !review || typeof review !== "object") return;
+    qwenReviewSession.human_answer_revision = Number(review.human_answer_revision);
+    qwenReviewSession.human_answer_hash = String(review.human_answer_hash || "");
+    qwenReviewSession.server_state = "ready";
+    qwenReviewSession.server_error = null;
+    var byId = Object.create(null);
+    (Array.isArray(review.bets) ? review.bets : []).forEach(function(bet) {
+      byId[String((bet || {}).human_bet_id || "")] = bet;
+    });
+    qwenReviewSession.structures.forEach(function(card, index) {
+      card.human_bet_id = String(card.human_bet_id || _qwenHumanBetId(index));
+      var bet = byId[card.human_bet_id];
+      if (!bet) return;
+      var structure = _cloneJson(card.staged_structure || {});
+      structure.number_groups = _cloneJson(bet.number_groups || []);
+      structure.multiplier_rules = _cloneJson((bet.multiplier || {}).ordered_rules || []);
+      if ((bet.multiplier || {}).scope != null || Object.prototype.hasOwnProperty.call(structure, "multiplier_scope")) {
+        structure.multiplier_scope = (bet.multiplier || {}).scope == null ? null : (bet.multiplier || {}).scope;
+      }
+      structure.layout = bet.bet_type === "column" ? "column_bet" : "normal_row";
+      if ((bet.continuation || {}).present) {
+        if (!structure.continuation) structure.continuation = true;
+      } else if (Object.prototype.hasOwnProperty.call(structure, "continuation")) {
+        structure.continuation = false;
+      }
+      if (bet.cancelled === true || Object.prototype.hasOwnProperty.call(structure, "cancelled")) {
+        structure.cancelled = bet.cancelled === true;
+      }
+      var special = bet.special_play || {};
+      if (special.raw_text) {
+        try {
+          var decoded = JSON.parse(special.raw_text);
+          Object.keys(decoded).forEach(function(key) { structure[key] = decoded[key]; });
+        } catch (_) {
+          structure.special_text = String(special.raw_text);
+        }
+      }
+      if (special.scope != null || Object.prototype.hasOwnProperty.call(structure, "scope")) {
+        structure.scope = special.scope == null ? null : special.scope;
+      }
+      card.staged_structure = structure;
+      card.human_confirmed = bet.human_confirmed === true;
+      card.review_state = card.human_confirmed
+        ? "confirmed"
+        : (card.review_state === "editing" ? "editing" : "pending");
+      card.blocking_resolved_by_human = card.human_confirmed || card.source_status === "consistent";
+    });
+    _qwenRememberReviewSession(qwenReviewSession.review_session_id);
+  }
+
+  function _qwenSetAuthorityFailure(data) {
+    if (!qwenReviewSession) return;
+    qwenReviewSession.server_state = _qwenAuthorityErrorCode(data) === "REVIEW_STALE" ? "stale" : "error";
+    qwenReviewSession.server_error = {
+      code: _qwenAuthorityErrorCode(data),
+      message: _qwenAuthorityErrorMessage(data)
+    };
+  }
+
+  function _qwenCreateAuthorityReview() {
+    if (!qwenReviewSession) return Promise.resolve(null);
+    qwenReviewSession.server_state = "saving";
+    return fetch("/api/vision/v1/review-sessions", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        review_session_id: qwenReviewSession.review_session_id,
+        source_image_id: qwenReviewSession.source_image_id,
+        source_image_hash: qwenReviewSession.image_sha256,
+        game: qwenReviewSession.game,
+        bets: _qwenAuthorityBets(),
+        machine_evidence_refs: _qwenMachineEvidenceRefs(),
+        blocking_unresolved_count: _qwenReviewReadiness().blocking_unresolved
+      })
+    }).then(function(response) { return response.json(); }).then(function(data) {
+      if (!data.ok) throw data;
+      _qwenApplyAuthorityReview(data.review);
+      _renderQwenReviewSession();
+      return data.review;
+    }).catch(function(data) {
+      _qwenSetAuthorityFailure(data);
+      _renderQwenReviewSession();
+      return null;
+    });
+  }
+
+  function _qwenPersistAuthorityReview() {
+    if (!qwenReviewSession || !Number.isInteger(qwenReviewSession.human_answer_revision) ||
+        !/^[a-f0-9]{64}$/.test(String(qwenReviewSession.human_answer_hash || ""))) {
+      _qwenSetAuthorityFailure({code: "REVIEW_NOT_PERSISTED", error: {message: "Human Review 尚未由 server 建立"}});
+      _renderQwenReviewSession();
+      return Promise.resolve(null);
+    }
+    var reviewSessionId = qwenReviewSession.review_session_id;
+    var payload = {
+      expected_human_answer_revision: qwenReviewSession.human_answer_revision,
+      expected_human_answer_hash: qwenReviewSession.human_answer_hash,
+      bets: _qwenAuthorityBets(),
+      machine_evidence_refs: _qwenMachineEvidenceRefs(),
+      blocking_unresolved_count: _qwenReviewReadiness().blocking_unresolved
+    };
+    qwenReviewSession.server_state = "saving";
+    _renderQwenReviewSession();
+    return fetch("/api/vision/v1/review-sessions/" + encodeURIComponent(reviewSessionId), {
+      method: "PATCH",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload)
+    }).then(function(response) { return response.json(); }).then(function(data) {
+      if (!data.ok) throw data;
+      _qwenApplyAuthorityReview(data.review);
+      qwenReviewSession.server_candidate = data.candidate || qwenReviewSession.server_candidate || null;
+      _renderQwenReviewSession();
+      return data.review;
+    }).catch(function(data) {
+      _qwenSetAuthorityFailure(data);
+      _renderQwenReviewSession();
+      return null;
+    });
+  }
+
+  function _qwenQueueAuthorityMutation() {
+    qwenAuthorityMutationChain = qwenAuthorityMutationChain.then(_qwenPersistAuthorityReview);
+    return qwenAuthorityMutationChain;
+  }
+
+  function _qwenPersistAuthorityConfirmation(card, confirmed) {
+    if (!qwenReviewSession || !card || qwenReviewSession.server_state !== "ready") return Promise.resolve(null);
+    var endpoint = confirmed ? "confirmations" : "unconfirmations";
+    var payload = {
+      expected_human_answer_revision: qwenReviewSession.human_answer_revision,
+      expected_human_answer_hash: qwenReviewSession.human_answer_hash,
+      human_bet_ids: [String(card.human_bet_id || "")]
+    };
+    qwenReviewSession.server_state = "saving";
+    _renderQwenReviewSession();
+    return fetch("/api/vision/v1/review-sessions/" + encodeURIComponent(qwenReviewSession.review_session_id) + "/" + endpoint, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload)
+    }).then(function(response) { return response.json(); }).then(function(data) {
+      if (!data.ok) throw data;
+      _qwenApplyAuthorityReview(data.review);
+      qwenReviewSession.server_candidate = data.candidate || qwenReviewSession.server_candidate || null;
+      if (confirmed) _qwenSelectNextUnconfirmed(qwenReviewSession.structures.indexOf(card));
+      _renderQwenReviewSession();
+      return data.review;
+    }).catch(function(data) {
+      _qwenSetAuthorityFailure(data);
+      _renderQwenReviewSession();
+      return null;
+    });
+  }
+
+  function _qwenCardFromAuthorityBet(bet, index) {
+    bet = bet || {};
+    var special = bet.special_play || {};
+    var structure = {
+      number_groups: _cloneJson(bet.number_groups || []),
+      multiplier_rules: _cloneJson((bet.multiplier || {}).ordered_rules || []),
+      multiplier_scope: (bet.multiplier || {}).scope == null ? null : (bet.multiplier || {}).scope,
+      layout: bet.bet_type === "column" ? "column_bet" : "normal_row",
+      continuation: !!((bet.continuation || {}).present),
+      scope: special.scope == null ? null : special.scope,
+      special_text: "",
+      cancelled: bet.cancelled === true
+    };
+    if (special.raw_text) {
+      try {
+        var fields = JSON.parse(special.raw_text);
+        Object.keys(fields).forEach(function(key) { structure[key] = fields[key]; });
+      } catch (_) {
+        structure.special_text = String(special.raw_text);
+      }
+    }
+    var confirmed = bet.human_confirmed === true;
+    return {
+      human_bet_id: String(bet.human_bet_id || _qwenHumanBetId(index)),
+      structure_id: "SERVER-" + String(bet.human_bet_id || _qwenHumanBetId(index)),
+      primary_line_id: "",
+      source_line_ids: [],
+      source_status: "incomplete",
+      review_state: confirmed ? "confirmed" : "pending",
+      model_candidate: {},
+      original_structure: _cloneJson(structure),
+      staged_structure: structure,
+      warnings: ["reloaded_from_server_human_review"],
+      evidence: {},
+      edit_text: "",
+      reparse_preview: null,
+      preview_error: "",
+      manual_edits: [],
+      field_corrections: [],
+      evidence_sources: {
+        qwen: null,
+        gemma: null,
+        ppocr: null,
+        codex: null,
+        human_answer: {source: "Persisted Human Answer", human_confirmed: confirmed}
+      },
+      field_sources: {
+        numbers: {source: "Persisted Human Answer", human_confirmed: confirmed},
+        multiplier: {source: "Persisted Human Answer", human_confirmed: confirmed},
+        layout: {source: "Persisted Human Answer", human_confirmed: confirmed}
+      },
+      suggestion_adoptions: [],
+      blocking_resolved_by_human: confirmed,
+      human_confirmed: confirmed
+    };
+  }
+
+  function _qwenLoadAuthorityReview(review, candidate) {
+    var bets = Array.isArray(review && review.bets) ? review.bets : [];
+    qwenReviewSession = {
+      schema_version: "vision-review-session-v1",
+      review_session_id: String(review.review_session_id || ""),
+      game: String(review.game || "539"),
+      source_image_id: String(review.source_image_id || ""),
+      image_sha256: String(review.source_image_hash || ""),
+      structures: bets.map(_qwenCardFromAuthorityBet),
+      unlinked_gemma_items: [],
+      active_structure_id: bets.length ? "SERVER-" + String(bets[0].human_bet_id || _qwenHumanBetId(0)) : null,
+      show_pending_only: false,
+      candidate_preview: null,
+      boundary_signal: null,
+      human_answer_revision: Number(review.human_answer_revision),
+      human_answer_hash: String(review.human_answer_hash || ""),
+      server_state: "ready",
+      server_error: null,
+      server_candidate: candidate || null,
+      reloaded_from_server: true,
+      created_at: String(review.created_at || new Date().toISOString()),
+      safety: {
+        human_confirmation_required: true,
+        auto_apply: false,
+        auto_confirm: false,
+        auto_submit: false
+      }
+    };
+    uploadedImageId = qwenReviewSession.source_image_id || null;
+    uploadedImageMetadata = {
+      image_id: qwenReviewSession.source_image_id,
+      sha256: qwenReviewSession.image_sha256
+    };
+    qwenRequestedGame = qwenReviewSession.game;
+    var section = document.getElementById("vision-section");
+    if (section) section.style.display = "block";
+    var image = document.getElementById("vision-preview-img");
+    if (image && uploadedImageId) image.src = "/api/vision/v1/images/" + encodeURIComponent(uploadedImageId);
+    var preview = document.getElementById("vision-preview");
+    if (preview && uploadedImageId) preview.style.display = "block";
+    var body = document.getElementById("vision-results-body");
+    if (body) body.innerHTML = '<div id="qwen-evidence-status" style="padding:7px 9px;background:#fff7ed;color:#9a3412;font-weight:700">已重新載入 Server Human Review；server authority 優先</div><div id="qwen-review-session"></div>';
+    var results = document.getElementById("vision-results");
+    if (results) results.style.display = "block";
+    _qwenRememberReviewSession(qwenReviewSession.review_session_id);
+    _renderQwenReviewSession();
+  }
+
+  function _qwenReloadPersistedReview() {
+    var reviewSessionId = "";
+    try { reviewSessionId = localStorage.getItem(QWEN_REVIEW_STORAGE_KEY) || ""; } catch (_) {}
+    if (!reviewSessionId) return;
+    fetch("/api/vision/v1/review-sessions/" + encodeURIComponent(reviewSessionId))
+      .then(function(response) { return response.json(); })
+      .then(function(data) {
+        if (!data.ok || !data.review) throw data;
+        _qwenLoadAuthorityReview(data.review, data.candidate || null);
+      }).catch(function(data) {
+        if (_qwenAuthorityErrorCode(data) === "REVIEW_NOT_FOUND") _qwenRememberReviewSession("");
+      });
+  }
+
   function _qwenNewManualCard(index) {
     var structureId = "MANUAL-" + String(index + 1).padStart(2, "0");
     var staged = {
@@ -623,6 +1006,7 @@ def render_vision_ui_section() -> str:
       cancelled: false
     };
     return {
+      human_bet_id: _qwenHumanBetId(index),
       structure_id: structureId,
       primary_line_id: "",
       source_line_ids: [],
@@ -679,6 +1063,11 @@ def render_vision_ui_section() -> str:
       show_pending_only: false,
       candidate_preview: null,
       boundary_signal: null,
+      human_answer_revision: null,
+      human_answer_hash: "",
+      server_state: "saving",
+      server_error: null,
+      server_candidate: null,
       provider_failure: _cloneJson(failure || {}),
       created_at: new Date().toISOString(),
       safety: {
@@ -690,6 +1079,7 @@ def render_vision_ui_section() -> str:
     };
     var gameSelect = document.getElementById("vision-qwen-game");
     if (gameSelect) gameSelect.disabled = true;
+    _qwenCreateAuthorityReview();
   }
 
   function _createQwenReviewSession(result, structureEvidence, game) {
@@ -712,6 +1102,7 @@ def render_vision_ui_section() -> str:
         layout: {source: "Qwen reconstruction"}
       };
       cards.push({
+        human_bet_id: _qwenHumanBetId(i),
         structure_id: structureId,
         primary_line_id: primaryLineId,
         source_line_ids: sourceLineIds,
@@ -754,6 +1145,11 @@ def render_vision_ui_section() -> str:
       show_pending_only: false,
       candidate_preview: null,
       boundary_signal: null,
+      human_answer_revision: null,
+      human_answer_hash: "",
+      server_state: "saving",
+      server_error: null,
+      server_candidate: null,
       created_at: new Date().toISOString(),
       safety: {
         human_confirmation_required: true,
@@ -764,6 +1160,7 @@ def render_vision_ui_section() -> str:
     };
     var gameSelect = document.getElementById("vision-qwen-game");
     if (gameSelect) gameSelect.disabled = true;
+    _qwenCreateAuthorityReview();
   }
 
   function _qwenNumber(value) {
@@ -1207,6 +1604,14 @@ def render_vision_ui_section() -> str:
       '<button type="button" id="qwen-review-next" onclick="qwenReviewNext()" ' + (visiblePosition < 0 || visiblePosition >= visibleIndices.length - 1 ? 'disabled ' : '') + '>下一筆</button></div>' +
       '<label style="font-size:12px"><input id="qwen-pending-only" type="checkbox" ' +
       (qwenReviewSession.show_pending_only ? 'checked ' : '') + 'onchange="qwenReviewTogglePending(this.checked)"> 只看待確認</label></div>';
+    var authorityState = String(qwenReviewSession.server_state || "unpersisted");
+    var authorityColor = authorityState === "ready" ? "#166534" : (authorityState === "saving" ? "#475569" : "#b91c1c");
+    var authorityText = authorityState === "ready"
+      ? "Server Human Review 已保存｜revision=" + qwenReviewSession.human_answer_revision + "｜hash=" + String(qwenReviewSession.human_answer_hash || "").slice(0, 12)
+      : (authorityState === "saving" ? "正在保存 Server Human Review…" :
+        (authorityState === "stale" ? "Human Answer 已變更，請重新載入並確認。" : "Server Human Review 尚未可用。"));
+    html += '<div id="qwen-authority-status" data-authority-state="' + esc(authorityState) + '" style="padding:6px 8px;margin-bottom:7px;background:#f8fafc;color:' + authorityColor + '">' + esc(authorityText) +
+      (authorityState === "stale" || authorityState === "error" ? ' <button type="button" id="qwen-reload-authority" onclick="qwenReloadReviewAuthority()">重新載入</button>' : '') + '</div>';
     if (qwenReviewSession.provider_failure) {
       html += '<div class="qwen-provider-failure-review-note" style="padding:7px;background:#fff7ed;color:#9a3412">Qwen 未完成；可使用既有 Gemma／PP 證據或人工新增，不會自動建立候選。</div>';
     }
@@ -1220,15 +1625,20 @@ def render_vision_ui_section() -> str:
     html += '</div><div id="qwen-review-cards" style="display:grid;gap:9px;margin-top:8px">';
     if (activeIndex >= 0 && visibleIndices.indexOf(activeIndex) >= 0) html += _qwenReviewCardHtml(cards[activeIndex], activeIndex);
     html += '</div>';
-    if (readiness.ready) {
+    if (readiness.ready && authorityState === "ready") {
       html += '<button type="button" id="qwen-complete-review" class="btn-primary" style="margin-top:10px" onclick="qwenCompleteReview()">建立 Candidate</button>' +
-        '<div id="qwen-candidate-boundary-status" style="font-size:11px;color:#64748b">僅建立 browser-local ready signal；本 Gate 不建立 candidate、不寫 queue、不執行外部填入。</div>';
+        '<div id="qwen-candidate-boundary-status" style="font-size:11px;color:#64748b">由 server 重新載入 Human Review 建立 immutable Candidate；不寫 queue、不執行外部填入。</div>';
     } else {
-      html += '<div id="qwen-candidate-boundary-status" style="margin-top:10px;color:#9a3412">完成所有 active 確認並處理 unresolved 後，才會顯示「建立 Candidate」。</div>';
+      var missing = [];
+      if (readiness.active_confirmed !== readiness.active_total) missing.push("尚有未確認 active 投注");
+      if (readiness.cancelled_handled !== readiness.cancelled_total) missing.push("尚有未確認取消項目");
+      if (readiness.blocking_unresolved) missing.push("blocking unresolved=" + readiness.blocking_unresolved);
+      if (authorityState !== "ready") missing.push("Server Human Review 尚未同步");
+      html += '<div id="qwen-candidate-boundary-status" style="margin-top:10px;color:#9a3412">' + esc(missing.join("；") || "尚未符合 Candidate 建立條件") + '</div>';
     }
     html += '<div id="qwen-review-completion" style="margin-top:8px"></div></section>';
     target.innerHTML = html;
-    if (qwenReviewSession.candidate_preview) _renderQwenCompletion(qwenReviewSession.candidate_preview);
+    if (qwenReviewSession.server_candidate) _renderQwenCompletion(qwenReviewSession.server_candidate);
     _updateQwenStructureHighlight();
   }
 
@@ -1372,28 +1782,18 @@ def render_vision_ui_section() -> str:
   window.qwenReviewConfirm = function(index) {
     if (!qwenReviewSession || !qwenReviewSession.structures[index]) return;
     var card = qwenReviewSession.structures[index];
-    var cancellingConfirmation = card.review_state === "confirmed";
-    card.review_state = cancellingConfirmation ? "pending" : "confirmed";
-    card.human_confirmed = card.review_state === "confirmed";
-    card.blocking_resolved_by_human = card.review_state === "confirmed" || card.source_status === "consistent";
-    if (card.evidence_sources && card.evidence_sources.human_answer) {
-      card.evidence_sources.human_answer.human_confirmed = card.human_confirmed;
-    }
     qwenReviewSession.candidate_preview = null;
     qwenReviewSession.boundary_signal = null;
-    if (!cancellingConfirmation) _qwenSelectNextUnconfirmed(index);
-    _renderQwenReviewSession();
+    var confirmed = card.human_confirmed !== true;
+    qwenAuthorityMutationChain = qwenAuthorityMutationChain.then(function() {
+      return _qwenPersistAuthorityConfirmation(card, confirmed);
+    });
   };
 
   window.qwenReviewStartEdit = function(index) {
     if (!qwenReviewSession || !qwenReviewSession.structures[index]) return;
     var card = qwenReviewSession.structures[index];
     card.review_state = "editing";
-    card.human_confirmed = false;
-    card.blocking_resolved_by_human = card.source_status === "consistent";
-    if (card.evidence_sources && card.evidence_sources.human_answer) {
-      card.evidence_sources.human_answer.human_confirmed = false;
-    }
     card.edit_text = _qwenCanonicalEditText(card.staged_structure);
     card.reparse_preview = null;
     card.preview_error = "";
@@ -1404,7 +1804,7 @@ def render_vision_ui_section() -> str:
   window.qwenReviewCancelEdit = function(index) {
     if (!qwenReviewSession || !qwenReviewSession.structures[index]) return;
     var card = qwenReviewSession.structures[index];
-    card.review_state = "pending";
+    card.review_state = card.human_confirmed === true ? "confirmed" : "pending";
     card.reparse_preview = null;
     card.preview_error = "";
     _renderQwenReviewSession();
@@ -1490,6 +1890,7 @@ def render_vision_ui_section() -> str:
     }
     _invalidateReviewConfirmation(card);
     _renderQwenReviewSession();
+    _qwenQueueAuthorityMutation();
   };
 
   window.qwenReviewAdoptSpecialFields = function(index) {
@@ -1546,6 +1947,7 @@ def render_vision_ui_section() -> str:
     }
     _invalidateReviewConfirmation(card);
     _renderQwenReviewSession();
+    _qwenQueueAuthorityMutation();
   };
 
   function _recordGemmaAdoption(card, component, gemma) {
@@ -1623,6 +2025,7 @@ def render_vision_ui_section() -> str:
     _recordReviewFieldCorrection(card, "numbers", "Gemma suggestion", before, groups);
     _recordGemmaAdoption(card, "numbers", gemma);
     _renderQwenReviewSession();
+    _qwenQueueAuthorityMutation();
   };
 
   window.qwenReviewAdoptGemmaMultiplier = function(index) {
@@ -1646,6 +2049,7 @@ def render_vision_ui_section() -> str:
     _recordReviewFieldCorrection(card, "multiplier", "Gemma suggestion", before, rules);
     _recordGemmaAdoption(card, "multiplier", gemma);
     _renderQwenReviewSession();
+    _qwenQueueAuthorityMutation();
   };
 
   window.qwenReviewAdoptGemmaLayout = function(index) {
@@ -1668,6 +2072,7 @@ def render_vision_ui_section() -> str:
     _recordReviewFieldCorrection(card, "layout", "Gemma suggestion", before, layout);
     _recordGemmaAdoption(card, "layout", gemma);
     _renderQwenReviewSession();
+    _qwenQueueAuthorityMutation();
   };
 
   window.qwenReviewSetCancelled = function(index, enabled) {
@@ -1681,6 +2086,7 @@ def render_vision_ui_section() -> str:
     _recordReviewFieldCorrection(card, "cancelled", "Human Answer", _qwenIsCancelledStructure(previous), enabled === true);
     _invalidateReviewConfirmation(card);
     _renderQwenReviewSession();
+    _qwenQueueAuthorityMutation();
   };
 
   window.qwenReviewAddManualStructure = function() {
@@ -1691,6 +2097,7 @@ def render_vision_ui_section() -> str:
     qwenReviewSession.candidate_preview = null;
     qwenReviewSession.boundary_signal = null;
     _renderQwenReviewSession();
+    _qwenQueueAuthorityMutation();
   };
 
   window.qwenReviewPrevious = function() {
@@ -1764,32 +2171,89 @@ def render_vision_ui_section() -> str:
     };
   }
 
-  function _renderQwenCompletion(summary) {
+  function _renderQwenCompletion(candidateValue) {
     var output = document.getElementById("qwen-review-completion");
     if (!output) return;
-    output.innerHTML = '<div id="qwen-review-complete-status" style="padding:8px;background:#ecfdf5;border-left:4px solid #10b981;color:#065f46;font-weight:700">Candidate 邊界已就緒（尚未建立）</div>' +
-      '<div class="candidate-boundary-safety" style="font-size:11px;color:#475569">candidate=0；queue=0；外部填入=0；auto_confirm=false；auto_submit=false</div>' +
-      '<details id="qwen-review-summary" style="font-size:11px;color:#475569;margin-top:6px"><summary>Human Answer 結構化摘要</summary><pre style="white-space:pre-wrap">' +
-      esc(JSON.stringify(summary, null, 2)) + '</pre></details>';
+    var derivedState = candidateValue && candidateValue.state ? String(candidateValue.state) : "CURRENT";
+    var candidate = candidateValue && candidateValue.candidate ? candidateValue.candidate : candidateValue;
+    candidate = candidate || {};
+    if (derivedState !== "CURRENT") {
+      output.innerHTML = '<div id="qwen-existing-candidate-stale" data-candidate-state="' + esc(derivedState) + '" style="padding:8px;background:#fff7ed;color:#9a3412">舊 Candidate 狀態：' + esc(derivedState) + '；不會改寫舊 snapshot。重新確認 Human Answer 後才能建立新版 Candidate。</div>';
+      return;
+    }
+    output.innerHTML = '<div id="qwen-review-complete-status" style="padding:8px;background:#ecfdf5;border-left:4px solid #10b981;color:#065f46;font-weight:700">Candidate 已建立</div>' +
+      '<div id="qwen-created-candidate-metadata" style="font-size:12px;color:#065f46;margin-top:5px">Candidate ID=' + esc(candidate.candidate_id || "-") +
+      '｜revision=' + esc(candidate.revision || "-") +
+      '｜content hash=' + esc(String(candidate.canonical_content_hash || "").slice(0, 12)) +
+      '｜CURRENT</div>' +
+      '<div class="candidate-boundary-safety" style="font-size:11px;color:#475569">candidate_only=true；approved_for_fill=false；queue=0；external fill=0；auto_confirm=false；auto_submit=false</div>';
   }
 
   window.qwenCompleteReview = function() {
-    var summary = _buildQwenReviewSummary();
-    if (!summary) return;
-    qwenReviewSession.candidate_preview = summary;
-    qwenReviewSession.boundary_signal = {
-      status: "ready_not_created",
-      signaled_at: new Date().toISOString(),
-      candidate_created: false,
-      queue_written: false,
-      external_fill_called: false
-    };
-    _renderQwenCompletion(summary);
+    if (!qwenReviewSession || qwenReviewSession.server_state !== "ready") return;
+    var readiness = _qwenReviewReadiness();
+    if (!readiness.ready) return;
+    var button = document.getElementById("qwen-complete-review");
+    if (button) button.disabled = true;
+    qwenReviewSession.server_state = "creating_candidate";
+    var idempotencyKey = qwenReviewSession.review_session_id + ":" +
+      qwenReviewSession.human_answer_revision + ":" + qwenReviewSession.human_answer_hash;
+    fetch("/api/vision/v1/candidates", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        review_session_id: qwenReviewSession.review_session_id,
+        expected_human_answer_revision: qwenReviewSession.human_answer_revision,
+        expected_human_answer_hash: qwenReviewSession.human_answer_hash,
+        idempotency_key: idempotencyKey
+      })
+    }).then(function(response) { return response.json(); }).then(function(data) {
+      if (!data.ok) throw data;
+      qwenReviewSession.server_state = "ready";
+      qwenReviewSession.server_candidate = {
+        candidate: data.candidate,
+        state: "CURRENT"
+      };
+      qwenReviewSession.candidate_preview = null;
+      qwenReviewSession.boundary_signal = {
+        status: "candidate_created",
+        candidate_id: data.candidate && data.candidate.candidate_id,
+        candidate_revision: data.candidate && data.candidate.revision,
+        replayed: data.replayed === true,
+        queue_written: false,
+        external_fill_called: false
+      };
+      _renderQwenReviewSession();
+    }).catch(function(data) {
+      _qwenSetAuthorityFailure(data);
+      _renderQwenReviewSession();
+      var output = document.getElementById("qwen-review-completion");
+      if (!output) return;
+      var code = _qwenAuthorityErrorCode(data);
+      var message = code === "REVIEW_STALE"
+        ? "Human Answer 已變更，請重新確認後再建立 Candidate。"
+        : (code === "CANDIDATE_NOT_READY" ? "尚未符合 Candidate 建立條件：" + _qwenAuthorityErrorMessage(data) : "Candidate 建立失敗：" + _qwenAuthorityErrorMessage(data));
+      output.innerHTML = '<div id="qwen-candidate-create-error" data-error-code="' + esc(code) + '" style="padding:8px;background:#fef2f2;color:#991b1b">' + esc(message) + '</div>';
+    });
   };
 
   window.qwenGetReviewSession = function() { return _cloneJson(qwenReviewSession); };
+  window.qwenReloadReviewAuthority = function() {
+    if (!qwenReviewSession || !qwenReviewSession.review_session_id) return;
+    fetch("/api/vision/v1/review-sessions/" + encodeURIComponent(qwenReviewSession.review_session_id))
+      .then(function(response) { return response.json(); })
+      .then(function(data) {
+        if (!data.ok || !data.review) throw data;
+        _qwenLoadAuthorityReview(data.review, data.candidate || null);
+      }).catch(function(data) {
+        _qwenSetAuthorityFailure(data);
+        _renderQwenReviewSession();
+      });
+  };
   window.qwenGetReviewSummary = function() {
-    return qwenReviewSession ? _cloneJson(qwenReviewSession.candidate_preview) : null;
+    if (!qwenReviewSession || !qwenReviewSession.server_candidate) return null;
+    var value = qwenReviewSession.server_candidate;
+    return _cloneJson(value && value.candidate ? value.candidate : value);
   };
   window.qwenGetRecognitionResult = function() { return _cloneJson(qwenEvidenceResult); };
   window.qwenGetPpocrShadowEvidence = function() { return _cloneJson(ppocrShadowEvidence); };
@@ -2323,6 +2787,8 @@ def render_vision_ui_section() -> str:
     if (b < 1048576) return (b / 1024).toFixed(1) + " KB";
     return (b / 1048576).toFixed(1) + " MB";
   }
+
+  _qwenReloadPersistedReview();
 })();
 </script>
 """
