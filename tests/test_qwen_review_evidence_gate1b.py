@@ -773,12 +773,18 @@ def test_browser_qwen_evidence_requires_explicit_actions(page) -> None:
     ]
     assert calls["manual"] == []
 
+    page.locator("details.qwen-research-controls").nth(0).evaluate(
+        "element => { element.open = true; }"
+    )
     page.fill(".qwen-line-edit", "40 49 2X1")
     page.click(".qwen-stage-line")
     assert page.input_value("#qwen-review-editable") == "40 49 2X1"
     assert calls["manual"] == []
     assert not any("webfill" in url or "assist-fill" in url for url in calls["urls"])
 
+    page.locator("details.qwen-research-controls").nth(1).evaluate(
+        "element => { element.open = true; }"
+    )
     page.click("#qwen-manual-reparse-btn")
     page.wait_for_function("document.getElementById('qwen-manual-reparse-btn').disabled === false")
     assert calls["manual"] == [{
@@ -1098,5 +1104,8 @@ def test_browser_truncated_qwen_result_has_safe_human_message_and_diagnostics(
     assert "sections must be a non-empty list" not in advanced
     assert page.get_attribute(".qwen-failure-details", "open") is None
     assert page.locator("#qwen-manual-reparse-btn").count() == 0
-    assert page.evaluate("qwenGetReviewSession()") is None
+    session = page.evaluate("qwenGetReviewSession()")
+    assert session["structures"] == []
+    assert session["provider_failure"] is not None
+    assert page.locator("#qwen-add-manual-structure").count() == 1
     assert calls["manual"] == []

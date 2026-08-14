@@ -124,17 +124,30 @@ def _candidate_button(structure_id: str, evidence_id: str, component: str) -> st
     )
 
 
+def _click_candidate(page, structure_id: str, evidence_id: str, component: str) -> None:
+    if page.locator(f'.qwen-review-card[data-structure-id="{structure_id}"]').count() == 0:
+        page.click(f'.qwen-review-compact-item[data-structure-id="{structure_id}"]')
+    page.locator(
+        f'.qwen-review-card[data-structure-id="{structure_id}"] .qwen-card-advanced'
+    ).evaluate("element => { element.open = true; }")
+    page.click(_candidate_button(structure_id, evidence_id, component))
+
+
 def test_unlinked_live_evidence_is_visible_but_never_positionally_attached(page) -> None:
     _mount_sample008(page)
     _run_qwen(page)
     session = page.evaluate("qwenGetReviewSession()")
     assert len(session["unlinked_gemma_items"]) == 4
     assert all(card["evidence_sources"]["gemma"] is None for card in session["structures"])
-    assert page.locator(".gemma-card-source-unavailable").count() == 3
+    assert page.locator(".qwen-review-compact-item").count() == 3
+    assert page.locator(".gemma-card-source-unavailable").count() == 1
     assert page.locator(_candidate_button("S03", "GEMMA-0004", "numbers")).count() == 1
-    assert "不使用位置、文字或索引補位" in page.text_content(
+    assert "候選與原始證據收在進階證據" in page.text_content(
         '.qwen-review-card[data-structure-id="S03"]'
     )
+    assert page.get_attribute(
+        '.qwen-review-card[data-structure-id="S03"] .qwen-card-advanced', "open"
+    ) is None
 
 
 def test_sample008_s03_explicit_number_adoption_is_browser_local_and_pending(page) -> None:
@@ -142,7 +155,7 @@ def test_sample008_s03_explicit_number_adoption_is_browser_local_and_pending(pag
     _run_qwen(page)
     recognition_before = page.evaluate("qwenGetRecognitionResult()")
     urls_before = list(calls["urls"])
-    page.click(_candidate_button("S03", "GEMMA-0004", "numbers"))
+    _click_candidate(page, "S03", "GEMMA-0004", "numbers")
     card = page.evaluate("qwenGetReviewSession().structures[0]")
     assert card["staged_structure"]["number_groups"] == [["08"], ["01", "04"]]
     assert card["staged_structure"]["multiplier_rules"] == ["2X5"]
@@ -161,7 +174,7 @@ def test_sample008_s03_explicit_number_adoption_is_browser_local_and_pending(pag
 def test_sample008_s04_number_and_multiplier_adoptions_are_independent(page) -> None:
     _mount_sample008(page)
     _run_qwen(page)
-    page.click(_candidate_button("S04", "GEMMA-0005", "numbers"))
+    _click_candidate(page, "S04", "GEMMA-0005", "numbers")
     after_numbers = page.evaluate("qwenGetReviewSession().structures[1].staged_structure")
     assert after_numbers["number_groups"] == [["08"], ["16", "26"]]
     assert after_numbers["multiplier_rules"] == ["2X5"]
@@ -179,7 +192,7 @@ def test_sample008_s04_number_and_multiplier_adoptions_are_independent(page) -> 
 def test_sample008_s06_explicit_adoption_adds_09_only_to_last_column(page) -> None:
     _mount_sample008(page)
     _run_qwen(page)
-    page.click(_candidate_button("S06", "GEMMA-0007", "numbers"))
+    _click_candidate(page, "S06", "GEMMA-0007", "numbers")
     staged = page.evaluate("qwenGetReviewSession().structures[2].staged_structure")
     assert staged["number_groups"] == [["25"], ["26"], ["28"], ["07", "09"]]
     assert staged["multiplier_rules"] == ["3X1"]
@@ -188,7 +201,7 @@ def test_sample008_s06_explicit_adoption_adds_09_only_to_last_column(page) -> No
 def test_gemma_adoption_stays_editable_and_unconfirmed_until_explicit_confirm(page) -> None:
     _mount_sample008(page)
     _run_qwen(page)
-    page.click(_candidate_button("S03", "GEMMA-0004", "numbers"))
+    _click_candidate(page, "S03", "GEMMA-0004", "numbers")
     page.click('.qwen-review-card[data-structure-id="S03"] .qwen-edit-structure')
     editor = '.qwen-review-card[data-structure-id="S03"] .qwen-card-editable'
     assert "08 / 01 04" in page.input_value(editor)
@@ -204,7 +217,7 @@ def test_duplicate_evidence_id_fails_closed_without_adoption(page) -> None:
     _mount_sample008(page, gemma=_sample008_gemma(duplicate_s03_id=True))
     _run_qwen(page)
     before = page.evaluate("qwenGetReviewSession().structures[0].staged_structure")
-    page.click(_candidate_button("S03", "GEMMA-0004", "numbers"))
+    _click_candidate(page, "S03", "GEMMA-0004", "numbers")
     after = page.evaluate("qwenGetReviewSession().structures[0]")
     assert after["staged_structure"] == before
     assert after["evidence_sources"]["gemma"] is None
@@ -214,7 +227,7 @@ def test_duplicate_evidence_id_fails_closed_without_adoption(page) -> None:
 def test_one_unlinked_evidence_item_cannot_be_reused_by_another_card(page) -> None:
     _mount_sample008(page)
     _run_qwen(page)
-    page.click(_candidate_button("S03", "GEMMA-0004", "numbers"))
+    _click_candidate(page, "S03", "GEMMA-0004", "numbers")
     before = page.evaluate("qwenGetReviewSession().structures[1].staged_structure")
     page.evaluate("qwenReviewAdoptGemmaCandidateNumbers(1, 1)")
     second = page.evaluate("qwenGetReviewSession().structures[1]")
@@ -238,7 +251,7 @@ def test_source_slots_are_future_capable_without_creating_side_effect_payloads(p
     _run_qwen(page)
     text = page.text_content('.qwen-review-card[data-structure-id="S03"] .review-evidence-source-slots')
     assert text == "sources=Qwen / Gemma / PP / Codex / Human Answer"
-    page.click(_candidate_button("S03", "GEMMA-0004", "numbers"))
+    _click_candidate(page, "S03", "GEMMA-0004", "numbers")
     serialized = str(page.evaluate("qwenGetReviewSession()"))
     for forbidden in ("manual_candidate_id", "accepted_by_human", "queue", "draft", "webfill"):
         assert forbidden not in serialized.lower()

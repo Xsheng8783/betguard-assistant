@@ -56,7 +56,9 @@ class TestVisionUIHtml:
         assert "牌組數" in html
         assert "一筆完整牌組" in html
         assert "相同星別＋倍率" in html
-        assert "各" not in html
+        # Human Answer must retain an explicit 「各」 scope when it exists; it is
+        # review-only metadata and must not be inferred from layout_hint.
+        assert '"each", "各"' in html
 
     def test_ocr_observations_are_converted_to_editable_review_draft(self):
         from betguard.webui.assist_panel_vision_html import render_vision_ui_section

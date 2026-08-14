@@ -286,6 +286,7 @@ def _mount(
                         "lines": [],
                         "preprocessing": {},
                     },
+                    "gemma_shadow_evidence": gemma_evidence,
                 }
             else:
                 body = {
@@ -446,9 +447,11 @@ def test_new_qwen_result_creates_new_browser_review_session(page) -> None:
 def test_each_primary_structure_creates_exactly_one_bet_card(page) -> None:
     _mount(page)
     _run_qwen(page)
-    assert page.locator(".qwen-review-card").count() == 2
+    assert len(page.evaluate("qwenGetReviewSession().structures")) == 2
+    assert page.locator(".qwen-review-card").count() == 1
+    assert page.locator(".qwen-review-compact-item").count() == 2
     assert page.locator('.qwen-review-card[data-structure-id="S01"]').count() == 1
-    assert page.locator('.qwen-review-card[data-structure-id="S02"]').count() == 1
+    assert page.locator('.qwen-review-compact-item[data-structure-id="S02"]').count() == 1
 
 
 def test_continuation_line_never_creates_an_independent_card(page) -> None:
@@ -465,7 +468,8 @@ def test_pending_structure_changes_to_confirmed_only_in_session(page) -> None:
     _run_qwen(page)
     assert page.get_attribute('.qwen-review-card[data-structure-id="S01"]', "data-review-state") == "pending"
     page.click('.qwen-review-card[data-structure-id="S01"] .qwen-confirm-structure')
-    assert page.get_attribute('.qwen-review-card[data-structure-id="S01"]', "data-review-state") == "confirmed"
+    assert page.evaluate("qwenGetReviewSession().structures[0].review_state") == "confirmed"
+    assert page.locator('.qwen-review-card[data-structure-id="S02"]').count() == 1
     assert "已確認 1 / 總共 2" in page.text_content("#qwen-review-progress")
 
 
@@ -505,9 +509,9 @@ def test_card_manual_reparse_is_explicit_and_register_candidate_false(page) -> N
 def test_whole_review_cannot_finish_until_every_card_is_confirmed(page) -> None:
     _mount(page)
     _run_qwen(page)
-    assert page.is_disabled("#qwen-complete-review")
+    assert page.locator("#qwen-complete-review").count() == 0
     page.click('.qwen-review-card[data-structure-id="S01"] .qwen-confirm-structure')
-    assert page.is_disabled("#qwen-complete-review")
+    assert page.locator("#qwen-complete-review").count() == 0
 
 
 def test_all_confirmed_cards_create_candidate_preview(page) -> None:
@@ -523,7 +527,7 @@ def test_all_confirmed_cards_create_candidate_preview(page) -> None:
     assert summary["source_image_id"] == "image-gate3a-1"
     assert summary["image_sha256"] == "upload-sha-1"
     assert len(summary["confirmed_structures"]) == 2
-    assert "人工審核完成，尚未加入待選牌清單" in page.text_content("#qwen-review-complete-status")
+    assert "Candidate 邊界已就緒（尚未建立）" in page.text_content("#qwen-review-complete-status")
 
 
 def test_candidate_preview_never_writes_queue(page) -> None:
@@ -615,7 +619,10 @@ def test_qwen_failed_ux_is_safe_and_debug_details_are_collapsed(page) -> None:
     )
     assert page.get_attribute(".qwen-failure-details", "open") is None
     assert "private stack trace" not in page.text_content("#qwen-failure-message")
-    assert page.evaluate("qwenGetReviewSession()") is None
+    session = page.evaluate("qwenGetReviewSession()")
+    assert session["structures"] == []
+    assert session["provider_failure"]
+    assert page.locator("#qwen-add-manual-structure").count() == 1
 
 
 def test_review_session_and_summary_keep_all_safety_flags(page) -> None:
@@ -657,6 +664,8 @@ def test_main_cards_use_human_status_and_keep_warnings_in_advanced_details(page)
     _run_qwen(page)
     cards_text = page.text_content("#qwen-review-cards")
     assert "AI 結構一致，仍請確認" in cards_text
+    page.click('.qwen-review-compact-item[data-structure-id="S02"]')
+    cards_text = page.text_content("#qwen-review-cards")
     assert "AI 與規則結果不同，請檢查" in cards_text
     assert "fragment_multiplier_ambiguous" not in page.text_content(
         '.qwen-review-card[data-structure-id="S02"] .qwen-review-human-status'
@@ -683,19 +692,23 @@ def test_normal_and_column_cards_render_daily_review_shapes(page) -> None:
     _mount(page)
     _run_qwen(page)
     normal = page.locator('.qwen-review-card[data-structure-id="S01"]')
-    column = page.locator('.qwen-review-card[data-structure-id="S02"]')
     assert "05 06 10 28" in normal.locator(".qwen-review-numbers").text_content()
     assert "3/4X1" in normal.locator(".qwen-review-play").text_content()
+    page.click('.qwen-review-compact-item[data-structure-id="S02"]')
+    column = page.locator('.qwen-review-card[data-structure-id="S02"]')
     assert column.locator(".qwen-review-column").all_text_contents() == [
         "24 34", "08 38", "16 36", "03 13",
     ]
     assert "2/3/4X0.1" in column.locator(".qwen-review-play").text_content()
     assert "2/3/4" in column.locator(".qwen-review-collision").text_content()
-    normal.locator(".qwen-edit-structure").click()
+    page.click('.qwen-review-compact-item[data-structure-id="S01"]')
+    page.locator('.qwen-review-card[data-structure-id="S01"] .qwen-edit-structure').click()
     assert page.input_value('.qwen-card-editable[data-card-index="0"]') == (
         "05 06 10 28 三四X1"
     )
     page.click('.qwen-review-card[data-structure-id="S01"] .qwen-card-cancel')
+    page.click('.qwen-review-compact-item[data-structure-id="S02"]')
+    column = page.locator('.qwen-review-card[data-structure-id="S02"]')
     column.locator(".qwen-edit-structure").click()
     assert page.input_value('.qwen-card-editable[data-card-index="1"]') == (
         "24 34 / 08 38 / 16 36 / 03 13 二三四X0.1"
@@ -807,6 +820,6 @@ def test_card_canonical_text_uses_existing_parser_contract() -> None:
 def test_clicking_card_highlights_only_reliable_structure_bbox(page) -> None:
     _mount(page)
     _run_qwen(page)
-    page.click('.qwen-review-card[data-structure-id="S02"]')
+    page.click('.qwen-review-compact-item[data-structure-id="S02"]')
     assert page.is_visible("#vision-structure-highlight")
     assert float(page.eval_on_selector("#vision-structure-highlight", "el => parseFloat(el.style.height)")) > 0

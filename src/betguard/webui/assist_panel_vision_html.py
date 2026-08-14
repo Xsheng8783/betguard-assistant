@@ -393,8 +393,12 @@ def render_vision_ui_section() -> str:
     .then(function(data) {
       btn.disabled = !qwenConfigured;
       btn.textContent = "Qwen 看圖";
+      ppocrShadowEvidence = data.shadow_evidence || null;
+      gemmaShadowEvidence = data.gemma_shadow_evidence || null;
+      multiModelComparison = data.multi_model_comparison || null;
+      visionShadowLatency = data.vision_latency || null;
       if (!data.ok || !data.result) {
-        _renderQwenFailure((data.error && data.error.message) || "Qwen 回應無效");
+        _renderQwenFailure((data.error && data.error.message) || "Qwen 回應無效", "", data);
         return;
       }
       qwenStructureEvidence = Array.isArray(data.structure_evidence)
@@ -412,13 +416,20 @@ def render_vision_ui_section() -> str:
   };
 
   function _renderQwenFailure(message) {
+    var payload = arguments.length > 2 && arguments[2] ? arguments[2] : {};
+    var preservedPp = payload.shadow_evidence || ppocrShadowEvidence || null;
+    var preservedGemma = payload.gemma_shadow_evidence || gemmaShadowEvidence || null;
+    var preservedComparison = payload.multi_model_comparison || multiModelComparison || null;
+    var preservedLatency = payload.vision_latency || visionShadowLatency || null;
+    var gameSelect = document.getElementById("vision-qwen-game");
+    var failureGame = qwenRequestedGame || (gameSelect && gameSelect.value) || "539";
     _resetQwenReviewSession();
     qwenEvidenceResult = null;
     qwenStructureEvidence = [];
-    ppocrShadowEvidence = null;
-    gemmaShadowEvidence = null;
-    multiModelComparison = null;
-    visionShadowLatency = null;
+    ppocrShadowEvidence = preservedPp;
+    gemmaShadowEvidence = preservedGemma;
+    multiModelComparison = preservedComparison;
+    visionShadowLatency = preservedLatency;
     var userMessage = arguments.length > 1 ? arguments[1] : "";
     var safeUserMessage = userMessage ||
       "AI 未能完整讀取這張圖片。\\n可以重新辨識或改用手動輸入。";
@@ -428,8 +439,13 @@ def render_vision_ui_section() -> str:
         esc(safeUserMessage).replace(/\\n/g, '<br>') + '</div>' +
       '<details class="qwen-failure-details" style="font-size:11px;color:#64748b;margin-top:6px"><summary>進階資訊</summary><pre style="white-space:pre-wrap">' +
         esc(message || "invalid response") + '</pre></details>' +
-      '<div style="font-size:11px;color:#64748b;margin-top:6px">needs_review｜auto_confirm=false｜auto_submit=false</div>';
+      '<div style="font-size:11px;color:#64748b;margin-top:6px">needs_review｜auto_confirm=false｜auto_submit=false</div>' +
+      '<div id="qwen-review-session"></div>' +
+      '<details id="qwen-advanced-evidence" style="font-size:12px;color:#475569;margin-top:10px"><summary>進階證據</summary>' +
+      _renderPpocrShadowEvidence() + _renderGemmaShadowEvidence() + '</details>';
+    _createQwenFailureReviewSession(failureGame, {message: String(message || "invalid response")});
     document.getElementById("vision-results").style.display = "block";
+    _renderQwenReviewSession();
   }
 
   function _qwenEvidenceByLineId(qwenResponse) {
@@ -580,9 +596,100 @@ def render_vision_ui_section() -> str:
       codex: null,
       human_answer: {
         source: "Human Answer",
-        human_confirmed: false
+        human_confirmed: false,
+        field_corrections: []
       }
     };
+  }
+
+  function _qwenIsCancelledStructure(structure) {
+    structure = structure || {};
+    return structure.cancelled === true || structure.cancelled === "yes";
+  }
+
+  function _qwenNewManualCard(index) {
+    var structureId = "MANUAL-" + String(index + 1).padStart(2, "0");
+    var staged = {
+      number_groups: [],
+      multiplier_rules: [],
+      layout: "unknown",
+      collision: null,
+      continuation: false,
+      tail: null,
+      car: null,
+      half_car: null,
+      each: null,
+      special_text: "",
+      cancelled: false
+    };
+    return {
+      structure_id: structureId,
+      primary_line_id: "",
+      source_line_ids: [],
+      source_status: "unsupported",
+      review_state: "editing",
+      model_candidate: {},
+      original_structure: {},
+      staged_structure: _cloneJson(staged),
+      warnings: ["manual_entry_after_provider_failure"],
+      evidence: {},
+      edit_text: "",
+      reparse_preview: null,
+      preview_error: "",
+      manual_edits: [],
+      field_corrections: [],
+      evidence_sources: {
+        qwen: {source: "Qwen unavailable", model_candidate: {}, reconstructed_candidate: {}},
+        gemma: null,
+        ppocr: null,
+        codex: null,
+        human_answer: {
+          source: "Human Answer",
+          human_confirmed: false,
+          staged_structure: _cloneJson(staged),
+          field_sources: {
+            numbers: {source: "Human Answer"},
+            multiplier: {source: "Human Answer"},
+            layout: {source: "Human Answer"}
+          },
+          field_corrections: []
+        }
+      },
+      field_sources: {
+        numbers: {source: "Human Answer", human_confirmed: false},
+        multiplier: {source: "Human Answer", human_confirmed: false},
+        layout: {source: "Human Answer", human_confirmed: false}
+      },
+      suggestion_adoptions: [],
+      blocking_resolved_by_human: false,
+      human_confirmed: false
+    };
+  }
+
+  function _createQwenFailureReviewSession(game, failure) {
+    qwenReviewSession = {
+      schema_version: "vision-review-session-v1",
+      review_session_id: "vision-review-" + String(uploadedImageId || "unknown") + "-" + String(Date.now()),
+      game: game === "六合" ? "六合" : "539",
+      source_image_id: String(uploadedImageId || ""),
+      image_sha256: String((uploadedImageMetadata && uploadedImageMetadata.sha256) || ""),
+      structures: [],
+      unlinked_gemma_items: _gemmaUnlinkedEvidence(gemmaShadowEvidence),
+      active_structure_id: null,
+      show_pending_only: false,
+      candidate_preview: null,
+      boundary_signal: null,
+      provider_failure: _cloneJson(failure || {}),
+      created_at: new Date().toISOString(),
+      safety: {
+        human_confirmation_required: true,
+        auto_apply: false,
+        auto_confirm: false,
+        auto_submit: false
+      }
+    };
+    var gameSelect = document.getElementById("vision-qwen-game");
+    if (gameSelect) gameSelect.disabled = true;
   }
 
   function _createQwenReviewSession(result, structureEvidence, game) {
@@ -601,7 +708,8 @@ def render_vision_ui_section() -> str:
       evidenceSources.human_answer.staged_structure = _cloneJson(reconstructed);
       evidenceSources.human_answer.field_sources = {
         numbers: {source: "Qwen reconstruction"},
-        multiplier: {source: "Qwen reconstruction"}
+        multiplier: {source: "Qwen reconstruction"},
+        layout: {source: "Qwen reconstruction"}
       };
       cards.push({
         structure_id: structureId,
@@ -619,12 +727,15 @@ def render_vision_ui_section() -> str:
         reparse_preview: null,
         preview_error: "",
         manual_edits: [],
+        field_corrections: [],
         evidence_sources: evidenceSources,
         field_sources: {
           numbers: {source: "Qwen reconstruction"},
-          multiplier: {source: "Qwen reconstruction"}
+          multiplier: {source: "Qwen reconstruction"},
+          layout: {source: "Qwen reconstruction"}
         },
         suggestion_adoptions: [],
+        blocking_resolved_by_human: item.status === "consistent",
         human_confirmed: false
       });
     }
@@ -639,9 +750,10 @@ def render_vision_ui_section() -> str:
       // suggestions browser-local and unlinked until an explicit user click
       // associates one evidence item with one review card.
       unlinked_gemma_items: _gemmaUnlinkedEvidence(gemmaShadowEvidence),
-      active_structure_id: null,
+      active_structure_id: cards.length ? cards[0].structure_id : null,
       show_pending_only: false,
       candidate_preview: null,
+      boundary_signal: null,
       created_at: new Date().toISOString(),
       safety: {
         human_confirmation_required: true,
@@ -764,92 +876,158 @@ def render_vision_ui_section() -> str:
     return JSON.stringify(left || []) === JSON.stringify(right || []);
   }
 
+  function _qwenCanonicalLayout(layout) {
+    layout = String(layout || "").toLowerCase();
+    if (layout === "normal" || layout === "normal_row") return "normal_row";
+    if (layout === "column" || layout === "column_bet") return "column_bet";
+    return "unknown";
+  }
+
+  function _qwenModelRules(model) {
+    var value = model && model.multiplier;
+    if (Array.isArray(value)) return value.map(String).filter(function(item) { return !!item; });
+    return value == null || value === "" ? [] : [String(value).toUpperCase()];
+  }
+
+  function _qwenReviewFieldConflicts(card) {
+    var staged = card.staged_structure || {};
+    var model = card.model_candidate || {};
+    var qwenNumbers = _qwenNormalizeGroups(model.numbers || []);
+    var qwenRules = _qwenModelRules(model);
+    var qwenLayout = _qwenCanonicalLayout(model.layout_hint);
+    var stagedNumbers = _qwenNormalizeGroups(staged.number_groups || []);
+    var stagedRules = Array.isArray(staged.multiplier_rules) ? staged.multiplier_rules.map(String) : [];
+    var stagedLayout = _qwenCanonicalLayout(staged.layout);
+    var conflicts = {
+      numbers: qwenNumbers.length > 0 && !_sameReviewValue(qwenNumbers, stagedNumbers),
+      multiplier: qwenRules.length > 0 && !_sameReviewValue(qwenRules, stagedRules),
+      layout: qwenLayout !== "unknown" && stagedLayout !== "unknown" && qwenLayout !== stagedLayout
+    };
+    var gemma = card.evidence_sources && card.evidence_sources.gemma;
+    if (gemma) {
+      var gemmaGroups = _gemmaNumberGroups(gemma, card);
+      var gemmaRules = _gemmaMultiplierRules(gemma);
+      var gemmaLayout = _qwenCanonicalLayout(gemma.layout_guess);
+      conflicts.numbers = conflicts.numbers || (gemmaGroups.length > 0 && !_sameReviewValue(gemmaGroups, stagedNumbers));
+      conflicts.multiplier = conflicts.multiplier || (gemmaRules.length > 0 && !_sameReviewValue(gemmaRules, stagedRules));
+      conflicts.layout = conflicts.layout || (gemmaLayout !== "unknown" && stagedLayout !== "unknown" && gemmaLayout !== stagedLayout);
+    }
+    return conflicts;
+  }
+
+  // Product review cards intentionally show concise suggestions only. Raw
+  // model payloads and unlinked candidates remain in the folded evidence area.
   function _qwenGemmaEvidenceHtml(card, index) {
     var sources = card.evidence_sources || {};
     var qwen = sources.qwen || {};
     var gemma = sources.gemma;
-    var slots = ["Qwen", "Gemma", "PP", "Codex", "Human Answer"];
-    var html = '<section class="review-evidence-sources" style="margin-top:8px;padding:7px;background:#f8fafc;border:1px solid #cbd5e1;border-radius:5px">' +
-      '<div class="review-evidence-source-slots" style="font-size:11px;color:#64748b">sources=' + esc(slots.join(' / ')) + '</div>' +
-      '<div class="qwen-card-source" style="margin-top:5px"><strong>Qwen evidence（唯讀）</strong>' +
-      '<div>model=' + esc(JSON.stringify(qwen.model_candidate || {})) + '</div>' +
-      '<div>reconstruction=' + esc(JSON.stringify(qwen.reconstructed_candidate || {})) + '</div></div>' +
-      '<div class="human-answer-source" style="margin-top:5px"><strong>Human Answer（browser-local）</strong>' +
-      '<div>staged=' + esc(JSON.stringify(card.staged_structure || {})) + '</div>' +
-      '<div>human_confirmed=' + esc(String(card.human_confirmed === true)) + '</div></div>';
+    var model = qwen.model_candidate || {};
+    var reconstructed = qwen.reconstructed_candidate || {};
+    var html = '<section class="review-ai-suggestions" style="margin-top:8px;padding:7px;background:#f8fafc;border:1px solid #cbd5e1;border-radius:5px">' +
+      '<strong>AI 建議</strong>' +
+      '<div class="qwen-suggestion-summary" style="font-size:12px;margin-top:4px">Qwen：號碼 ' +
+      esc(JSON.stringify(model.numbers || reconstructed.number_groups || [])) +
+      '；倍率 ' + esc(JSON.stringify(model.multiplier == null ? (reconstructed.multiplier_rules || []) : model.multiplier)) +
+      '；版型 ' + esc(_qwenLayoutLabel(model.layout_hint || reconstructed.layout || "unknown")) + '</div>';
     if (!gemma) {
-      var unlinked = qwenReviewSession && Array.isArray(qwenReviewSession.unlinked_gemma_items)
-        ? qwenReviewSession.unlinked_gemma_items : [];
-      html += '<div class="gemma-card-source-unavailable" style="margin-top:5px;color:#64748b">Gemma evidence 未以精確 structure_id 掛接；不使用位置、文字或索引補位。請由人工明確選擇候選。</div>';
-      if (unlinked.length) {
-        html += '<div class="gemma-unlinked-candidates" style="margin-top:6px">';
-        for (var candidateIndex = 0; candidateIndex < unlinked.length; candidateIndex++) {
-          var candidate = unlinked[candidateIndex] || {};
-          var candidateGroups = _gemmaNumberGroups(candidate, card);
-          var candidateRules = _gemmaMultiplierRules(candidate);
-          html += '<div class="gemma-unlinked-candidate" data-evidence-id="' + esc(candidate.evidence_id || '') + '" style="padding:5px 0;border-top:1px dashed #cbd5e1">' +
-            '<div><strong>Gemma 候選 ' + esc(candidate.evidence_id || String(candidateIndex + 1)) + '</strong>：' + esc(candidate.raw_text || '') + '</div>';
-          if (candidateGroups.length) {
-            html += '<button type="button" class="adopt-gemma-candidate-numbers" onclick="qwenReviewAdoptGemmaCandidateNumbers(' + index + ',' + candidateIndex + ')">將此候選號碼帶入本卡</button> ';
-          }
-          if (candidateRules.length) {
-            html += '<button type="button" class="adopt-gemma-candidate-multiplier" onclick="qwenReviewAdoptGemmaCandidateMultiplier(' + index + ',' + candidateIndex + ')">將此候選倍率帶入本卡</button>';
-          }
-          html += '</div>';
-        }
-        html += '</div>';
-      }
+      html += '<div class="gemma-card-source-unavailable" style="margin-top:5px;color:#64748b">Gemma 尚未由人工掛到本卡；不使用位置、文字或索引補位。候選與原始證據收在進階證據。</div>';
       return html + '</section>';
     }
     var staged = card.staged_structure || {};
     var gemmaGroups = _gemmaNumberGroups(gemma, card);
     var gemmaRules = _gemmaMultiplierRules(gemma);
+    var gemmaLayout = _qwenCanonicalLayout(gemma.layout_guess);
     var numbersDiffer = gemmaGroups.length && !_sameReviewValue(_qwenNormalizeGroups(staged.number_groups || []), gemmaGroups);
     var multiplierDiffer = gemmaRules.length && !_sameReviewValue(staged.multiplier_rules || [], gemmaRules);
+    var layoutDiffer = gemmaLayout !== "unknown" && gemmaLayout !== _qwenCanonicalLayout(staged.layout);
     html += '<div class="gemma-card-source" data-evidence-id="' + esc(gemma.evidence_id || '') + '" style="margin-top:7px;padding-top:6px;border-top:1px solid #e2e8f0">' +
-      '<strong>Gemma suggestion（唯讀）</strong>' +
-      '<div>raw_text=' + esc(gemma.raw_text || '') + '</div>' +
-      '<div>numbers=' + esc(gemma.numbers || 'unclear') + '; multiplier_text=' + esc(gemma.multiplier_text || 'none') + '</div>' +
-      '<div>layout_guess=' + esc(gemma.layout_guess || 'unclear') + '; uncertain=' + esc(String(gemma.uncertain === true)) + '</div>';
-    if (numbersDiffer || multiplierDiffer) {
-      html += '<div class="gemma-card-disagreement" style="color:#b91c1c;font-weight:700">AI 來源不同，請分欄人工檢查；採用任一建議都不會自動確認。</div>';
+      '<strong>Gemma 建議</strong>' +
+      '<div class="gemma-suggestion-summary">號碼 ' + esc(JSON.stringify(gemmaGroups)) +
+      '；倍率 ' + esc(JSON.stringify(gemmaRules)) + '；版型 ' + esc(_qwenLayoutLabel(gemmaLayout)) + '</div>';
+    if (numbersDiffer || multiplierDiffer || layoutDiffer) {
+      html += '<div class="gemma-card-disagreement" style="color:#9a3412;font-weight:700">AI 來源有欄位差異；請只採用要變更的欄位。</div>';
     }
     if (gemmaGroups.length && numbersDiffer) {
       html += '<button type="button" class="adopt-gemma-numbers" onclick="qwenReviewAdoptGemmaNumbers(' + index + ')">採用 Gemma 號碼</button> ';
     }
     if (gemmaRules.length && multiplierDiffer) {
-      html += '<button type="button" class="adopt-gemma-multiplier" onclick="qwenReviewAdoptGemmaMultiplier(' + index + ')">採用 Gemma 倍率</button>';
+      html += '<button type="button" class="adopt-gemma-multiplier" onclick="qwenReviewAdoptGemmaMultiplier(' + index + ')">採用 Gemma 倍率</button> ';
+    }
+    if (gemmaLayout !== "unknown" && layoutDiffer) {
+      html += '<button type="button" class="adopt-gemma-layout" onclick="qwenReviewAdoptGemmaLayout(' + index + ')">採用 Gemma 版型</button>';
     }
     return html + '</div></section>';
+  }
+
+  function _qwenAdvancedGemmaCandidatesHtml(card, index) {
+    var unlinked = qwenReviewSession && Array.isArray(qwenReviewSession.unlinked_gemma_items)
+      ? qwenReviewSession.unlinked_gemma_items : [];
+    var html = '<div class="review-evidence-source-slots">sources=Qwen / Gemma / PP / Codex / Human Answer</div>';
+    var selected = card.evidence_sources && card.evidence_sources.gemma;
+    if (selected) html += '<div class="gemma-selected-raw">Gemma selected raw=' + esc(JSON.stringify(selected)) + '</div>';
+    if (!unlinked.length) return html;
+    html += '<div class="gemma-unlinked-candidates" style="margin-top:6px"><strong>未掛接 Gemma 候選（必須由人工點選）</strong>';
+    for (var candidateIndex = 0; candidateIndex < unlinked.length; candidateIndex++) {
+      var candidate = unlinked[candidateIndex] || {};
+      var candidateGroups = _gemmaNumberGroups(candidate, card);
+      var candidateRules = _gemmaMultiplierRules(candidate);
+      var candidateLayout = _qwenCanonicalLayout(candidate.layout_guess);
+      html += '<div class="gemma-unlinked-candidate" data-evidence-id="' + esc(candidate.evidence_id || '') + '" style="padding:5px 0;border-top:1px dashed #cbd5e1">' +
+        '<div><strong>' + esc(candidate.evidence_id || String(candidateIndex + 1)) + '</strong> raw=' + esc(candidate.raw_text || '') + '</div>';
+      if (candidateGroups.length) html += '<button type="button" class="adopt-gemma-candidate-numbers" onclick="qwenReviewAdoptGemmaCandidateNumbers(' + index + ',' + candidateIndex + ')">採用此候選號碼</button> ';
+      if (candidateRules.length) html += '<button type="button" class="adopt-gemma-candidate-multiplier" onclick="qwenReviewAdoptGemmaCandidateMultiplier(' + index + ',' + candidateIndex + ')">採用此候選倍率</button> ';
+      if (candidateLayout !== "unknown") html += '<button type="button" class="adopt-gemma-candidate-layout" onclick="qwenReviewAdoptGemmaCandidateLayout(' + index + ',' + candidateIndex + ')">採用此候選版型</button>';
+      html += '</div>';
+    }
+    return html + '</div>';
   }
 
   function _qwenCardStructureHtml(card) {
     var structure = card.staged_structure || {};
     var groups = _qwenNormalizeGroups(structure.number_groups || []);
-    var layout = String(structure.layout || "unknown");
-    var html = '<div class="qwen-review-layout" style="font-size:12px;color:#64748b;margin-bottom:6px">版面：' +
-      esc(_qwenLayoutLabel(layout)) + '</div>';
-    if (layout === "column_bet" || layout === "column") {
-      html += '<div class="qwen-review-columns" style="display:grid;gap:4px;margin-bottom:7px">';
+    var layout = _qwenCanonicalLayout(structure.layout);
+    var conflicts = _qwenReviewFieldConflicts(card);
+    function fieldStyle(conflict) {
+      return conflict ? 'border:2px solid #dc2626;background:#fff7f7;' : 'border:1px solid #e2e8f0;background:#fff;';
+    }
+    function conflictText(conflict) {
+      return conflict ? '<div class="review-field-conflict" style="font-size:11px;color:#b91c1c;font-weight:700">AI 來源不同，請檢查此欄位</div>' : '';
+    }
+    var html = '<div class="human-answer-fields" style="display:grid;gap:6px">';
+    html += '<div class="review-field" data-field="layout" data-conflict="' + String(conflicts.layout) + '" style="padding:6px;' + fieldStyle(conflicts.layout) + '">' +
+      '<strong>Human Answer・版型：</strong>' + esc(_qwenLayoutLabel(layout)) + conflictText(conflicts.layout) + '</div>';
+    html += '<div class="review-field" data-field="numbers" data-conflict="' + String(conflicts.numbers) + '" style="padding:6px;' + fieldStyle(conflicts.numbers) + '">' +
+      '<strong>Human Answer・號碼</strong>' + conflictText(conflicts.numbers);
+    if (layout === "column_bet") {
+      html += '<div class="qwen-review-columns" style="display:grid;gap:4px;margin-top:5px">';
       for (var i = 0; i < groups.length; i++) {
-        html += '<div class="qwen-review-column" data-column-index="' + i + '" style="font-family:monospace;font-size:16px">' +
-          esc(groups[i].join(" ")) + '</div>';
+        html += '<div class="qwen-review-column" data-column-index="' + i + '" style="font-family:monospace;font-size:16px">' + esc(groups[i].join(" ")) + '</div>';
       }
       html += '</div>';
     } else {
-      html += '<div class="qwen-review-numbers" style="font-family:monospace;font-size:17px;margin-bottom:7px">' +
-        esc(groups.map(function(group) { return group.join(" "); }).join(" / ") || "—") + '</div>';
+      html += '<div class="qwen-review-numbers" style="font-family:monospace;font-size:17px;margin-top:5px">' +
+        esc(groups.map(function(group) { return group.join(" "); }).join(" / ") || "無") + '</div>';
     }
+    html += '</div>';
     var rules = Array.isArray(structure.multiplier_rules) ? structure.multiplier_rules : [];
-    html += '<div class="qwen-review-play"><strong>玩法：</strong>' +
-      esc(rules.length ? rules.join("、") : "未辨識／需要人工處理") + '</div>';
-    if (structure.collision != null) {
-      html += '<div class="qwen-review-collision"><strong>碰法：</strong>' + esc(structure.collision) + '</div>';
+    html += '<div class="review-field" data-field="multiplier" data-conflict="' + String(conflicts.multiplier) + '" style="padding:6px;' + fieldStyle(conflicts.multiplier) + '">' +
+      '<div class="qwen-review-play"><strong>Human Answer・倍率：</strong>' + esc(rules.length ? rules.join("、") : "未辨識／需要人工處理") + '</div>' +
+      conflictText(conflicts.multiplier);
+    if (structure.collision != null) html += '<div class="qwen-review-collision"><strong>疊寫類別：</strong>' + esc(structure.collision) + '</div>';
+    html += '</div>';
+    var specialKeys = ["continuation", "tail", "尾", "car", "車", "half_car", "半車", "each", "各", "special_text", "play_text", "scope"];
+    var special = [];
+    for (var s = 0; s < specialKeys.length; s++) {
+      var key = specialKeys[s];
+      if (Object.prototype.hasOwnProperty.call(structure, key) && structure[key] != null && structure[key] !== "") {
+        special.push(key + '=' + JSON.stringify(structure[key]));
+      }
     }
-    if (structure.play_text != null) {
-      html += '<div class="qwen-review-play-text"><strong>玩法文字：</strong>' + esc(structure.play_text) + '</div>';
-    }
-    return html;
+    if (special.length) html += '<div class="review-field review-special-fields" data-field="special" style="padding:6px;border:1px solid #e2e8f0;background:#fff"><strong>特殊／範圍：</strong>' + esc(special.join('；')) + '</div>';
+    html += '<label class="review-cancelled-field" style="display:flex;gap:6px;align-items:center;font-size:12px" onclick="event.stopPropagation()">' +
+      '<input type="checkbox" class="qwen-card-cancelled" ' + (_qwenIsCancelledStructure(structure) ? 'checked ' : '') +
+      'onchange="qwenReviewSetCancelled(' + qwenReviewSession.structures.indexOf(card) + ',this.checked)">此筆取消／塗改，不列為 active 投注</label>';
+    return html + '</div>';
   }
 
   function _qwenPreviewHtml(card, index) {
@@ -871,6 +1049,34 @@ def render_vision_ui_section() -> str:
       '</div>';
   }
 
+  function _qwenSpecialInputValue(value) {
+    if (value == null || value === false) return "";
+    if (typeof value === "string") return value;
+    return JSON.stringify(value);
+  }
+
+  function _qwenSpecialFieldValue(structure, field) {
+    var aliases = {tail: "尾", car: "車", half_car: "半車", each: "各"};
+    if (structure[field] != null && structure[field] !== "") return structure[field];
+    var alias = aliases[field];
+    return alias && structure[alias] != null ? structure[alias] : null;
+  }
+
+  function _qwenSpecialEditorHtml(card, index) {
+    var structure = card.staged_structure || {};
+    return '<fieldset class="qwen-special-editor" style="margin-top:8px;padding:7px;border:1px solid #cbd5e1"><legend>特殊／範圍（Human Answer）</legend>' +
+      '<label style="display:block"><input type="checkbox" class="qwen-special-continuation" ' +
+      (structure.continuation ? 'checked ' : '') + '> continuation</label>' +
+      '<label style="display:block">尾 <input class="qwen-special-tail" value="' + esc(_qwenSpecialInputValue(_qwenSpecialFieldValue(structure, "tail"))) + '"></label>' +
+      '<label style="display:block">車 <input class="qwen-special-car" value="' + esc(_qwenSpecialInputValue(_qwenSpecialFieldValue(structure, "car"))) + '"></label>' +
+      '<label style="display:block">半車 <input class="qwen-special-half-car" value="' + esc(_qwenSpecialInputValue(_qwenSpecialFieldValue(structure, "half_car"))) + '"></label>' +
+      '<label style="display:block">各 <input class="qwen-special-each" value="' + esc(_qwenSpecialInputValue(_qwenSpecialFieldValue(structure, "each"))) + '"></label>' +
+      '<label style="display:block">特殊玩法 <input class="qwen-special-text" value="' + esc(_qwenSpecialInputValue(structure.special_text)) + '"></label>' +
+      '<label style="display:block">範圍 <input class="qwen-special-scope" value="' + esc(_qwenSpecialInputValue(structure.scope)) + '"></label>' +
+      '<button type="button" class="qwen-adopt-special-fields" style="margin-top:6px" onclick="qwenReviewAdoptSpecialFields(' + index + ')">採用特殊／範圍修改</button>' +
+      '</fieldset>';
+  }
+
   function _qwenReviewCardHtml(card, index) {
     var stateLabel = card.review_state === "confirmed" ? "已確認" :
       (card.review_state === "editing" ? "需要修改" : "待確認");
@@ -883,6 +1089,7 @@ def render_vision_ui_section() -> str:
     html += '<div style="display:flex;justify-content:space-between;gap:8px;align-items:start">' +
       '<strong>投注 ' + (index + 1) + '</strong>' +
       '<span class="qwen-review-state" style="font-size:12px;color:' + stateColor + ';font-weight:700">' + esc(stateLabel) + '</span></div>';
+    html += '<div class="review-image-context" style="font-size:11px;color:#64748b;margin-top:4px">原圖位置：選取本卡時顯示可靠的行／token 範圍；無可靠 bbox 時不猜位置。</div>';
     html += '<div class="qwen-review-human-status" style="margin:6px 0;color:#9a3412;font-weight:700">' +
       esc(_qwenHumanStatus(card.source_status)) + '</div>';
     html += _qwenCardStructureHtml(card);
@@ -891,12 +1098,17 @@ def render_vision_ui_section() -> str:
       html += '<div class="qwen-manual-edit-marker" style="font-size:12px;color:#0f766e;margin-top:5px">已採用人工修改</div>';
     }
     if (card.review_state === "editing") {
+      var editLayout = _qwenCanonicalLayout((card.staged_structure || {}).layout);
       html += '<div class="qwen-card-editor" style="margin-top:8px;padding-top:8px;border-top:1px solid #e2e8f0" onclick="event.stopPropagation()">' +
         '<label style="display:block;font-weight:700;margin-bottom:4px">可編輯表示</label>' +
         '<textarea class="qwen-card-editable" data-card-index="' + index + '" style="width:100%;min-height:68px;font-family:monospace;padding:6px">' + esc(card.edit_text) + '</textarea>' +
         '<div style="margin-top:6px"><button type="button" class="qwen-card-reparse" onclick="qwenReviewReparse(' + index + ')">重新解析</button> ' +
         '<button type="button" class="qwen-card-cancel" onclick="qwenReviewCancelEdit(' + index + ')">取消</button></div>' +
-        _qwenPreviewHtml(card, index) + '</div>';
+        '<label style="display:block;margin-top:6px">版型 <select class="qwen-card-layout-edit" data-card-index="' + index + '">' +
+        '<option value="unknown" ' + (editLayout === 'unknown' ? 'selected ' : '') + '>待人工判斷</option>' +
+        '<option value="normal_row" ' + (editLayout === 'normal_row' ? 'selected ' : '') + '>一般</option>' +
+        '<option value="column_bet" ' + (editLayout === 'column_bet' ? 'selected ' : '') + '>柱碰</option></select></label>' +
+        _qwenSpecialEditorHtml(card, index) + _qwenPreviewHtml(card, index) + '</div>';
     } else {
       html += '<div style="margin-top:8px"><button type="button" class="qwen-edit-structure" onclick="event.stopPropagation();qwenReviewStartEdit(' + index + ')">修改</button> ' +
         '<button type="button" class="qwen-confirm-structure" onclick="event.stopPropagation();qwenReviewConfirm(' + index + ')">' +
@@ -910,38 +1122,111 @@ def render_vision_ui_section() -> str:
       '<div>reconstructed_candidate=' + esc(JSON.stringify(card.original_structure || {})) + '</div>' +
       '<div>staged_structure=' + esc(JSON.stringify(card.staged_structure || {})) + '</div>' +
       '<div>field_sources=' + esc(JSON.stringify(card.field_sources || {})) + '</div>' +
+      '<div>field_corrections=' + esc(JSON.stringify(card.field_corrections || [])) + '</div>' +
       '<div>suggestion_adoptions=' + esc(JSON.stringify(card.suggestion_adoptions || [])) + '</div>' +
-      '<div>warnings=' + esc(JSON.stringify(card.warnings)) + '</div></details>';
+      '<div>warnings=' + esc(JSON.stringify(card.warnings)) + '</div>' +
+      _qwenAdvancedGemmaCandidatesHtml(card, index) + '</details>';
     return html + '</article>';
+  }
+
+  function _qwenReviewIsActive(card) {
+    return !_qwenIsCancelledStructure((card || {}).staged_structure || {});
+  }
+
+  function _qwenReviewReadiness() {
+    if (!qwenReviewSession || !qwenReviewSession.structures.length) {
+      return {ready: false, active_total: 0, active_confirmed: 0, cancelled_total: 0, blocking_unresolved: 0};
+    }
+    var cards = qwenReviewSession.structures;
+    var active = cards.filter(_qwenReviewIsActive);
+    var cancelled = cards.filter(function(card) { return !_qwenReviewIsActive(card); });
+    var activeConfirmed = active.filter(function(card) { return card.review_state === "confirmed" && card.human_confirmed === true; }).length;
+    var cancelledHandled = cancelled.filter(function(card) { return card.review_state === "confirmed" && card.human_confirmed === true; }).length;
+    var blocking = cards.filter(function(card) {
+      return card.source_status !== "consistent" && card.blocking_resolved_by_human !== true;
+    }).length;
+    return {
+      ready: active.length > 0 && activeConfirmed === active.length && cancelledHandled === cancelled.length && blocking === 0,
+      active_total: active.length,
+      active_confirmed: activeConfirmed,
+      cancelled_total: cancelled.length,
+      cancelled_handled: cancelledHandled,
+      blocking_unresolved: blocking
+    };
+  }
+
+  function _qwenActiveReviewIndex() {
+    if (!qwenReviewSession) return -1;
+    for (var i = 0; i < qwenReviewSession.structures.length; i++) {
+      if (qwenReviewSession.structures[i].structure_id === qwenReviewSession.active_structure_id) return i;
+    }
+    return qwenReviewSession.structures.length ? 0 : -1;
+  }
+
+  function _qwenVisibleReviewIndices() {
+    if (!qwenReviewSession) return [];
+    var result = [];
+    for (var i = 0; i < qwenReviewSession.structures.length; i++) {
+      if (qwenReviewSession.show_pending_only && qwenReviewSession.structures[i].review_state === "confirmed") continue;
+      result.push(i);
+    }
+    return result;
+  }
+
+  function _qwenCompactCardHtml(card, index, active) {
+    var groups = _qwenNormalizeGroups((card.staged_structure || {}).number_groups || []);
+    var summary = groups.map(function(group) { return group.join(" "); }).join(" × ") || "未辨識號碼";
+    var state = card.review_state === "confirmed" ? "已確認" : (card.review_state === "editing" ? "編輯中" : "待確認");
+    return '<button type="button" class="qwen-review-compact-item" data-structure-id="' + esc(card.structure_id) +
+      '" data-active="' + String(active) + '" onclick="qwenReviewSelect(' + index + ')" style="width:100%;text-align:left;padding:6px;border:' +
+      (active ? '2px solid #f97316' : '1px solid #cbd5e1') + ';background:#fff;border-radius:5px">' +
+      '<strong>第 ' + (index + 1) + ' 筆</strong> · ' + esc(state) + ' · <span class="qwen-compact-number-summary">' + esc(summary) + '</span></button>';
   }
 
   function _renderQwenReviewSession() {
     var target = document.getElementById("qwen-review-session");
     if (!target || !qwenReviewSession) return;
     var cards = qwenReviewSession.structures;
+    var readiness = _qwenReviewReadiness();
     var confirmed = cards.filter(function(card) { return card.review_state === "confirmed"; }).length;
-    var editing = cards.filter(function(card) { return card.review_state === "editing"; }).length;
-    var pending = cards.length - confirmed - editing;
+    var pending = cards.length - confirmed;
+    var activeIndex = _qwenActiveReviewIndex();
+    var visibleIndices = _qwenVisibleReviewIndices();
+    if (visibleIndices.length && visibleIndices.indexOf(activeIndex) < 0) {
+      activeIndex = visibleIndices[0];
+      qwenReviewSession.active_structure_id = cards[activeIndex].structure_id;
+    }
+    var visiblePosition = visibleIndices.indexOf(activeIndex);
     var html = '<section class="qwen-review-session-panel">' +
-      '<div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;align-items:center;margin:8px 0">' +
-      '<div><strong id="qwen-review-progress">已確認 ' + confirmed + ' / 總共 ' + cards.length + '</strong>' +
-      '<div id="qwen-review-counts" style="font-size:12px;color:#64748b">待確認 ' + pending + '｜已確認 ' + confirmed + '｜需要修改 ' + editing + '</div></div>' +
+      '<div class="qwen-review-toolbar" style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;align-items:center;margin:8px 0">' +
+      '<div><strong id="qwen-review-progress">已確認 ' + readiness.active_confirmed + ' / 總共 ' + readiness.active_total + ' active</strong>' +
+      '<div id="qwen-review-counts" style="font-size:12px;color:#64748b">confirmed=' + confirmed + '；pending=' + pending +
+      '；unresolved=' + readiness.blocking_unresolved + '；cancelled=' + readiness.cancelled_total + '</div></div>' +
+      '<div><span id="qwen-review-position">第 ' + (visiblePosition < 0 ? 0 : visiblePosition + 1) + ' / ' + visibleIndices.length + ' 筆</span> ' +
+      '<button type="button" id="qwen-review-previous" onclick="qwenReviewPrevious()" ' + (visiblePosition <= 0 ? 'disabled ' : '') + '>上一筆</button> ' +
+      '<button type="button" id="qwen-review-next" onclick="qwenReviewNext()" ' + (visiblePosition < 0 || visiblePosition >= visibleIndices.length - 1 ? 'disabled ' : '') + '>下一筆</button></div>' +
       '<label style="font-size:12px"><input id="qwen-pending-only" type="checkbox" ' +
-        (qwenReviewSession.show_pending_only ? 'checked ' : '') + 'onchange="qwenReviewTogglePending(this.checked)"> 只看待確認</label></div>';
-    if (!cards.length) {
-      html += '<div class="qwen-no-primary-structures" style="padding:9px;background:#fef2f2;color:#991b1b">資料不完整，沒有可供逐筆審核的 primary structure。</div>';
+      (qwenReviewSession.show_pending_only ? 'checked ' : '') + 'onchange="qwenReviewTogglePending(this.checked)"> 只看待確認</label></div>';
+    if (qwenReviewSession.provider_failure) {
+      html += '<div class="qwen-provider-failure-review-note" style="padding:7px;background:#fff7ed;color:#9a3412">Qwen 未完成；可使用既有 Gemma／PP 證據或人工新增，不會自動建立候選。</div>';
     }
-    html += '<div id="qwen-review-cards" style="display:grid;gap:9px">';
-    for (var i = 0; i < cards.length; i++) {
-      if (qwenReviewSession.show_pending_only && cards[i].review_state === "confirmed") continue;
-      html += _qwenReviewCardHtml(cards[i], i);
+    if (!cards.length) html += '<div class="qwen-no-primary-structures" style="padding:9px;background:#fef2f2;color:#991b1b">沒有可用的 AI 投注卡；請人工新增。</div>';
+    html += '<button type="button" id="qwen-add-manual-structure" onclick="qwenReviewAddManualStructure()">＋ 新增人工投注</button>' +
+      '<div id="qwen-review-compact-list" style="display:grid;gap:4px;margin-top:8px">';
+    for (var compact = 0; compact < visibleIndices.length; compact++) {
+      var compactIndex = visibleIndices[compact];
+      html += _qwenCompactCardHtml(cards[compactIndex], compactIndex, compactIndex === activeIndex);
     }
-    html += '</div><button type="button" id="qwen-complete-review" class="btn-primary" style="margin-top:10px" ' +
-      (cards.length && confirmed === cards.length ? '' : 'disabled ') + 'onclick="qwenCompleteReview()">完成整張審核</button>' +
-      '<div id="qwen-review-completion" style="margin-top:8px"></div>' +
-      '<details id="qwen-known-limitations" style="font-size:11px;color:#64748b;margin-top:9px"><summary>已知限制</summary>' +
-      '劃除投注仍是未解決的 cancellation evidence；半車等跨列 scope 仍需人工判斷；模糊、密集或遮擋字跡可能造成辨識不完整。本階段未修改 OCR。</details>' +
-      '</section>';
+    html += '</div><div id="qwen-review-cards" style="display:grid;gap:9px;margin-top:8px">';
+    if (activeIndex >= 0 && visibleIndices.indexOf(activeIndex) >= 0) html += _qwenReviewCardHtml(cards[activeIndex], activeIndex);
+    html += '</div>';
+    if (readiness.ready) {
+      html += '<button type="button" id="qwen-complete-review" class="btn-primary" style="margin-top:10px" onclick="qwenCompleteReview()">建立 Candidate</button>' +
+        '<div id="qwen-candidate-boundary-status" style="font-size:11px;color:#64748b">僅建立 browser-local ready signal；本 Gate 不建立 candidate、不寫 queue、不執行外部填入。</div>';
+    } else {
+      html += '<div id="qwen-candidate-boundary-status" style="margin-top:10px;color:#9a3412">完成所有 active 確認並處理 unresolved 後，才會顯示「建立 Candidate」。</div>';
+    }
+    html += '<div id="qwen-review-completion" style="margin-top:8px"></div></section>';
     target.innerHTML = html;
     if (qwenReviewSession.candidate_preview) _renderQwenCompletion(qwenReviewSession.candidate_preview);
     _updateQwenStructureHighlight();
@@ -1028,6 +1313,50 @@ def render_vision_ui_section() -> str:
     highlight.style.display = "block";
   }
 
+  function _recordReviewFieldCorrection(card, field, source, before, after) {
+    if (!Array.isArray(card.field_corrections)) card.field_corrections = [];
+    card.field_corrections.push({
+      field: field,
+      source: source,
+      before: _cloneJson(before),
+      after: _cloneJson(after),
+      changed_at: new Date().toISOString(),
+      human_confirmed: false
+    });
+    if (card.evidence_sources && card.evidence_sources.human_answer) {
+      card.evidence_sources.human_answer.field_corrections = _cloneJson(card.field_corrections);
+    }
+  }
+
+  function _invalidateReviewConfirmation(card) {
+    card.review_state = "pending";
+    card.human_confirmed = false;
+    card.blocking_resolved_by_human = card.source_status === "consistent";
+    card.reparse_preview = null;
+    card.preview_error = "";
+    if (card.evidence_sources && card.evidence_sources.human_answer) {
+      card.evidence_sources.human_answer.human_confirmed = false;
+      card.evidence_sources.human_answer.staged_structure = _cloneJson(card.staged_structure);
+      card.evidence_sources.human_answer.field_sources = _cloneJson(card.field_sources || {});
+    }
+    if (qwenReviewSession) {
+      qwenReviewSession.candidate_preview = null;
+      qwenReviewSession.boundary_signal = null;
+    }
+  }
+
+  function _qwenSelectNextUnconfirmed(fromIndex) {
+    if (!qwenReviewSession) return;
+    var cards = qwenReviewSession.structures;
+    for (var offset = 1; offset <= cards.length; offset++) {
+      var index = (fromIndex + offset) % cards.length;
+      if (cards[index].review_state !== "confirmed") {
+        qwenReviewSession.active_structure_id = cards[index].structure_id;
+        return;
+      }
+    }
+  }
+
   window.qwenReviewSelect = function(index) {
     if (!qwenReviewSession || !qwenReviewSession.structures[index]) return;
     qwenReviewSession.active_structure_id = qwenReviewSession.structures[index].structure_id;
@@ -1043,12 +1372,16 @@ def render_vision_ui_section() -> str:
   window.qwenReviewConfirm = function(index) {
     if (!qwenReviewSession || !qwenReviewSession.structures[index]) return;
     var card = qwenReviewSession.structures[index];
-    card.review_state = card.review_state === "confirmed" ? "pending" : "confirmed";
+    var cancellingConfirmation = card.review_state === "confirmed";
+    card.review_state = cancellingConfirmation ? "pending" : "confirmed";
     card.human_confirmed = card.review_state === "confirmed";
+    card.blocking_resolved_by_human = card.review_state === "confirmed" || card.source_status === "consistent";
     if (card.evidence_sources && card.evidence_sources.human_answer) {
       card.evidence_sources.human_answer.human_confirmed = card.human_confirmed;
     }
     qwenReviewSession.candidate_preview = null;
+    qwenReviewSession.boundary_signal = null;
+    if (!cancellingConfirmation) _qwenSelectNextUnconfirmed(index);
     _renderQwenReviewSession();
   };
 
@@ -1057,6 +1390,7 @@ def render_vision_ui_section() -> str:
     var card = qwenReviewSession.structures[index];
     card.review_state = "editing";
     card.human_confirmed = false;
+    card.blocking_resolved_by_human = card.source_status === "consistent";
     if (card.evidence_sources && card.evidence_sources.human_answer) {
       card.evidence_sources.human_answer.human_confirmed = false;
     }
@@ -1129,15 +1463,16 @@ def render_vision_ui_section() -> str:
     var columns = _qwenNormalizeGroups(preview.columns || []);
     var numbers = (preview.numbers || []).map(_qwenNumber).filter(function(value) { return !!value; });
     var rules = _qwenExtractMultiplierRules(card.edit_text);
-    var previous = card.staged_structure || {};
-    card.staged_structure = {
-      number_groups: columns.length ? columns : (numbers.length ? [numbers] : []),
-      multiplier_rules: rules,
-      layout: preview.type === "column" ? "column_bet" : "normal_row",
-      collision: _qwenCollisionFromRules(rules, previous.collision),
-      shared_multiplier: previous.shared_multiplier == null ? null : previous.shared_multiplier,
-      parser_preview: _cloneJson(preview)
-    };
+    var previous = _cloneJson(card.staged_structure || {});
+    var layoutInput = document.querySelector('.qwen-card-layout-edit[data-card-index="' + index + '"]');
+    var selectedLayout = _qwenCanonicalLayout(layoutInput ? layoutInput.value : preview.type);
+    var updated = _cloneJson(previous);
+    updated.number_groups = columns.length ? columns : (numbers.length ? [numbers] : []);
+    updated.multiplier_rules = rules;
+    updated.layout = selectedLayout === "unknown" ? (preview.type === "column" ? "column_bet" : "normal_row") : selectedLayout;
+    updated.collision = _qwenCollisionFromRules(rules, previous.collision);
+    updated.parser_preview = _cloneJson(preview);
+    card.staged_structure = updated;
     card.manual_edits.push({
       canonical_text: card.edit_text,
       parser_preview: _cloneJson(preview),
@@ -1145,18 +1480,71 @@ def render_vision_ui_section() -> str:
     });
     card.field_sources.numbers = {source: "Human Answer", human_confirmed: false};
     card.field_sources.multiplier = {source: "Human Answer", human_confirmed: false};
+    card.field_sources.layout = {source: "Human Answer", human_confirmed: false};
+    _recordReviewFieldCorrection(card, "numbers", "Human Answer", previous.number_groups || [], updated.number_groups || []);
+    _recordReviewFieldCorrection(card, "multiplier", "Human Answer", previous.multiplier_rules || [], updated.multiplier_rules || []);
+    _recordReviewFieldCorrection(card, "layout", "Human Answer", previous.layout || "unknown", updated.layout || "unknown");
     if (card.evidence_sources && card.evidence_sources.human_answer) {
       card.evidence_sources.human_answer.staged_structure = _cloneJson(card.staged_structure);
       card.evidence_sources.human_answer.field_sources = _cloneJson(card.field_sources);
     }
-    card.review_state = "pending";
-    card.human_confirmed = false;
-    if (card.evidence_sources && card.evidence_sources.human_answer) {
-      card.evidence_sources.human_answer.human_confirmed = false;
+    _invalidateReviewConfirmation(card);
+    _renderQwenReviewSession();
+  };
+
+  window.qwenReviewAdoptSpecialFields = function(index) {
+    if (!qwenReviewSession || !qwenReviewSession.structures[index]) return;
+    var card = qwenReviewSession.structures[index];
+    var root = document.querySelector('.qwen-card-editable[data-card-index="' + index + '"]');
+    var editor = root && root.closest('.qwen-card-editor');
+    if (!editor) return;
+    var previous = _cloneJson(card.staged_structure || {});
+    var updated = _cloneJson(previous);
+    var continuationInput = editor.querySelector('.qwen-special-continuation');
+    var continuationEnabled = !!(continuationInput && continuationInput.checked);
+    updated.continuation = continuationEnabled ? (previous.continuation || true) : false;
+    var fields = [
+      ["tail", ".qwen-special-tail"],
+      ["car", ".qwen-special-car"],
+      ["half_car", ".qwen-special-half-car"],
+      ["each", ".qwen-special-each"],
+      ["special_text", ".qwen-special-text"],
+      ["scope", ".qwen-special-scope"]
+    ];
+    var aliases = {tail: "尾", car: "車", half_car: "半車", each: "各"};
+    for (var i = 0; i < fields.length; i++) {
+      var field = fields[i][0];
+      var input = editor.querySelector(fields[i][1]);
+      var nextText = input ? input.value.trim() : "";
+      var previousValue = _qwenSpecialFieldValue(previous, field);
+      var previousText = _qwenSpecialInputValue(previousValue);
+      updated[field] = nextText === previousText ? _cloneJson(previousValue) : (nextText || null);
+      if (aliases[field] && Object.prototype.hasOwnProperty.call(previous, aliases[field])) {
+        updated[aliases[field]] = _cloneJson(updated[field]);
+      }
     }
-    card.reparse_preview = null;
-    card.preview_error = "";
-    qwenReviewSession.candidate_preview = null;
+    var changedFields = [];
+    var allFields = ["continuation", "tail", "car", "half_car", "each", "special_text", "scope"];
+    for (var f = 0; f < allFields.length; f++) {
+      var name = allFields[f];
+      var previousComparable = name === "continuation" ? previous[name] : _qwenSpecialFieldValue(previous, name);
+      if (JSON.stringify(previousComparable == null ? null : previousComparable) === JSON.stringify(updated[name] == null ? null : updated[name])) continue;
+      changedFields.push(name);
+      card.field_sources[name] = {source: "Human Answer", human_confirmed: false};
+      _recordReviewFieldCorrection(card, name, "Human Answer", previousComparable, updated[name]);
+    }
+    if (!changedFields.length) return;
+    card.staged_structure = updated;
+    card.manual_edits.push({
+      component: "special_scope",
+      fields: changedFields,
+      adopted_at: new Date().toISOString()
+    });
+    if (card.evidence_sources && card.evidence_sources.human_answer) {
+      card.evidence_sources.human_answer.staged_structure = _cloneJson(updated);
+      card.evidence_sources.human_answer.field_sources = _cloneJson(card.field_sources);
+    }
+    _invalidateReviewConfirmation(card);
     _renderQwenReviewSession();
   };
 
@@ -1169,16 +1557,7 @@ def render_vision_ui_section() -> str:
       adopted_at: new Date().toISOString(),
       human_confirmed: false
     });
-    card.review_state = "pending";
-    card.human_confirmed = false;
-    card.reparse_preview = null;
-    card.preview_error = "";
-    if (card.evidence_sources && card.evidence_sources.human_answer) {
-      card.evidence_sources.human_answer.human_confirmed = false;
-      card.evidence_sources.human_answer.staged_structure = _cloneJson(card.staged_structure);
-      card.evidence_sources.human_answer.field_sources = _cloneJson(card.field_sources);
-    }
-    qwenReviewSession.candidate_preview = null;
+    _invalidateReviewConfirmation(card);
   }
 
   function _selectUnlinkedGemmaEvidence(cardIndex, candidateIndex) {
@@ -1218,6 +1597,12 @@ def render_vision_ui_section() -> str:
     window.qwenReviewAdoptGemmaMultiplier(index);
   };
 
+  window.qwenReviewAdoptGemmaCandidateLayout = function(index, candidateIndex) {
+    var selected = _selectUnlinkedGemmaEvidence(index, candidateIndex);
+    if (!selected) return;
+    window.qwenReviewAdoptGemmaLayout(index);
+  };
+
   window.qwenReviewAdoptGemmaNumbers = function(index) {
     if (!qwenReviewSession || !qwenReviewSession.structures[index]) return;
     var card = qwenReviewSession.structures[index];
@@ -1226,6 +1611,7 @@ def render_vision_ui_section() -> str:
     var groups = _gemmaNumberGroups(gemma, card);
     if (!groups.length) return;
     var previous = _cloneJson(card.staged_structure || {});
+    var before = _cloneJson(previous.number_groups || []);
     previous.number_groups = groups;
     card.staged_structure = previous;
     card.field_sources.numbers = {
@@ -1234,6 +1620,7 @@ def render_vision_ui_section() -> str:
       evidence_id: String(gemma.evidence_id || ""),
       human_confirmed: false
     };
+    _recordReviewFieldCorrection(card, "numbers", "Gemma suggestion", before, groups);
     _recordGemmaAdoption(card, "numbers", gemma);
     _renderQwenReviewSession();
   };
@@ -1246,6 +1633,7 @@ def render_vision_ui_section() -> str:
     var rules = _gemmaMultiplierRules(gemma);
     if (!rules.length) return;
     var previous = _cloneJson(card.staged_structure || {});
+    var before = _cloneJson(previous.multiplier_rules || []);
     previous.multiplier_rules = rules;
     previous.collision = _qwenCollisionFromRules(rules, previous.collision);
     card.staged_structure = previous;
@@ -1255,48 +1643,133 @@ def render_vision_ui_section() -> str:
       evidence_id: String(gemma.evidence_id || ""),
       human_confirmed: false
     };
+    _recordReviewFieldCorrection(card, "multiplier", "Gemma suggestion", before, rules);
     _recordGemmaAdoption(card, "multiplier", gemma);
     _renderQwenReviewSession();
   };
 
+  window.qwenReviewAdoptGemmaLayout = function(index) {
+    if (!qwenReviewSession || !qwenReviewSession.structures[index]) return;
+    var card = qwenReviewSession.structures[index];
+    var gemma = card.evidence_sources && card.evidence_sources.gemma;
+    if (!gemma) return;
+    var layout = _qwenCanonicalLayout(gemma.layout_guess);
+    if (layout === "unknown") return;
+    var previous = _cloneJson(card.staged_structure || {});
+    var before = previous.layout || "unknown";
+    previous.layout = layout;
+    card.staged_structure = previous;
+    card.field_sources.layout = {
+      source: "Gemma suggestion",
+      provider: "gemma4-26b-shadow",
+      evidence_id: String(gemma.evidence_id || ""),
+      human_confirmed: false
+    };
+    _recordReviewFieldCorrection(card, "layout", "Gemma suggestion", before, layout);
+    _recordGemmaAdoption(card, "layout", gemma);
+    _renderQwenReviewSession();
+  };
+
+  window.qwenReviewSetCancelled = function(index, enabled) {
+    if (!qwenReviewSession || !qwenReviewSession.structures[index]) return;
+    var card = qwenReviewSession.structures[index];
+    var previous = _cloneJson(card.staged_structure || {});
+    var updated = _cloneJson(previous);
+    updated.cancelled = enabled === true;
+    card.staged_structure = updated;
+    card.field_sources.cancelled = {source: "Human Answer", human_confirmed: false};
+    _recordReviewFieldCorrection(card, "cancelled", "Human Answer", _qwenIsCancelledStructure(previous), enabled === true);
+    _invalidateReviewConfirmation(card);
+    _renderQwenReviewSession();
+  };
+
+  window.qwenReviewAddManualStructure = function() {
+    if (!qwenReviewSession) return;
+    var card = _qwenNewManualCard(qwenReviewSession.structures.length);
+    qwenReviewSession.structures.push(card);
+    qwenReviewSession.active_structure_id = card.structure_id;
+    qwenReviewSession.candidate_preview = null;
+    qwenReviewSession.boundary_signal = null;
+    _renderQwenReviewSession();
+  };
+
+  window.qwenReviewPrevious = function() {
+    var index = _qwenActiveReviewIndex();
+    var visible = _qwenVisibleReviewIndices();
+    var position = visible.indexOf(index);
+    if (position <= 0) return;
+    qwenReviewSession.active_structure_id = qwenReviewSession.structures[visible[position - 1]].structure_id;
+    _renderQwenReviewSession();
+  };
+
+  window.qwenReviewNext = function() {
+    var index = _qwenActiveReviewIndex();
+    var visible = _qwenVisibleReviewIndices();
+    var position = visible.indexOf(index);
+    if (!qwenReviewSession || position < 0 || position >= visible.length - 1) return;
+    qwenReviewSession.active_structure_id = qwenReviewSession.structures[visible[position + 1]].structure_id;
+    _renderQwenReviewSession();
+  };
+
+  document.addEventListener("keydown", function(event) {
+    if (!qwenReviewSession || !(event.ctrlKey || event.metaKey) || event.key !== "Enter") return;
+    var index = _qwenActiveReviewIndex();
+    if (index < 0 || qwenReviewSession.structures[index].review_state === "editing") return;
+    event.preventDefault();
+    qwenReviewConfirm(index);
+  });
+
   function _buildQwenReviewSummary() {
-    if (!qwenReviewSession || !qwenReviewSession.structures.length || qwenReviewSession.structures.some(function(card) { return card.review_state !== "confirmed"; })) return null;
+    var readiness = _qwenReviewReadiness();
+    if (!readiness.ready) return null;
+    function serializeCard(card) {
+      var structure = card.staged_structure || {};
+      return {
+        structure_id: card.structure_id,
+        primary_line_id: card.primary_line_id,
+        source_line_ids: _cloneJson(card.source_line_ids),
+        number_groups: _cloneJson(structure.number_groups || []),
+        multiplier_rules: _cloneJson(structure.multiplier_rules || []),
+        layout: structure.layout || "unknown",
+        collision: structure.collision == null ? null : structure.collision,
+        continuation: _cloneJson(structure.continuation == null ? false : structure.continuation),
+        tail: _cloneJson(structure.tail == null ? null : structure.tail),
+        car: _cloneJson(structure.car == null ? null : structure.car),
+        half_car: _cloneJson(structure.half_car == null ? null : structure.half_car),
+        each: _cloneJson(structure.each == null ? null : structure.each),
+        special_text: _cloneJson(structure.special_text == null ? "" : structure.special_text),
+        cancelled: _qwenIsCancelledStructure(structure),
+        human_answer: _cloneJson(structure),
+        manual_edits: _cloneJson(card.manual_edits),
+        field_corrections: _cloneJson(card.field_corrections || []),
+        field_sources: _cloneJson(card.field_sources || {}),
+        suggestion_adoptions: _cloneJson(card.suggestion_adoptions || []),
+        human_confirmed: card.human_confirmed === true
+      };
+    }
     return {
       schema_version: "vision-review-candidate-preview-v1",
       review_session_id: qwenReviewSession.review_session_id,
       game: qwenReviewSession.game,
       source_image_id: qwenReviewSession.source_image_id,
       image_sha256: qwenReviewSession.image_sha256,
-      confirmed_structures: qwenReviewSession.structures.map(function(card) {
-        var structure = card.staged_structure || {};
-        return {
-          structure_id: card.structure_id,
-          primary_line_id: card.primary_line_id,
-          source_line_ids: _cloneJson(card.source_line_ids),
-          number_groups: _cloneJson(structure.number_groups || []),
-          multiplier_rules: _cloneJson(structure.multiplier_rules || []),
-          layout: structure.layout || "unknown",
-          collision: structure.collision == null ? null : structure.collision,
-          manual_edits: _cloneJson(card.manual_edits),
-          field_sources: _cloneJson(card.field_sources || {}),
-          suggestion_adoptions: _cloneJson(card.suggestion_adoptions || []),
-          human_confirmed: card.human_confirmed === true
-        };
-      }),
+      confirmed_structures: qwenReviewSession.structures.filter(_qwenReviewIsActive).map(serializeCard),
+      cancelled_structures: qwenReviewSession.structures.filter(function(card) { return !_qwenReviewIsActive(card); }).map(serializeCard),
       review_timestamp: new Date().toISOString(),
       human_confirmation_required: true,
       auto_apply: false,
       auto_confirm: false,
       auto_submit: false,
-      registration_state: "browser_local_preview_only"
+      registration_state: "candidate_boundary_ready_not_created"
     };
   }
 
   function _renderQwenCompletion(summary) {
     var output = document.getElementById("qwen-review-completion");
     if (!output) return;
-    output.innerHTML = '<div id="qwen-review-complete-status" style="padding:8px;background:#ecfdf5;border-left:4px solid #10b981;color:#065f46;font-weight:700">人工審核完成，尚未加入待選牌清單</div>' +
-      '<details id="qwen-review-summary" style="font-size:11px;color:#475569;margin-top:6px"><summary>審核摘要／候選預覽</summary><pre style="white-space:pre-wrap">' +
+    output.innerHTML = '<div id="qwen-review-complete-status" style="padding:8px;background:#ecfdf5;border-left:4px solid #10b981;color:#065f46;font-weight:700">Candidate 邊界已就緒（尚未建立）</div>' +
+      '<div class="candidate-boundary-safety" style="font-size:11px;color:#475569">candidate=0；queue=0；外部填入=0；auto_confirm=false；auto_submit=false</div>' +
+      '<details id="qwen-review-summary" style="font-size:11px;color:#475569;margin-top:6px"><summary>Human Answer 結構化摘要</summary><pre style="white-space:pre-wrap">' +
       esc(JSON.stringify(summary, null, 2)) + '</pre></details>';
   }
 
@@ -1304,6 +1777,13 @@ def render_vision_ui_section() -> str:
     var summary = _buildQwenReviewSummary();
     if (!summary) return;
     qwenReviewSession.candidate_preview = summary;
+    qwenReviewSession.boundary_signal = {
+      status: "ready_not_created",
+      signaled_at: new Date().toISOString(),
+      candidate_created: false,
+      queue_written: false,
+      external_fill_called: false
+    };
     _renderQwenCompletion(summary);
   };
 
@@ -1457,7 +1937,7 @@ def render_vision_ui_section() -> str:
       'needs_review｜provider job status=completed（僅代表 provider job 完成，不代表人工確認）' +
       '｜auto_confirm=false｜auto_submit=false</div>';
     html += '<div id="qwen-review-session"></div>';
-    html += '<section id="qwen-line-correction-tools" style="margin-top:10px;padding:8px;background:#fff;border:1px solid #e2e8f0;border-radius:6px">' +
+    html += '<details class="qwen-research-controls" style="margin-top:10px"><summary>進階：逐行文字工具</summary><section id="qwen-line-correction-tools" style="padding:8px;background:#fff;border:1px solid #e2e8f0;border-radius:6px">' +
       '<strong>逐行文字修正（輔助）</strong><div style="font-size:11px;color:#64748b;margin:3px 0 6px">主要審核請使用上方投注卡；此區只將文字帶入唯讀解析預覽。</div>';
     for (var toolIndex = 0; toolIndex < lines.length; toolIndex++) {
       var toolLine = lines[toolIndex] || {};
@@ -1466,7 +1946,7 @@ def render_vision_ui_section() -> str:
         '<button type="button" class="qwen-copy-line" onclick="qwenCopyLine(' + toolIndex + ')">複製</button>' +
         '<button type="button" class="qwen-stage-line" onclick="qwenStageLine(' + toolIndex + ')">帶入修正欄</button></div>';
     }
-    html += '</section>';
+    html += '</section></details>';
     html += '<details id="qwen-advanced-evidence" style="font-size:12px;color:#475569;margin-top:10px"><summary>進階資訊（原始 Qwen 與重建證據）</summary>';
     html += '<div class="qwen-evidence-metadata" style="font-size:11px;color:#475569;padding:6px;background:#f1f5f9;border-radius:4px">' +
       'provider=' + esc(provider.id || '-') +
@@ -1568,13 +2048,13 @@ def render_vision_ui_section() -> str:
     html += _renderGemmaShadowEvidence();
     html += '</details>';
 
-    html += '<div id="qwen-correction-panel" style="margin-top:10px;padding:8px;background:#f8fafc;border:1px solid #cbd5e1;border-radius:4px">' +
+    html += '<details class="qwen-research-controls" style="margin-top:10px"><summary>進階：整頁文字解析預覽</summary><div id="qwen-correction-panel" style="padding:8px;background:#f8fafc;border:1px solid #cbd5e1;border-radius:4px">' +
       '<label for="qwen-review-editable" style="display:block;font-weight:700;margin-bottom:4px">前端修正暫存（可手動修改）</label>' +
       '<textarea id="qwen-review-editable" style="width:100%;min-height:70px;font-family:monospace;padding:6px" placeholder="先按某行的「帶入修正欄」，再人工修改"></textarea>' +
       '<div style="font-size:11px;color:#64748b;margin-top:3px">重新解析預覽沿用上方同一個遊戲類型；不使用 auto，document_mode 不代表遊戲類型。</div>' +
       '<button type="button" id="qwen-manual-reparse-btn" class="btn-primary" style="margin-top:6px" onclick="qwenPreviewReparse()">重新解析預覽</button>' +
       '<div id="qwen-manual-reparse-result" style="font-size:12px;margin-top:6px;color:#64748b">尚未要求解析預覽；未呼叫 /manual-reparse。</div>' +
-      '</div>';
+      '</div></details>';
     document.getElementById("vision-results-body").innerHTML = html;
     document.getElementById("vision-results").style.display = "block";
     _renderQwenReviewSession();
