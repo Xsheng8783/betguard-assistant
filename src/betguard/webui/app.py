@@ -966,6 +966,12 @@ _ASSIST_PANEL_STATE: dict[str, Any] = {}
 # Lazily constructed so importing the web UI never creates persistence paths.
 # Tests replace this singleton with a tmp_path-backed store.
 _VISION_CANDIDATE_AUTHORITY_STORE: Any | None = None
+# Gate 3B-3A is an isolated, identity-only queue authority.  Keep it lazy so
+# importing the web UI cannot create user-data directories.
+_VALIDATED_CANDIDATE_QUEUE_STORE: Any | None = None
+# Opaque action-to-session bindings issued by explicit Assist Panel clicks.
+# Neither actor nor interactive-session identity is accepted from request JSON.
+_VALIDATED_QUEUE_WEB_ACTIONS: dict[str, dict[str, Any]] = {}
 
 
 def _get_vision_candidate_authority_store() -> Any:
@@ -978,6 +984,23 @@ def _get_vision_candidate_authority_store() -> Any:
             Path(get_data_dir()) / "vision" / "candidate-authority"
         )
     return _VISION_CANDIDATE_AUTHORITY_STORE
+
+
+def _get_validated_candidate_queue_store() -> Any:
+    global _VALIDATED_CANDIDATE_QUEUE_STORE
+    if _VALIDATED_CANDIDATE_QUEUE_STORE is None:
+        from betguard.user_data import get_data_dir
+        from betguard.vision.validated_candidate_queue import (
+            ValidatedCandidateQueueStore,
+        )
+
+        _VALIDATED_CANDIDATE_QUEUE_STORE = (
+            ValidatedCandidateQueueStore.from_authority_store(
+                Path(get_data_dir()) / "vision" / "validated-candidate-queue-v1",
+                _get_vision_candidate_authority_store(),
+            )
+        )
+    return _VALIDATED_CANDIDATE_QUEUE_STORE
 
 def _register_manual_candidate(candidate: dict[str, Any]) -> str:
     """Register a manually corrected candidate and return its unique ID."""
@@ -1181,6 +1204,9 @@ def build_workbench_handler(
             if path == "/api/vision/v1/providers":
                 self._handle_vision_providers()
                 return
+            if path == "/api/vision/v1/candidate-queue":
+                self._handle_validated_candidate_queue_list()
+                return
             if path.startswith("/api/vision/v1/review-sessions/"):
                 review_session_id = urllib.parse.unquote(
                     path[len("/api/vision/v1/review-sessions/"):]
@@ -1350,6 +1376,36 @@ def build_workbench_handler(
             if path == "/api/vision/v1/candidates":
                 self._handle_vision_candidate_create()
                 return
+            if path == "/api/vision/v1/candidate-queue/enqueue-actions":
+                self._handle_validated_candidate_queue_enqueue_action()
+                return
+            if path == "/api/vision/v1/candidate-queue/enqueue":
+                self._handle_validated_candidate_queue_enqueue()
+                return
+            if path == "/api/vision/v1/candidate-queue/prepare-next":
+                self._handle_validated_candidate_queue_prepare_next()
+                return
+            if path.startswith("/api/vision/v1/candidate-queue/entries/") and path.endswith(
+                "/remove-actions"
+            ):
+                queue_entry_id = urllib.parse.unquote(
+                    path[
+                        len("/api/vision/v1/candidate-queue/entries/") :
+                        -len("/remove-actions")
+                    ]
+                )
+                if queue_entry_id and "/" not in queue_entry_id:
+                    self._handle_validated_candidate_queue_remove_action(queue_entry_id)
+                    return
+            if path.startswith("/api/vision/v1/candidate-queue/entries/") and path.endswith(
+                "/remove"
+            ):
+                queue_entry_id = urllib.parse.unquote(
+                    path[len("/api/vision/v1/candidate-queue/entries/") : -len("/remove")]
+                )
+                if queue_entry_id and "/" not in queue_entry_id:
+                    self._handle_validated_candidate_queue_remove(queue_entry_id)
+                    return
             # --- end Vision API ---
 
             self._send_text("not found", status=404)
@@ -1413,6 +1469,93 @@ def build_workbench_handler(
                 },
                 status=status,
             )
+
+        @staticmethod
+        def _validated_candidate_queue_safety() -> dict[str, Any]:
+            return {
+                "identity_reference_only": True,
+                "candidate_values_embedded": False,
+                "approved_for_fill": False,
+                "approved_for_submit": False,
+                "submitted": False,
+                "webfill_authorized": False,
+                "auto_confirm": False,
+                "auto_submit": False,
+            }
+
+        def _send_validated_candidate_queue_error(self, exc: Exception) -> None:
+            from betguard.vision.candidate_authority import CandidateAuthorityError
+            from betguard.vision.validated_candidate_queue import (
+                ValidatedCandidateQueueError,
+            )
+
+            if isinstance(exc, (ValidatedCandidateQueueError, CandidateAuthorityError)):
+                code = exc.code
+                message = exc.message
+                status = exc.http_status
+            else:
+                code = "QUEUE_INTERNAL"
+                message = "validated Candidate queue operation failed"
+                status = 500
+            self._send_json(
+                {
+                    "ok": False,
+                    "code": code,
+                    "error": {"code": code, "message": message},
+                    "safety": self._validated_candidate_queue_safety(),
+                },
+                status=status,
+            )
+
+        def _require_exact_queue_json_fields(
+            self, data: Any, *, required: set[str]
+        ) -> bool:
+            if not isinstance(data, dict) or set(data) != required:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "code": "QUEUE_REQUEST_INVALID",
+                        "error": {
+                            "code": "QUEUE_REQUEST_INVALID",
+                            "message": "request accepts only the versioned queue identity fields",
+                        },
+                        "safety": self._validated_candidate_queue_safety(),
+                    },
+                    status=400,
+                )
+                return False
+            return True
+
+        def _reject_validated_queue_legacy_interop(self, data: Any) -> bool:
+            """Keep Gate 3B Candidate/Queue identities out of legacy fill routes."""
+
+            if not isinstance(data, dict):
+                return False
+            manual_id = str(data.get("manual_candidate_id") or "").strip().lower()
+            queue_path = str(data.get("queue_path") or "").replace("\\", "/").lower()
+            protected_identity = manual_id.startswith(("vc-", "vcq-", "vq-"))
+            protected_path = "validated-candidate-queue-v1" in queue_path
+            if not protected_identity and not protected_path:
+                return False
+            code = "LEGACY_QUEUE_INTEROP_FORBIDDEN"
+            self._send_json(
+                {
+                    "ok": False,
+                    "code": code,
+                    "error": {
+                        "code": code,
+                        "message": (
+                            "validated Candidate identities cannot enter legacy "
+                            "assist-fill or manual-candidate routes"
+                        ),
+                    },
+                    "auto_confirm": False,
+                    "auto_submit": False,
+                    "webfill_called": False,
+                },
+                status=400,
+            )
+            return True
 
         def _require_exact_json_fields(
             self,
@@ -1573,6 +1716,237 @@ def build_workbench_handler(
                 status=201,
             )
 
+        def _handle_validated_candidate_queue_list(self) -> None:
+            try:
+                entries = _get_validated_candidate_queue_store().list_entries()
+            except Exception as exc:
+                self._send_validated_candidate_queue_error(exc)
+                return
+            self._send_json(
+                {
+                    "ok": True,
+                    "entries": entries,
+                    "safety": self._validated_candidate_queue_safety(),
+                }
+            )
+
+        def _handle_validated_candidate_queue_enqueue(self) -> None:
+            data = self._read_json_body()
+            required = {
+                "candidate_id",
+                "expected_candidate_revision",
+                "expected_content_hash",
+                "human_enqueue_action_id",
+                "idempotency_key",
+            }
+            if data is None or not self._require_exact_queue_json_fields(
+                data, required=required
+            ):
+                return
+            actor = "assist-panel-human"
+            try:
+                from betguard.vision.validated_candidate_queue import (
+                    ValidatedCandidateQueueError,
+                )
+
+                binding = _VALIDATED_QUEUE_WEB_ACTIONS.get(
+                    str(data["human_enqueue_action_id"])
+                )
+                exact_binding = binding is not None and all(
+                    (
+                        binding.get("kind") == "enqueue",
+                        binding.get("candidate_id") == data["candidate_id"],
+                        binding.get("candidate_revision")
+                        == data["expected_candidate_revision"],
+                        binding.get("canonical_content_hash")
+                        == data["expected_content_hash"],
+                        binding.get("idempotency_key") == data["idempotency_key"],
+                    )
+                )
+                if not exact_binding:
+                    raise ValidatedCandidateQueueError(
+                        "EXPLICIT_HUMAN_ENQUEUE_REQUIRED",
+                        "enqueue requires an exact server-bound human action",
+                        403,
+                    )
+                store = _get_validated_candidate_queue_store()
+                result = store.enqueue(
+                    data,
+                    authenticated_actor=actor,
+                    interactive_session_id=binding["interactive_session_id"],
+                )
+            except Exception as exc:
+                self._send_validated_candidate_queue_error(exc)
+                return
+            self._send_json(
+                {
+                    "ok": True,
+                    **result,
+                    "safety": self._validated_candidate_queue_safety(),
+                },
+                status=201,
+            )
+
+        def _handle_validated_candidate_queue_enqueue_action(self) -> None:
+            data = self._read_json_body()
+            required = {
+                "candidate_id",
+                "expected_candidate_revision",
+                "expected_content_hash",
+            }
+            if data is None or not self._require_exact_queue_json_fields(
+                data, required=required
+            ):
+                return
+            import uuid
+
+            actor = "assist-panel-human"
+            interactive_session_id = f"assist-panel-{uuid.uuid4().hex}"
+            idempotency_key = f"qik-{uuid.uuid4().hex}"
+            try:
+                action = _get_validated_candidate_queue_store().bind_human_enqueue_action(
+                    authenticated_actor=actor,
+                    interactive_session_id=interactive_session_id,
+                    candidate_id=data["candidate_id"],
+                    candidate_revision=data["expected_candidate_revision"],
+                    canonical_content_hash=data["expected_content_hash"],
+                    idempotency_key=idempotency_key,
+                )
+                action_id = action["action_id"]
+                _VALIDATED_QUEUE_WEB_ACTIONS[action_id] = {
+                    "kind": "enqueue",
+                    "interactive_session_id": interactive_session_id,
+                    "idempotency_key": idempotency_key,
+                    "candidate_id": data["candidate_id"],
+                    "candidate_revision": data["expected_candidate_revision"],
+                    "canonical_content_hash": data["expected_content_hash"],
+                }
+            except Exception as exc:
+                self._send_validated_candidate_queue_error(exc)
+                return
+            self._send_json(
+                {
+                    "ok": True,
+                    "human_enqueue_action_id": action_id,
+                    "idempotency_key": idempotency_key,
+                    "safety": self._validated_candidate_queue_safety(),
+                },
+                status=201,
+            )
+
+        def _handle_validated_candidate_queue_remove(
+            self, queue_entry_id: str
+        ) -> None:
+            data = self._read_json_body()
+            if data is None or not self._require_exact_queue_json_fields(
+                data, required={"human_remove_action_id", "idempotency_key"}
+            ):
+                return
+            actor = "assist-panel-human"
+            try:
+                from betguard.vision.validated_candidate_queue import (
+                    ValidatedCandidateQueueError,
+                )
+
+                binding = _VALIDATED_QUEUE_WEB_ACTIONS.get(
+                    str(data["human_remove_action_id"])
+                )
+                if not (
+                    binding is not None
+                    and binding.get("kind") == "remove"
+                    and binding.get("queue_entry_id") == queue_entry_id
+                    and binding.get("idempotency_key") == data["idempotency_key"]
+                ):
+                    raise ValidatedCandidateQueueError(
+                        "EXPLICIT_HUMAN_REMOVE_REQUIRED",
+                        "removal requires an exact server-bound human action",
+                        403,
+                    )
+                store = _get_validated_candidate_queue_store()
+                result = store.remove(
+                    {
+                        "queue_entry_id": queue_entry_id,
+                        "human_remove_action_id": data["human_remove_action_id"],
+                        "idempotency_key": data["idempotency_key"],
+                    },
+                    authenticated_actor=actor,
+                    interactive_session_id=binding["interactive_session_id"],
+                )
+            except Exception as exc:
+                self._send_validated_candidate_queue_error(exc)
+                return
+            self._send_json(
+                {
+                    "ok": True,
+                    **result,
+                    "safety": self._validated_candidate_queue_safety(),
+                }
+            )
+
+        def _handle_validated_candidate_queue_remove_action(
+            self, queue_entry_id: str
+        ) -> None:
+            data = self._read_json_body()
+            if data is None or not self._require_exact_queue_json_fields(
+                data, required=set()
+            ):
+                return
+            import uuid
+
+            actor = "assist-panel-human"
+            interactive_session_id = f"assist-panel-{uuid.uuid4().hex}"
+            idempotency_key = f"qik-{uuid.uuid4().hex}"
+            try:
+                action = _get_validated_candidate_queue_store().bind_human_remove_action(
+                    authenticated_actor=actor,
+                    interactive_session_id=interactive_session_id,
+                    queue_entry_id=queue_entry_id,
+                    idempotency_key=idempotency_key,
+                )
+                action_id = action["action_id"]
+                _VALIDATED_QUEUE_WEB_ACTIONS[action_id] = {
+                    "kind": "remove",
+                    "interactive_session_id": interactive_session_id,
+                    "idempotency_key": idempotency_key,
+                    "queue_entry_id": queue_entry_id,
+                }
+            except Exception as exc:
+                self._send_validated_candidate_queue_error(exc)
+                return
+            self._send_json(
+                {
+                    "ok": True,
+                    "human_remove_action_id": action_id,
+                    "idempotency_key": idempotency_key,
+                    "safety": self._validated_candidate_queue_safety(),
+                },
+                status=201,
+            )
+
+        def _handle_validated_candidate_queue_prepare_next(self) -> None:
+            data = self._read_json_body()
+            if data is None or not self._require_exact_queue_json_fields(
+                data, required=set()
+            ):
+                return
+            import uuid
+
+            try:
+                prepared = _get_validated_candidate_queue_store().prepare_next(
+                    prepare_action_id=f"qpa-{uuid.uuid4().hex}"
+                )
+            except Exception as exc:
+                self._send_validated_candidate_queue_error(exc)
+                return
+            self._send_json(
+                {
+                    "ok": True,
+                    "prepared": prepared,
+                    "read_only": True,
+                    "safety": self._validated_candidate_queue_safety(),
+                }
+            )
+
         def _handle_vision_review_confirmation(
             self, review_session_id: str, *, confirmed: bool
         ) -> None:
@@ -1667,6 +2041,10 @@ def build_workbench_handler(
             Supports both queue-based candidates (queue_path + item_index) and
             manually corrected candidates (manual_candidate_id).
             """
+            data = self._read_json_body()
+            if data is None or self._reject_validated_queue_legacy_interop(data):
+                return
+
             # License gate
             import os
             from betguard.license import is_license_active
@@ -1683,7 +2061,7 @@ def build_workbench_handler(
                 return
 
             try:
-                self._assist_fill_start_inner()
+                self._assist_fill_start_inner(data)
             except Exception as exc:
                 self._send_json({
                     "ok": False,
@@ -1699,9 +2077,10 @@ def build_workbench_handler(
                 except Exception:
                     pass
 
-        def _assist_fill_start_inner(self) -> None:
+        def _assist_fill_start_inner(self, data: dict[str, Any] | None = None) -> None:
             """Inner implementation — wrapped by try/except in caller."""
-            data = self._read_json_body()
+            if data is None:
+                data = self._read_json_body()
             if data is None:
                 return
 
@@ -2033,6 +2412,8 @@ def build_workbench_handler(
             import json as _json, time as _time
             data = self._read_json_body()
             if not data:
+                return
+            if self._reject_validated_queue_legacy_interop(data):
                 return
             queue_path = data.get("queue_path", "")
             item_index = data.get("item_index")
@@ -2682,6 +3063,8 @@ window.assistPanelFill = assistPanelFill;
             from datetime import datetime, timezone
             data = self._read_json_body()
             if data is None:
+                return
+            if self._reject_validated_queue_legacy_interop(data):
                 return
             manual_id = (data.get("manual_candidate_id") or "").strip()
             queue_path_str = (data.get("queue_path") or "").strip()

@@ -973,7 +973,12 @@ def render_vision_ui_section() -> str:
     var results = document.getElementById("vision-results");
     if (results) results.style.display = "block";
     _qwenRememberReviewSession(qwenReviewSession.review_session_id);
+    if (candidate) {
+      qwenReviewSession.server_queue_entry = null;
+      qwenReviewSession.server_queue_error = null;
+    }
     _renderQwenReviewSession();
+    if (candidate) _qwenRefreshCandidateQueue(candidate);
   }
 
   function _qwenReloadPersistedReview() {
@@ -2186,8 +2191,146 @@ def render_vision_ui_section() -> str:
       '｜revision=' + esc(candidate.revision || "-") +
       '｜content hash=' + esc(String(candidate.canonical_content_hash || "").slice(0, 12)) +
       '｜CURRENT</div>' +
-      '<div class="candidate-boundary-safety" style="font-size:11px;color:#475569">candidate_only=true；approved_for_fill=false；queue=0；external fill=0；auto_confirm=false；auto_submit=false</div>';
+      '<div class="candidate-boundary-safety" style="font-size:11px;color:#475569">candidate_only=true；approved_for_fill=false；external fill=0；auto_confirm=false；auto_submit=false</div>' +
+      _qwenCandidateQueueHtml();
   }
+
+  function _qwenCandidateQueueHtml() {
+    var record = qwenReviewSession && qwenReviewSession.server_queue_entry;
+    var queueError = qwenReviewSession && qwenReviewSession.server_queue_error;
+    if (queueError) {
+      return '<div id="qwen-candidate-queue-error" data-error-code="' + esc(queueError.code || "QUEUE_ERROR") + '" style="margin-top:7px;color:#991b1b">待處理操作失敗：' + esc(queueError.message || queueError.code || "unknown") + '</div>' +
+        '<button type="button" id="qwen-candidate-enqueue" onclick="qwenEnqueueCandidate()">加入待處理</button>';
+    }
+    if (!record) {
+      return '<div id="qwen-candidate-queue-status" data-queue-state="NOT_QUEUED" style="margin-top:7px;color:#475569">尚未加入待處理；建立 Candidate 不會自動加入。</div>' +
+        '<button type="button" id="qwen-candidate-enqueue" onclick="qwenEnqueueCandidate()">加入待處理</button>';
+    }
+    var entry = record.queue_entry || record;
+    var state = String(record.state || entry.state_at_creation || "QUEUED");
+    var html = '<div id="qwen-candidate-queue-status" data-queue-state="' + esc(state) + '" style="margin-top:7px;color:#065f46">待處理狀態=' + esc(state) +
+      '｜entry ID=' + esc(entry.queue_entry_id || "-") +
+      '｜sequence=' + esc(entry.enqueue_sequence || "-") + '</div>';
+    if (state === "QUEUED" || state === "BLOCKED") {
+      html += '<button type="button" id="qwen-candidate-remove" onclick="qwenRemoveCandidateQueueEntry()">移除待處理</button>';
+    }
+    return html + '<div class="qwen-candidate-queue-safety" style="font-size:11px;color:#475569">只保存 Candidate identity；不核准填入、不送出、不自動執行。</div>';
+  }
+
+  function _qwenCurrentCandidate() {
+    if (!qwenReviewSession || !qwenReviewSession.server_candidate) return null;
+    var wrapper = qwenReviewSession.server_candidate;
+    var state = wrapper && wrapper.state ? String(wrapper.state) : "CURRENT";
+    if (state !== "CURRENT") return null;
+    return wrapper && wrapper.candidate ? wrapper.candidate : wrapper;
+  }
+
+  function _qwenQueueError(data) {
+    if (!qwenReviewSession) return;
+    qwenReviewSession.server_queue_error = {
+      code: _qwenAuthorityErrorCode(data),
+      message: _qwenAuthorityErrorMessage(data)
+    };
+    _renderQwenCompletion(qwenReviewSession.server_candidate);
+  }
+
+  function _qwenRefreshCandidateQueue(candidateValue) {
+    if (!qwenReviewSession) return Promise.resolve(null);
+    var state = candidateValue && candidateValue.state ? String(candidateValue.state) : "CURRENT";
+    var candidate = candidateValue && candidateValue.candidate ? candidateValue.candidate : candidateValue;
+    if (state !== "CURRENT" || !candidate || !candidate.candidate_id) {
+      qwenReviewSession.server_queue_entry = null;
+      return Promise.resolve(null);
+    }
+    var reviewSessionId = qwenReviewSession.review_session_id;
+    return fetch("/api/vision/v1/candidate-queue").then(function(response) { return response.json(); }).then(function(data) {
+      if (!data.ok) throw data;
+      if (!qwenReviewSession || qwenReviewSession.review_session_id !== reviewSessionId) return null;
+      var matches = (Array.isArray(data.entries) ? data.entries : []).filter(function(record) {
+        var entry = record && record.queue_entry ? record.queue_entry : record;
+        var identity = entry && entry.candidate_identity || {};
+        return identity.candidate_id === candidate.candidate_id &&
+          Number(identity.candidate_revision) === Number(candidate.revision) &&
+          identity.canonical_content_hash === candidate.canonical_content_hash;
+      });
+      qwenReviewSession.server_queue_entry = matches.length ? matches[0] : null;
+      qwenReviewSession.server_queue_error = null;
+      _renderQwenCompletion(qwenReviewSession.server_candidate);
+      return qwenReviewSession.server_queue_entry;
+    }).catch(function(data) {
+      _qwenQueueError(data);
+      return null;
+    });
+  }
+
+  window.qwenEnqueueCandidate = function() {
+    var candidate = _qwenCurrentCandidate();
+    if (!candidate) return Promise.resolve(null);
+    var button = document.getElementById("qwen-candidate-enqueue");
+    if (button) button.disabled = true;
+    var identity = {
+      candidate_id: candidate.candidate_id,
+      expected_candidate_revision: candidate.revision,
+      expected_content_hash: candidate.canonical_content_hash
+    };
+    return fetch("/api/vision/v1/candidate-queue/enqueue-actions", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(identity)
+    }).then(function(response) { return response.json(); }).then(function(action) {
+      if (!action.ok) throw action;
+      return fetch("/api/vision/v1/candidate-queue/enqueue", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          candidate_id: identity.candidate_id,
+          expected_candidate_revision: identity.expected_candidate_revision,
+          expected_content_hash: identity.expected_content_hash,
+          human_enqueue_action_id: action.human_enqueue_action_id,
+          idempotency_key: action.idempotency_key
+        })
+      });
+    }).then(function(response) { return response.json(); }).then(function(data) {
+      if (!data.ok) throw data;
+      qwenReviewSession.server_queue_entry = {queue_entry: data.queue_entry, state: data.state || "QUEUED"};
+      qwenReviewSession.server_queue_error = null;
+      _renderQwenCompletion(qwenReviewSession.server_candidate);
+      return data;
+    }).catch(function(data) {
+      _qwenQueueError(data);
+      return null;
+    });
+  };
+
+  window.qwenRemoveCandidateQueueEntry = function() {
+    if (!qwenReviewSession || !qwenReviewSession.server_queue_entry) return Promise.resolve(null);
+    var record = qwenReviewSession.server_queue_entry;
+    var entry = record.queue_entry || record;
+    if (!entry.queue_entry_id || ["QUEUED", "BLOCKED"].indexOf(String(record.state || "QUEUED")) < 0) return Promise.resolve(null);
+    var actionUrl = "/api/vision/v1/candidate-queue/entries/" + encodeURIComponent(entry.queue_entry_id) + "/remove-actions";
+    return fetch(actionUrl, {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({})
+    }).then(function(response) { return response.json(); }).then(function(action) {
+      if (!action.ok) throw action;
+      return fetch("/api/vision/v1/candidate-queue/entries/" + encodeURIComponent(entry.queue_entry_id) + "/remove", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          human_remove_action_id: action.human_remove_action_id,
+          idempotency_key: action.idempotency_key
+        })
+      });
+    }).then(function(response) { return response.json(); }).then(function(data) {
+      if (!data.ok) throw data;
+      qwenReviewSession.server_queue_entry = {queue_entry: entry, state: data.state || "REMOVED"};
+      qwenReviewSession.server_queue_error = null;
+      _renderQwenCompletion(qwenReviewSession.server_candidate);
+      return data;
+    }).catch(function(data) {
+      _qwenQueueError(data);
+      return null;
+    });
+  };
 
   window.qwenCompleteReview = function() {
     if (!qwenReviewSession || qwenReviewSession.server_state !== "ready") return;
@@ -2214,6 +2357,8 @@ def render_vision_ui_section() -> str:
         candidate: data.candidate,
         state: "CURRENT"
       };
+      qwenReviewSession.server_queue_entry = null;
+      qwenReviewSession.server_queue_error = null;
       qwenReviewSession.candidate_preview = null;
       qwenReviewSession.boundary_signal = {
         status: "candidate_created",

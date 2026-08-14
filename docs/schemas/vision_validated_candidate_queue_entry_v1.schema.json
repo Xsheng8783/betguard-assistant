@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://betguard.local/schemas/vision-validated-candidate-queue-entry-v1.json",
+  "title": "Betguard Validated Candidate Queue Entry V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "queue_entry_id",
+    "enqueue_sequence",
+    "candidate_identity",
+    "enqueue_authority",
+    "state_at_creation",
+    "created_at",
+    "entry_integrity_hash",
+    "safety"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "vision-validated-candidate-queue-entry-v1"
+    },
+    "queue_entry_id": {
+      "type": "string",
+      "pattern": "^vcq-[a-f0-9]{32}$"
+    },
+    "enqueue_sequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "candidate_identity": {
+      "$ref": "#/$defs/candidateIdentity"
+    },
+    "enqueue_authority": {
+      "$ref": "#/$defs/enqueueAuthority"
+    },
+    "state_at_creation": {
+      "const": "QUEUED"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "entry_integrity_hash": {
+      "$ref": "#/$defs/hash"
+    },
+    "safety": {
+      "$ref": "#/$defs/safety"
+    }
+  },
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "candidateIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_id",
+        "candidate_revision",
+        "canonical_content_hash"
+      ],
+      "properties": {
+        "candidate_id": {
+          "type": "string",
+          "pattern": "^vc-[a-f0-9]{32}$"
+        },
+        "candidate_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "canonical_content_hash": {
+          "$ref": "#/$defs/hash"
+        }
+      }
+    },
+    "enqueueAuthority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "human_enqueue_action_id",
+        "requested_by",
+        "explicit_human_enqueue",
+        "candidate_validation_schema_version",
+        "candidate_validation_status",
+        "validated_at"
+      ],
+      "properties": {
+        "human_enqueue_action_id": {
+          "type": "string",
+          "pattern": "^hqe-[a-f0-9]{32}$"
+        },
+        "requested_by": {
+          "type": "string",
+          "minLength": 1
+        },
+        "explicit_human_enqueue": {
+          "const": true
+        },
+        "candidate_validation_schema_version": {
+          "const": "vision-candidate-consumption-validation-v1"
+        },
+        "candidate_validation_status": {
+          "const": "VALID_CURRENT"
+        },
+        "validated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity_reference_only",
+        "candidate_values_embedded",
+        "approved_for_fill",
+        "submitted",
+        "webfill_authorized",
+        "auto_confirm",
+        "auto_submit",
+        "completed_means_submitted",
+        "legacy_queue_compatible"
+      ],
+      "properties": {
+        "identity_reference_only": {
+          "const": true
+        },
+        "candidate_values_embedded": {
+          "const": false
+        },
+        "approved_for_fill": {
+          "const": false
+        },
+        "submitted": {
+          "const": false
+        },
+        "webfill_authorized": {
+          "const": false
+        },
+        "auto_confirm": {
+          "const": false
+        },
+        "auto_submit": {
+          "const": false
+        },
+        "completed_means_submitted": {
+          "const": false
+        },
+        "legacy_queue_compatible": {
+          "const": false
+        }
+      }
+    }
+  }
+}
