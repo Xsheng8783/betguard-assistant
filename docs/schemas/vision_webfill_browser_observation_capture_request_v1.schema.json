@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://betguard.local/schemas/vision-webfill-browser-observation-capture-request-v1.json",
+  "title": "Betguard Browser Observation Capture Request V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "capture_action_id",
+    "browser_connection_id",
+    "target_tab_handle",
+    "target_frame_handle",
+    "expected_site_id",
+    "expected_game",
+    "adapter_target_profile_id",
+    "adapter_target_profile_version",
+    "expected_adapter_target_profile_integrity_hash",
+    "logical_target_profile_id",
+    "logical_target_profile_version",
+    "expected_logical_target_profile_integrity_hash",
+    "expected_origin_path_policy_hash",
+    "expected_page_form_contract_hash",
+    "expected_navigation_epoch",
+    "capture_idempotency_key"
+  ],
+  "properties": {
+    "schema_version": {"const": "vision-webfill-browser-observation-capture-request-v1"},
+    "capture_action_id": {"type": "string", "pattern": "^vwoca-[a-f0-9]{32}$"},
+    "browser_connection_id": {"type": "string", "pattern": "^vwbc-[a-f0-9]{32}$"},
+    "target_tab_handle": {"type": "string", "pattern": "^vwth-[a-f0-9]{32}$"},
+    "target_frame_handle": {"type": "string", "pattern": "^vwfh-[a-f0-9]{32}$"},
+    "expected_site_id": {"type": "string", "pattern": "^site-[a-z0-9][a-z0-9._-]{2,63}$"},
+    "expected_game": {"type": "string", "minLength": 1, "maxLength": 64},
+    "adapter_target_profile_id": {"type": "string", "pattern": "^watp-[a-z0-9][a-z0-9._-]{2,63}$"},
+    "adapter_target_profile_version": {"type": "integer", "minimum": 1},
+    "expected_adapter_target_profile_integrity_hash": {"$ref": "#/$defs/hash"},
+    "logical_target_profile_id": {"type": "string", "pattern": "^wtp-[a-z0-9][a-z0-9._-]{2,63}$"},
+    "logical_target_profile_version": {"type": "integer", "minimum": 1},
+    "expected_logical_target_profile_integrity_hash": {"$ref": "#/$defs/hash"},
+    "expected_origin_path_policy_hash": {"$ref": "#/$defs/hash"},
+    "expected_page_form_contract_hash": {"$ref": "#/$defs/hash"},
+    "expected_navigation_epoch": {"type": "integer", "minimum": 1},
+    "capture_idempotency_key": {"type": "string", "pattern": "^vwoci-[a-f0-9]{32,128}$"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}

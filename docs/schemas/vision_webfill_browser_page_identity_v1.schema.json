@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://betguard.local/schemas/vision-webfill-browser-page-identity-v1.json",
+  "title": "Betguard Safe Browser Page Identity V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "browser_runtime_id",
+    "browser_session_id",
+    "browser_connection_id",
+    "connection_generation",
+    "tab_instance_id",
+    "frame_instance_id",
+    "document_instance_id",
+    "page_instance_id",
+    "navigation_epoch",
+    "observation_generation",
+    "dom_mutation_generation",
+    "site_id",
+    "game",
+    "origin_identity_hash",
+    "normalized_path_identity_hash",
+    "captured_at",
+    "identity_integrity_hash",
+    "safety"
+  ],
+  "properties": {
+    "schema_version": {"const": "vision-webfill-browser-page-identity-v1"},
+    "browser_runtime_id": {"type": "string", "pattern": "^vwbr-[a-f0-9]{32}$"},
+    "browser_session_id": {"type": "string", "pattern": "^vwbs-[a-f0-9]{32}$"},
+    "browser_connection_id": {"type": "string", "pattern": "^vwbc-[a-f0-9]{32}$"},
+    "connection_generation": {"type": "integer", "minimum": 1},
+    "tab_instance_id": {"type": "string", "pattern": "^vwti-[a-f0-9]{32}$"},
+    "frame_instance_id": {"type": "string", "pattern": "^vwfi-[a-f0-9]{32}$"},
+    "document_instance_id": {"type": "string", "pattern": "^vwdi-[a-f0-9]{32}$"},
+    "page_instance_id": {"type": "string", "pattern": "^vwpi-[a-f0-9]{32}$"},
+    "navigation_epoch": {"type": "integer", "minimum": 1},
+    "observation_generation": {"type": "integer", "minimum": 1},
+    "dom_mutation_generation": {"type": "integer", "minimum": 0},
+    "site_id": {"type": "string", "pattern": "^site-[a-z0-9][a-z0-9._-]{2,63}$"},
+    "game": {"type": "string", "minLength": 1, "maxLength": 64},
+    "origin_identity_hash": {"$ref": "#/$defs/hash"},
+    "normalized_path_identity_hash": {"$ref": "#/$defs/hash"},
+    "captured_at": {"type": "string", "format": "date-time"},
+    "identity_integrity_hash": {"$ref": "#/$defs/hash"},
+    "safety": {"$ref": "#/$defs/safety"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "opaque_server_aliases_only",
+        "raw_browser_target_id_persisted",
+        "raw_connection_token_persisted",
+        "raw_url_persisted",
+        "query_or_fragment_persisted",
+        "cookie_or_storage_identity_persisted",
+        "credential_persisted"
+      ],
+      "properties": {
+        "opaque_server_aliases_only": {"const": true},
+        "raw_browser_target_id_persisted": {"const": false},
+        "raw_connection_token_persisted": {"const": false},
+        "raw_url_persisted": {"const": false},
+        "query_or_fragment_persisted": {"const": false},
+        "cookie_or_storage_identity_persisted": {"const": false},
+        "credential_persisted": {"const": false}
+      }
+    }
+  }
+}

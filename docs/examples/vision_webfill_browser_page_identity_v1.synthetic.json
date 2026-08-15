@@ -1,0 +1,29 @@
+{
+  "schema_version": "vision-webfill-browser-page-identity-v1",
+  "browser_runtime_id": "vwbr-10101010101010101010101010101010",
+  "browser_session_id": "vwbs-20202020202020202020202020202020",
+  "browser_connection_id": "vwbc-22222222222222222222222222222222",
+  "connection_generation": 3,
+  "tab_instance_id": "vwti-30303030303030303030303030303030",
+  "frame_instance_id": "vwfi-40404040404040404040404040404040",
+  "document_instance_id": "vwdi-50505050505050505050505050505050",
+  "page_instance_id": "vwpi-60606060606060606060606060606060",
+  "navigation_epoch": 7,
+  "observation_generation": 2,
+  "dom_mutation_generation": 19,
+  "site_id": "site-synthetic-539",
+  "game": "539",
+  "origin_identity_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "normalized_path_identity_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "captured_at": "2026-08-15T10:00:02+08:00",
+  "identity_integrity_hash": "84fe525aa4b75d0f5c0a14252dd8d227cfa709ff2f12edade81cfd407948252f",
+  "safety": {
+    "opaque_server_aliases_only": true,
+    "raw_browser_target_id_persisted": false,
+    "raw_connection_token_persisted": false,
+    "raw_url_persisted": false,
+    "query_or_fragment_persisted": false,
+    "cookie_or_storage_identity_persisted": false,
+    "credential_persisted": false
+  }
+}

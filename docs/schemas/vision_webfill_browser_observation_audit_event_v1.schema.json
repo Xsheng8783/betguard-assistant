@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://betguard.local/schemas/vision-webfill-browser-observation-audit-event-v1.json",
+  "title": "Betguard Safe Browser Observation Audit Event V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "capture_id",
+    "event_sequence",
+    "event_type",
+    "occurred_at",
+    "actor_kind",
+    "authority_binding_hash",
+    "browser_page_identity_hash",
+    "observation_reference",
+    "reason_code",
+    "safe_context_hashes",
+    "event_integrity_hash",
+    "safety"
+  ],
+  "properties": {
+    "schema_version": {"const": "vision-webfill-browser-observation-audit-event-v1"},
+    "event_id": {"type": "string", "pattern": "^vwocae-[a-f0-9]{32}$"},
+    "capture_id": {"type": "string", "pattern": "^vwoc-[a-f0-9]{32}$"},
+    "event_sequence": {"type": "integer", "minimum": 1, "maximum": 4},
+    "event_type": {"enum": ["CAPTURE_AUTHORIZED", "CAPTURE_STARTED", "CAPTURE_COMMITTED", "CAPTURE_FAILED", "OBSERVATION_STALE", "RECOVERY_REQUIRED"]},
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "actor_kind": {"enum": ["TRUSTED_SERVER", "TRUSTED_ADAPTER", "RECOVERY"]},
+    "authority_binding_hash": {"$ref": "#/$defs/hash"},
+    "browser_page_identity_hash": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+    "observation_reference": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/observationReference"}
+      ]
+    },
+    "reason_code": {
+      "type": ["string", "null"],
+      "enum": [
+        null,
+        "AUTHORITY_BLOCKED",
+        "WRONG_TARGET",
+        "WRONG_PAGE",
+        "WRONG_GAME",
+        "PROFILE_MISMATCH",
+        "NAVIGATION_RACE",
+        "DOM_UNSTABLE",
+        "SELECTOR_MISSING",
+        "SELECTOR_AMBIGUOUS",
+        "UNSUPPORTED_FRAME",
+        "UNSUPPORTED_CONTROL",
+        "SENSITIVE_FIELD",
+        "OBSERVATION_STALE",
+        "CAPTURE_TIMEOUT",
+        "HASH_MISMATCH",
+        "TRANSACTION_RECOVERY_REQUIRED"
+      ]
+    },
+    "safe_context_hashes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/contextHash"}
+    },
+    "event_integrity_hash": {"$ref": "#/$defs/hash"},
+    "safety": {"$ref": "#/$defs/safety"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"event_type": {"enum": ["CAPTURE_AUTHORIZED", "CAPTURE_STARTED", "CAPTURE_COMMITTED"]}}},
+      "then": {"properties": {"reason_code": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"event_type": {"enum": ["CAPTURE_FAILED", "OBSERVATION_STALE", "RECOVERY_REQUIRED"]}}},
+      "then": {"properties": {"reason_code": {"type": "string"}}}
+    },
+    {
+      "if": {"properties": {"event_type": {"const": "CAPTURE_COMMITTED"}}},
+      "then": {"properties": {"observation_reference": {"$ref": "#/$defs/observationReference"}, "browser_page_identity_hash": {"type": "string"}}}
+    }
+  ],
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "observationReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dom_observation_id", "observation_hash", "page_fingerprint", "page_instance_id", "navigation_epoch"],
+      "properties": {
+        "dom_observation_id": {"type": "string", "pattern": "^vwdo-[a-f0-9]{32}$"},
+        "observation_hash": {"$ref": "#/$defs/hash"},
+        "page_fingerprint": {"$ref": "#/$defs/hash"},
+        "page_instance_id": {"type": "string", "pattern": "^vwpi-[a-f0-9]{32}$"},
+        "navigation_epoch": {"type": "integer", "minimum": 1}
+      }
+    },
+    "contextHash": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["context_kind", "context_hash"],
+      "properties": {
+        "context_kind": {"enum": ["CAPTURE_ACTION", "TARGET_ALIAS", "PROFILE", "CONTRACT", "TRANSACTION", "OBSERVATION"]},
+        "context_hash": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value_free", "html_free", "url_free", "selector_free", "cookie_storage_free",
+        "credential_free", "browser_token_free", "screenshot_free", "fixed_error_codes_only"
+      ],
+      "properties": {
+        "value_free": {"const": true},
+        "html_free": {"const": true},
+        "url_free": {"const": true},
+        "selector_free": {"const": true},
+        "cookie_storage_free": {"const": true},
+        "credential_free": {"const": true},
+        "browser_token_free": {"const": true},
+        "screenshot_free": {"const": true},
+        "fixed_error_codes_only": {"const": true}
+      }
+    }
+  }
+}

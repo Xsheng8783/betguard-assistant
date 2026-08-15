@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://betguard.local/schemas/vision-webfill-mapping-preview-request-v1.json",
+  "title": "Betguard Webfill Mapping Preview Request V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "prepare_id", "expected_prepare_record_integrity_hash",
+    "expected_deterministic_plan_hash", "expected_authority_binding_hash",
+    "claim_id", "claim_generation", "claim_session_id", "fencing_token",
+    "adapter_target_profile_id", "adapter_target_profile_version",
+    "expected_adapter_target_profile_integrity_hash", "dom_observation_id",
+    "expected_observation_hash", "expected_page_fingerprint",
+    "expected_page_instance_id", "expected_navigation_epoch", "idempotency_key"
+  ],
+  "properties": {
+    "schema_version": {"const": "vision-webfill-mapping-preview-request-v1"},
+    "prepare_id": {"type": "string", "pattern": "^vwp-[a-f0-9]{32}$"},
+    "expected_prepare_record_integrity_hash": {"$ref": "#/$defs/hash"},
+    "expected_deterministic_plan_hash": {"$ref": "#/$defs/hash"},
+    "expected_authority_binding_hash": {"$ref": "#/$defs/hash"},
+    "claim_id": {"type": "string", "pattern": "^vqc-[a-f0-9]{32}$"},
+    "claim_generation": {"type": "integer", "minimum": 1},
+    "claim_session_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "fencing_token": {"type": "string", "pattern": "^vqf-[a-f0-9]{64}$"},
+    "adapter_target_profile_id": {"$ref": "#/$defs/profileId"},
+    "adapter_target_profile_version": {"type": "integer", "minimum": 1},
+    "expected_adapter_target_profile_integrity_hash": {"$ref": "#/$defs/hash"},
+    "dom_observation_id": {"type": "string", "pattern": "^vwdo-[a-f0-9]{32}$"},
+    "expected_observation_hash": {"$ref": "#/$defs/hash"},
+    "expected_page_fingerprint": {"$ref": "#/$defs/hash"},
+    "expected_page_instance_id": {"type": "string", "pattern": "^vwpi-[a-f0-9]{32}$"},
+    "expected_navigation_epoch": {"type": "integer", "minimum": 1},
+    "idempotency_key": {"type": "string", "pattern": "^vwmi-[a-f0-9]{32,128}$"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "profileId": {"type": "string", "pattern": "^watp-[a-z0-9][a-z0-9._-]{2,63}$"}
+  }
+}

@@ -1,0 +1,93 @@
+{
+  "schema_version": "vision-webfill-dom-observation-v1",
+  "dom_observation_id": "vwdo-70707070707070707070707070707070",
+  "observed_at": "2026-08-15T10:00:02+08:00",
+  "page_instance_id": "vwpi-60606060606060606060606060606060",
+  "navigation_epoch": 7,
+  "page_identity": {
+    "site_id": "site-synthetic-539",
+    "game": "539",
+    "origin_identity_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "normalized_path_identity_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "structural_marker_hashes": [
+      "1111111111111111111111111111111111111111111111111111111111111111"
+    ]
+  },
+  "forms": [
+    {
+      "form_id": "vwform-110ce728b176834889bc49efad2dfb43",
+      "document_order": 1,
+      "method_category": "POST",
+      "structural_marker_hashes": [
+        "2222222222222222222222222222222222222222222222222222222222222222"
+      ],
+      "fields": [
+        {
+          "field_id": "vwf-4785d0a2103af4babb540f494d9faa3c",
+          "document_order": 1,
+          "field_identity_hash": "4785d0a2103af4babb540f494d9faa3ced15505bb5c68b98de17c5c34c402f0c",
+          "tag_name": "input",
+          "input_type": "text",
+          "label_text": "Synthetic number field",
+          "accessible_name": "Synthetic number field",
+          "selector_candidates": [
+            {
+              "selector_kind": "DATA_TESTID",
+              "selector_text": "synthetic-number-1",
+              "structural_only": true
+            }
+          ],
+          "structural_marker_hashes": [
+            "3333333333333333333333333333333333333333333333333333333333333333"
+          ],
+          "visible": true,
+          "disabled": false,
+          "readonly": false,
+          "occupancy": "EMPTY"
+        },
+        {
+          "field_id": "vwf-46ab87b7562d127f718f6b83cb8857aa",
+          "document_order": 2,
+          "field_identity_hash": "46ab87b7562d127f718f6b83cb8857aacd2220547f2f034db0cd77e3fb7a2a2c",
+          "tag_name": "input",
+          "input_type": "text",
+          "label_text": "Synthetic multiplier field",
+          "accessible_name": "Synthetic multiplier field",
+          "selector_candidates": [
+            {
+              "selector_kind": "DATA_TESTID",
+              "selector_text": "synthetic-multiplier-1",
+              "structural_only": true
+            }
+          ],
+          "structural_marker_hashes": [
+            "4444444444444444444444444444444444444444444444444444444444444444"
+          ],
+          "visible": true,
+          "disabled": false,
+          "readonly": false,
+          "occupancy": "UNKNOWN"
+        }
+      ],
+      "form_fingerprint": "c1d1731c5b30458fe13032c46814cf20d4057a8a58eec283ed827bd5053ec2a9"
+    }
+  ],
+  "page_fingerprint_algorithm": "sha256-canonical-dom-structure-v1",
+  "page_fingerprint": "866ff299ce63929611aaaabe671119733fe6bde411f216451cd7f2c3aa4af8af",
+  "observation_hash": "ee5ed77b23a77e29d0b746cac613d1a45e41c5721792c9689dc523fa084849ee",
+  "safety": {
+    "read_only_observation": true,
+    "occupancy_class_derived": true,
+    "raw_input_value_content_exposed": false,
+    "raw_input_value_content_persisted": false,
+    "query_or_fragment_persisted": false,
+    "cookies_or_storage_read": false,
+    "html_or_script_persisted": false,
+    "dom_mutation_performed": false,
+    "click_performed": false,
+    "typing_performed": false,
+    "events_dispatched": false,
+    "navigation_performed": false,
+    "submit_performed": false
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "schema_version": "vision-webfill-browser-observation-capture-request-v1",
+  "capture_action_id": "vwoca-11111111111111111111111111111111",
+  "browser_connection_id": "vwbc-22222222222222222222222222222222",
+  "target_tab_handle": "vwth-33333333333333333333333333333333",
+  "target_frame_handle": "vwfh-44444444444444444444444444444444",
+  "expected_site_id": "site-synthetic-539",
+  "expected_game": "539",
+  "adapter_target_profile_id": "watp-synthetic-539",
+  "adapter_target_profile_version": 1,
+  "expected_adapter_target_profile_integrity_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "logical_target_profile_id": "wtp-synthetic-539",
+  "logical_target_profile_version": 1,
+  "expected_logical_target_profile_integrity_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "expected_origin_path_policy_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "expected_page_form_contract_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "expected_navigation_epoch": 7,
+  "capture_idempotency_key": "vwoci-55555555555555555555555555555555"
+}

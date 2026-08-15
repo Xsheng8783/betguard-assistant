@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://betguard.local/schemas/vision-webfill-dom-observation-v1.json",
+  "title": "Betguard Read-Only DOM Observation V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "dom_observation_id", "observed_at", "page_instance_id",
+    "navigation_epoch", "page_identity", "forms", "page_fingerprint_algorithm",
+    "page_fingerprint", "observation_hash", "safety"
+  ],
+  "properties": {
+    "schema_version": {"const": "vision-webfill-dom-observation-v1"},
+    "dom_observation_id": {"type": "string", "pattern": "^vwdo-[a-f0-9]{32}$"},
+    "observed_at": {"type": "string", "format": "date-time"},
+    "page_instance_id": {"type": "string", "pattern": "^vwpi-[a-f0-9]{32}$"},
+    "navigation_epoch": {"type": "integer", "minimum": 1},
+    "page_identity": {"$ref": "#/$defs/pageIdentity"},
+    "forms": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/form"}},
+    "page_fingerprint_algorithm": {"const": "sha256-canonical-dom-structure-v1"},
+    "page_fingerprint": {"$ref": "#/$defs/hash"},
+    "observation_hash": {"$ref": "#/$defs/hash"},
+    "safety": {"$ref": "#/$defs/safety"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "pageIdentity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["site_id", "game", "origin_identity_hash", "normalized_path_identity_hash", "structural_marker_hashes"],
+      "properties": {
+        "site_id": {"type": "string", "pattern": "^site-[a-z0-9][a-z0-9._-]{2,63}$"},
+        "game": {"type": "string", "minLength": 1},
+        "origin_identity_hash": {"$ref": "#/$defs/hash"},
+        "normalized_path_identity_hash": {"$ref": "#/$defs/hash"},
+        "structural_marker_hashes": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/hash"}}
+      }
+    },
+    "selectorCandidate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["selector_kind", "selector_text", "structural_only"],
+      "properties": {
+        "selector_kind": {"enum": ["ID", "NAME", "DATA_TESTID", "CSS_STRUCTURAL"]},
+        "selector_text": {"type": "string", "minLength": 1, "maxLength": 512},
+        "structural_only": {"const": true}
+      }
+    },
+    "field": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "field_id", "document_order", "field_identity_hash", "tag_name", "input_type",
+        "label_text", "accessible_name", "selector_candidates", "structural_marker_hashes",
+        "visible", "disabled", "readonly", "occupancy"
+      ],
+      "properties": {
+        "field_id": {"type": "string", "pattern": "^vwf-[a-f0-9]{32}$"},
+        "document_order": {"type": "integer", "minimum": 1},
+        "field_identity_hash": {"$ref": "#/$defs/hash"},
+        "tag_name": {"enum": ["input", "select", "textarea", "button", "fieldset", "div"]},
+        "input_type": {"enum": ["text", "number", "radio", "checkbox", "select-one", "select-multiple", "button", "other"]},
+        "label_text": {"type": ["string", "null"], "maxLength": 256},
+        "accessible_name": {"type": ["string", "null"], "maxLength": 256},
+        "selector_candidates": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/selectorCandidate"}},
+        "structural_marker_hashes": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/hash"}},
+        "visible": {"type": "boolean"},
+        "disabled": {"type": "boolean"},
+        "readonly": {"type": "boolean"},
+        "occupancy": {"enum": ["EMPTY", "NONEMPTY", "UNKNOWN"]}
+      }
+    },
+    "form": {
+      "type": "object", "additionalProperties": false,
+      "required": ["form_id", "document_order", "method_category", "structural_marker_hashes", "fields", "form_fingerprint"],
+      "properties": {
+        "form_id": {"type": "string", "pattern": "^vwform-[a-f0-9]{32}$"},
+        "document_order": {"type": "integer", "minimum": 1},
+        "method_category": {"enum": ["GET", "POST", "DIALOG", "UNKNOWN"]},
+        "structural_marker_hashes": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/hash"}},
+        "fields": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/field"}},
+        "form_fingerprint": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "safety": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "read_only_observation", "occupancy_class_derived", "raw_input_value_content_exposed", "raw_input_value_content_persisted",
+        "query_or_fragment_persisted", "cookies_or_storage_read", "html_or_script_persisted",
+        "dom_mutation_performed", "click_performed", "typing_performed",
+        "events_dispatched", "navigation_performed", "submit_performed"
+      ],
+      "properties": {
+        "read_only_observation": {"const": true},
+        "occupancy_class_derived": {"const": true},
+        "raw_input_value_content_exposed": {"const": false},
+        "raw_input_value_content_persisted": {"const": false},
+        "query_or_fragment_persisted": {"const": false},
+        "cookies_or_storage_read": {"const": false},
+        "html_or_script_persisted": {"const": false},
+        "dom_mutation_performed": {"const": false},
+        "click_performed": {"const": false},
+        "typing_performed": {"const": false},
+        "events_dispatched": {"const": false},
+        "navigation_performed": {"const": false},
+        "submit_performed": {"const": false}
+      }
+    }
+  }
+}

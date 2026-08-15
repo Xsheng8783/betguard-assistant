@@ -1,0 +1,215 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://betguard.local/schemas/vision-webfill-browser-observation-capture-result-v1.json",
+  "title": "Betguard Committed Browser Observation Capture Result V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "capture_id",
+    "created_at",
+    "state_at_creation",
+    "authority",
+    "browser_page_identity",
+    "stable_capture",
+    "observation_reference",
+    "capture_content_hash",
+    "record_integrity_hash",
+    "safety"
+  ],
+  "properties": {
+    "schema_version": {"const": "vision-webfill-browser-observation-capture-result-v1"},
+    "capture_id": {"type": "string", "pattern": "^vwoc-[a-f0-9]{32}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "state_at_creation": {"const": "COMMITTED"},
+    "authority": {"$ref": "#/$defs/authority"},
+    "browser_page_identity": {"$ref": "#/$defs/pageIdentity"},
+    "stable_capture": {"$ref": "#/$defs/stableCapture"},
+    "observation_reference": {"$ref": "#/$defs/observationReference"},
+    "capture_content_hash": {"$ref": "#/$defs/hash"},
+    "record_integrity_hash": {"$ref": "#/$defs/hash"},
+    "safety": {"$ref": "#/$defs/safety"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "profileId": {"type": "string", "pattern": "^watp-[a-z0-9][a-z0-9._-]{2,63}$"},
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capture_action_id_hash",
+        "capture_request_hash",
+        "authenticated_principal_hash",
+        "interactive_session_hash",
+        "adapter_target_profile",
+        "logical_target_profile",
+        "origin_path_policy_hash",
+        "page_form_contract_hash",
+        "idempotency_key_hash"
+      ],
+      "properties": {
+        "capture_action_id_hash": {"$ref": "#/$defs/hash"},
+        "capture_request_hash": {"$ref": "#/$defs/hash"},
+        "authenticated_principal_hash": {"$ref": "#/$defs/hash"},
+        "interactive_session_hash": {"$ref": "#/$defs/hash"},
+        "adapter_target_profile": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["adapter_target_profile_id", "adapter_target_profile_version", "profile_integrity_hash"],
+          "properties": {
+            "adapter_target_profile_id": {"$ref": "#/$defs/profileId"},
+            "adapter_target_profile_version": {"type": "integer", "minimum": 1},
+            "profile_integrity_hash": {"$ref": "#/$defs/hash"}
+          }
+        },
+        "logical_target_profile": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["target_profile_id", "target_profile_version", "profile_integrity_hash"],
+          "properties": {
+            "target_profile_id": {"type": "string", "pattern": "^wtp-[a-z0-9][a-z0-9._-]{2,63}$"},
+            "target_profile_version": {"type": "integer", "minimum": 1},
+            "profile_integrity_hash": {"$ref": "#/$defs/hash"}
+          }
+        },
+        "origin_path_policy_hash": {"$ref": "#/$defs/hash"},
+        "page_form_contract_hash": {"$ref": "#/$defs/hash"},
+        "idempotency_key_hash": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "pageIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "browser_runtime_id", "browser_session_id",
+        "browser_connection_id", "connection_generation", "tab_instance_id",
+        "frame_instance_id", "document_instance_id", "page_instance_id",
+        "navigation_epoch", "observation_generation", "dom_mutation_generation",
+        "site_id", "game", "origin_identity_hash", "normalized_path_identity_hash",
+        "captured_at", "identity_integrity_hash", "safety"
+      ],
+      "properties": {
+        "schema_version": {"const": "vision-webfill-browser-page-identity-v1"},
+        "browser_runtime_id": {"type": "string", "pattern": "^vwbr-[a-f0-9]{32}$"},
+        "browser_session_id": {"type": "string", "pattern": "^vwbs-[a-f0-9]{32}$"},
+        "browser_connection_id": {"type": "string", "pattern": "^vwbc-[a-f0-9]{32}$"},
+        "connection_generation": {"type": "integer", "minimum": 1},
+        "tab_instance_id": {"type": "string", "pattern": "^vwti-[a-f0-9]{32}$"},
+        "frame_instance_id": {"type": "string", "pattern": "^vwfi-[a-f0-9]{32}$"},
+        "document_instance_id": {"type": "string", "pattern": "^vwdi-[a-f0-9]{32}$"},
+        "page_instance_id": {"type": "string", "pattern": "^vwpi-[a-f0-9]{32}$"},
+        "navigation_epoch": {"type": "integer", "minimum": 1},
+        "observation_generation": {"type": "integer", "minimum": 1},
+        "dom_mutation_generation": {"type": "integer", "minimum": 0},
+        "site_id": {"type": "string", "pattern": "^site-[a-z0-9][a-z0-9._-]{2,63}$"},
+        "game": {"type": "string", "minLength": 1, "maxLength": 64},
+        "origin_identity_hash": {"$ref": "#/$defs/hash"},
+        "normalized_path_identity_hash": {"$ref": "#/$defs/hash"},
+        "captured_at": {"type": "string", "format": "date-time"},
+        "identity_integrity_hash": {"$ref": "#/$defs/hash"},
+        "safety": {"$ref": "#/$defs/pageIdentitySafety"}
+      }
+    },
+    "pageIdentitySafety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "opaque_server_aliases_only", "raw_browser_target_id_persisted",
+        "raw_connection_token_persisted", "raw_url_persisted",
+        "query_or_fragment_persisted", "cookie_or_storage_identity_persisted",
+        "credential_persisted"
+      ],
+      "properties": {
+        "opaque_server_aliases_only": {"const": true},
+        "raw_browser_target_id_persisted": {"const": false},
+        "raw_connection_token_persisted": {"const": false},
+        "raw_url_persisted": {"const": false},
+        "query_or_fragment_persisted": {"const": false},
+        "cookie_or_storage_identity_persisted": {"const": false},
+        "credential_persisted": {"const": false}
+      }
+    },
+    "stableCapture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attempt", "maximum_attempts", "timeout_milliseconds", "started_at",
+        "ended_at", "read_count", "first_structure_hash", "second_structure_hash",
+        "start_navigation_epoch", "end_navigation_epoch",
+        "start_dom_mutation_generation", "end_dom_mutation_generation",
+        "document_identity_stable", "page_identity_stable", "structure_equal",
+        "final_precommit_check_passed", "postcommit_check_passed"
+      ],
+      "properties": {
+        "attempt": {"type": "integer", "minimum": 1, "maximum": 2},
+        "maximum_attempts": {"const": 2},
+        "timeout_milliseconds": {"type": "integer", "minimum": 1, "maximum": 30000},
+        "started_at": {"type": "string", "format": "date-time"},
+        "ended_at": {"type": "string", "format": "date-time"},
+        "read_count": {"const": 2},
+        "first_structure_hash": {"$ref": "#/$defs/hash"},
+        "second_structure_hash": {"$ref": "#/$defs/hash"},
+        "start_navigation_epoch": {"type": "integer", "minimum": 1},
+        "end_navigation_epoch": {"type": "integer", "minimum": 1},
+        "start_dom_mutation_generation": {"type": "integer", "minimum": 0},
+        "end_dom_mutation_generation": {"type": "integer", "minimum": 0},
+        "document_identity_stable": {"const": true},
+        "page_identity_stable": {"const": true},
+        "structure_equal": {"const": true},
+        "final_precommit_check_passed": {"const": true},
+        "postcommit_check_passed": {"const": true}
+      }
+    },
+    "observationReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dom_observation_id", "observation_hash", "page_fingerprint",
+        "page_instance_id", "navigation_epoch", "observation_generation",
+        "dom_mutation_generation", "committed"
+      ],
+      "properties": {
+        "dom_observation_id": {"type": "string", "pattern": "^vwdo-[a-f0-9]{32}$"},
+        "observation_hash": {"$ref": "#/$defs/hash"},
+        "page_fingerprint": {"$ref": "#/$defs/hash"},
+        "page_instance_id": {"type": "string", "pattern": "^vwpi-[a-f0-9]{32}$"},
+        "navigation_epoch": {"type": "integer", "minimum": 1},
+        "observation_generation": {"type": "integer", "minimum": 1},
+        "dom_mutation_generation": {"type": "integer", "minimum": 0},
+        "committed": {"const": true}
+      }
+    },
+    "safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "read_only_capture", "identity_reference_only", "raw_dom_values_exposed",
+        "raw_dom_values_persisted", "raw_dom_values_hashed", "raw_html_persisted",
+        "cookie_or_storage_read", "screenshot_captured", "arbitrary_script_executed",
+        "browser_launched", "navigation_performed", "dom_mutation_performed",
+        "click_performed", "typing_performed", "events_dispatched",
+        "fill_authorized", "submit_authorized", "queue_or_claim_completed"
+      ],
+      "properties": {
+        "read_only_capture": {"const": true},
+        "identity_reference_only": {"const": true},
+        "raw_dom_values_exposed": {"const": false},
+        "raw_dom_values_persisted": {"const": false},
+        "raw_dom_values_hashed": {"const": false},
+        "raw_html_persisted": {"const": false},
+        "cookie_or_storage_read": {"const": false},
+        "screenshot_captured": {"const": false},
+        "arbitrary_script_executed": {"const": false},
+        "browser_launched": {"const": false},
+        "navigation_performed": {"const": false},
+        "dom_mutation_performed": {"const": false},
+        "click_performed": {"const": false},
+        "typing_performed": {"const": false},
+        "events_dispatched": {"const": false},
+        "fill_authorized": {"const": false},
+        "submit_authorized": {"const": false},
+        "queue_or_claim_completed": {"const": false}
+      }
+    }
+  }
+}

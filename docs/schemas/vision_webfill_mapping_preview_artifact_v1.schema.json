@@ -1,0 +1,204 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://betguard.local/schemas/vision-webfill-mapping-preview-artifact-v1.json",
+  "title": "Betguard Immutable Webfill Mapping Preview Artifact V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "mapping_preview_id", "created_at", "state_at_creation",
+    "mapping_preview_status", "authority", "mapping_items", "bet_summaries",
+    "cancelled_exclusions", "mapping_content_hash", "validation",
+    "blocking_reasons", "record_integrity_hash", "safety"
+  ],
+  "properties": {
+    "schema_version": {"const": "vision-webfill-mapping-preview-artifact-v1"},
+    "mapping_preview_id": {"type": "string", "pattern": "^vwmp-[a-f0-9]{32}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "state_at_creation": {"const": "PREVIEWED"},
+    "mapping_preview_status": {"enum": ["VALID_MAPPING_PREVIEW", "BLOCKED_MAPPING_PREVIEW"]},
+    "authority": {"$ref": "#/$defs/authority"},
+    "mapping_items": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/mappingItem"}},
+    "bet_summaries": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/betSummary"}},
+    "cancelled_exclusions": {"type": "array", "items": {"$ref": "#/$defs/cancelledExclusion"}},
+    "mapping_content_hash": {"$ref": "#/$defs/hash"},
+    "validation": {"$ref": "#/$defs/validation"},
+    "blocking_reasons": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "record_integrity_hash": {"$ref": "#/$defs/hash"},
+    "safety": {"$ref": "#/$defs/safety"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"mapping_preview_status": {"const": "VALID_MAPPING_PREVIEW"}}},
+      "then": {
+        "properties": {
+          "blocking_reasons": {"maxItems": 0},
+          "validation": {"properties": {"all_required_items_mapped_unique": {"const": true}, "all_column_mappings_complete": {"const": true}, "multi_claim_count": {"const": 0}}}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"mapping_preview_status": {"const": "BLOCKED_MAPPING_PREVIEW"}}},
+      "then": {"properties": {"blocking_reasons": {"minItems": 1}}}
+    }
+  ],
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "humanBetId": {"type": "string", "pattern": "^H-[0-9]{3,}$"},
+    "prepareIdentity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["prepare_id", "prepare_record_integrity_hash", "deterministic_plan_hash", "authority_binding_hash"],
+      "properties": {
+        "prepare_id": {"type": "string", "pattern": "^vwp-[a-f0-9]{32}$"},
+        "prepare_record_integrity_hash": {"$ref": "#/$defs/hash"},
+        "deterministic_plan_hash": {"$ref": "#/$defs/hash"},
+        "authority_binding_hash": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "claimIdentity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["claim_id", "claim_generation", "fencing_token_hash", "consumer_id", "authenticated_principal", "claim_session_id_hash"],
+      "properties": {
+        "claim_id": {"type": "string", "pattern": "^vqc-[a-f0-9]{32}$"},
+        "claim_generation": {"type": "integer", "minimum": 1},
+        "fencing_token_hash": {"$ref": "#/$defs/hash"},
+        "consumer_id": {"type": "string", "pattern": "^vqcns-[a-f0-9]{32}$"},
+        "authenticated_principal": {"type": "string", "minLength": 1},
+        "claim_session_id_hash": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "adapterProfileIdentity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["adapter_target_profile_id", "adapter_target_profile_version", "profile_integrity_hash"],
+      "properties": {
+        "adapter_target_profile_id": {"type": "string", "pattern": "^watp-[a-z0-9][a-z0-9._-]{2,63}$"},
+        "adapter_target_profile_version": {"type": "integer", "minimum": 1},
+        "profile_integrity_hash": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "observationIdentity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["dom_observation_id", "observation_hash", "page_fingerprint", "page_instance_id", "navigation_epoch"],
+      "properties": {
+        "dom_observation_id": {"type": "string", "pattern": "^vwdo-[a-f0-9]{32}$"},
+        "observation_hash": {"$ref": "#/$defs/hash"},
+        "page_fingerprint": {"$ref": "#/$defs/hash"},
+        "page_instance_id": {"type": "string", "pattern": "^vwpi-[a-f0-9]{32}$"},
+        "navigation_epoch": {"type": "integer", "minimum": 1}
+      }
+    },
+    "authority": {
+      "type": "object", "additionalProperties": false,
+      "required": ["prepare", "claim", "adapter_target_profile", "dom_observation", "idempotency_key_hash"],
+      "properties": {
+        "prepare": {"$ref": "#/$defs/prepareIdentity"},
+        "claim": {"$ref": "#/$defs/claimIdentity"},
+        "adapter_target_profile": {"$ref": "#/$defs/adapterProfileIdentity"},
+        "dom_observation": {"$ref": "#/$defs/observationIdentity"},
+        "idempotency_key_hash": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "sourcePointer": {
+      "type": "object", "additionalProperties": false,
+      "required": ["human_bet_id", "operation_index", "logical_pointer", "logical_action", "group_index", "item_index", "component_index", "intended_value_hash"],
+      "properties": {
+        "human_bet_id": {"$ref": "#/$defs/humanBetId"},
+        "operation_index": {"type": "integer", "minimum": 1},
+        "logical_pointer": {"type": "string", "pattern": "^/logical_plan/operations/[0-9]+/.+"},
+        "logical_action": {"enum": ["SET_BET_TYPE", "SET_NUMBER", "SET_MULTIPLIER_RULE", "SET_SPECIAL_PLAY", "SET_CONTINUATION"]},
+        "group_index": {"type": ["integer", "null"], "minimum": 1},
+        "item_index": {"type": ["integer", "null"], "minimum": 1},
+        "component_index": {"type": "integer", "minimum": 1},
+        "intended_value_hash": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "mappingItem": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mapping_index", "source", "rule_id", "candidate_target_field_ids", "selected_target_field_ids", "mapping_state", "mapping_confidence", "blocking_reason"],
+      "properties": {
+        "mapping_index": {"type": "integer", "minimum": 1},
+        "source": {"$ref": "#/$defs/sourcePointer"},
+        "rule_id": {"type": "string", "pattern": "^rule-[a-z0-9][a-z0-9._-]{2,63}$"},
+        "candidate_target_field_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^vwf-[a-f0-9]{32}$"}},
+        "selected_target_field_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^vwf-[a-f0-9]{32}$"}},
+        "mapping_state": {"enum": ["MAPPED_UNIQUE", "AMBIGUOUS", "MISSING", "UNSUPPORTED", "BLOCKED"]},
+        "mapping_confidence": {"enum": ["DETERMINISTIC_EXACT", "NONE"]},
+        "blocking_reason": {"type": ["string", "null"], "minLength": 1}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"mapping_state": {"const": "MAPPED_UNIQUE"}}},
+          "then": {"properties": {"selected_target_field_ids": {"minItems": 1}, "mapping_confidence": {"const": "DETERMINISTIC_EXACT"}, "blocking_reason": {"type": "null"}}},
+          "else": {"properties": {"selected_target_field_ids": {"maxItems": 0}, "mapping_confidence": {"const": "NONE"}, "blocking_reason": {"type": "string", "minLength": 1}}}
+        }
+      ]
+    },
+    "betSummary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["human_bet_id", "operation_index", "bet_type", "required_group_count", "mapped_group_count", "all_required_items_mapped_unique", "column_mapping_complete", "state"],
+      "properties": {
+        "human_bet_id": {"$ref": "#/$defs/humanBetId"},
+        "operation_index": {"type": "integer", "minimum": 1},
+        "bet_type": {"enum": ["normal", "column"]},
+        "required_group_count": {"type": "integer", "minimum": 1},
+        "mapped_group_count": {"type": "integer", "minimum": 0},
+        "all_required_items_mapped_unique": {"type": "boolean"},
+        "column_mapping_complete": {"type": "boolean"},
+        "state": {"enum": ["READY", "BLOCKED", "UNSUPPORTED"]}
+      }
+    },
+    "cancelledExclusion": {
+      "type": "object", "additionalProperties": false,
+      "required": ["human_bet_id", "source_section", "excluded_reason", "mapping_item_count"],
+      "properties": {
+        "human_bet_id": {"$ref": "#/$defs/humanBetId"},
+        "source_section": {"const": "cancelled_audit_refs"},
+        "excluded_reason": {"const": "cancelled_non_executable"},
+        "mapping_item_count": {"const": 0}
+      }
+    },
+    "validation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["required_item_count", "mapped_unique_count", "blocked_item_count", "active_bet_count", "cancelled_exclusion_count", "multi_claim_count", "all_required_items_mapped_unique", "all_column_mappings_complete", "human_preview_available", "client_override_applied"],
+      "properties": {
+        "required_item_count": {"type": "integer", "minimum": 1},
+        "mapped_unique_count": {"type": "integer", "minimum": 0},
+        "blocked_item_count": {"type": "integer", "minimum": 0},
+        "active_bet_count": {"type": "integer", "minimum": 1},
+        "cancelled_exclusion_count": {"type": "integer", "minimum": 0},
+        "multi_claim_count": {"type": "integer", "minimum": 0},
+        "all_required_items_mapped_unique": {"type": "boolean"},
+        "all_column_mappings_complete": {"type": "boolean"},
+        "human_preview_available": {"const": true},
+        "client_override_applied": {"const": false}
+      }
+    },
+    "safety": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "mapping_preview_only", "read_only_dom_observation", "contains_raw_bet_values",
+        "contains_current_dom_values", "dom_mutation_authorized", "click_authorized",
+        "typing_authorized", "navigation_authorized", "events_authorized",
+        "approved_for_fill", "approved_for_submit", "webfill_authorized",
+        "submitted", "auto_submit", "queue_completed", "claim_completed"
+      ],
+      "properties": {
+        "mapping_preview_only": {"const": true},
+        "read_only_dom_observation": {"const": true},
+        "contains_raw_bet_values": {"const": false},
+        "contains_current_dom_values": {"const": false},
+        "dom_mutation_authorized": {"const": false},
+        "click_authorized": {"const": false},
+        "typing_authorized": {"const": false},
+        "navigation_authorized": {"const": false},
+        "events_authorized": {"const": false},
+        "approved_for_fill": {"const": false},
+        "approved_for_submit": {"const": false},
+        "webfill_authorized": {"const": false},
+        "submitted": {"const": false},
+        "auto_submit": {"const": false},
+        "queue_completed": {"const": false},
+        "claim_completed": {"const": false}
+      }
+    }
+  }
+}

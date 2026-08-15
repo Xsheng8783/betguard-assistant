@@ -14,10 +14,11 @@ import re
 import secrets
 import tempfile
 import uuid
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 from betguard.vision.candidate_authority import (
     CandidateAuthorityError,
@@ -200,6 +201,62 @@ def _no_values(value: Any, label: str) -> None:
     elif isinstance(value, list):
         for child in value:
             _no_values(child, label)
+
+
+class _PrepareClaimCoordinator:
+    """Narrow non-reentrant integration surface for Gate 3C dry-run prepare."""
+
+    def __init__(self, store: "ValidatedCandidateClaimStore", now: datetime) -> None:
+        self._store = store
+        self.observed_at = now
+
+    def get_authoritative_claim_locked(
+        self,
+        *,
+        claim_id: str,
+        claim_generation: int,
+        authenticated_principal: str,
+        consumer_id: str,
+        server_session_id: str,
+        fencing_token: str,
+    ) -> dict[str, Any]:
+        self._store._require_claim_id(claim_id)
+        claim = self._store._load_claim(claim_id)
+        if claim is None:
+            raise _error("CLAIM_NOT_FOUND", "Claim not found", 404)
+        if (
+            isinstance(claim_generation, bool)
+            or not isinstance(claim_generation, int)
+            or claim_generation != claim["claim_generation"]
+        ):
+            raise _error("CLAIM_STALE", "Claim generation mismatch", 409)
+        if fencing_token != claim["fencing_token"]:
+            raise _error("CLAIM_FENCE_MISMATCH", "fencing token mismatch", 409)
+        return self._store._authoritative_locked(
+            claim_id,
+            authenticated_principal,
+            consumer_id,
+            server_session_id,
+            self.observed_at,
+            replayed=False,
+        )
+
+    def get_claim_lifecycle_state_locked(self, claim_id: str) -> dict[str, Any]:
+        """Return value-free exact durable state while coordination is held."""
+
+        self._store._require_claim_id(claim_id)
+        claim = self._store._load_claim(claim_id)
+        if claim is None:
+            raise _error("CLAIM_NOT_FOUND", "Claim not found", 404)
+        state = self._store._derive_state(
+            claim, self._store._events_for(claim_id)
+        )
+        events = self._store._events_for(claim_id)
+        return {
+            "state": state["state"],
+            "last_event_type": events[-1]["event_type"],
+            "last_reason_code": events[-1].get("reason_code"),
+        }
 
 
 class ValidatedCandidateClaimStore:
@@ -574,6 +631,41 @@ class ValidatedCandidateClaimStore:
             if fencing_token != claim["fencing_token"]:
                 raise _error("CLAIM_FENCE_MISMATCH", "fencing token mismatch", 409)
             return self._authoritative_locked(claim_id, authenticated_principal, consumer_id, server_session_id, now, replayed=False)
+
+    @contextmanager
+    def prepare_coordination(
+        self,
+        *,
+        preflight_callback: Callable[[], None] | None = None,
+        coordination_error_mapper: Callable[[ValidatedCandidateClaimError], Exception]
+        | None = None,
+    ) -> Iterator["_PrepareClaimCoordinator"]:
+        """Hold the sole Queue/Claim lock for one downstream dry-run prepare.
+
+        This deliberately exposes only an owner-fenced authoritative read.  It
+        prevents a prepare implementation from validating a Claim and then
+        releasing the Queue lock before publishing its immutable authority
+        snapshot.
+        """
+
+        with self._queue.claim_coordination():
+            if preflight_callback is not None:
+                if not callable(preflight_callback):
+                    raise TypeError("preflight_callback must be callable")
+                # Pure validation must happen before Claim clock/recovery writes.
+                preflight_callback()
+            try:
+                self._preflight_pending_transactions_locked()
+                now = self._observe_clock_locked()
+                self._recover_locked()
+            except ValidatedCandidateClaimError as exc:
+                if coordination_error_mapper is not None:
+                    mapped = coordination_error_mapper(exc)
+                    if not isinstance(mapped, Exception):
+                        raise TypeError("coordination_error_mapper must return Exception")
+                    raise mapped from exc
+                raise
+            yield _PrepareClaimCoordinator(self, now)
 
     def list_claims(self) -> list[dict[str, Any]]:
         with self._queue.claim_coordination():

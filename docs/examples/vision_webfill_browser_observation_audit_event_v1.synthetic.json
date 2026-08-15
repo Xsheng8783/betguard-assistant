@@ -1,0 +1,41 @@
+{
+  "schema_version": "vision-webfill-browser-observation-audit-event-v1",
+  "event_id": "vwocae-90909090909090909090909090909090",
+  "capture_id": "vwoc-80808080808080808080808080808080",
+  "event_sequence": 3,
+  "event_type": "CAPTURE_COMMITTED",
+  "occurred_at": "2026-08-15T10:00:02+08:00",
+  "actor_kind": "TRUSTED_ADAPTER",
+  "authority_binding_hash": "6a292c6789ceb18bc30e98aab4490b6f883906970e1e666b1ece6a96d78b0cdb",
+  "browser_page_identity_hash": "84fe525aa4b75d0f5c0a14252dd8d227cfa709ff2f12edade81cfd407948252f",
+  "observation_reference": {
+    "dom_observation_id": "vwdo-70707070707070707070707070707070",
+    "observation_hash": "ee5ed77b23a77e29d0b746cac613d1a45e41c5721792c9689dc523fa084849ee",
+    "page_fingerprint": "866ff299ce63929611aaaabe671119733fe6bde411f216451cd7f2c3aa4af8af",
+    "page_instance_id": "vwpi-60606060606060606060606060606060",
+    "navigation_epoch": 7
+  },
+  "reason_code": null,
+  "safe_context_hashes": [
+    {
+      "context_kind": "PROFILE",
+      "context_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "context_kind": "OBSERVATION",
+      "context_hash": "ee5ed77b23a77e29d0b746cac613d1a45e41c5721792c9689dc523fa084849ee"
+    }
+  ],
+  "event_integrity_hash": "f8acdaa7bf133f89f921a02a9daca7760e2af4f2b4ac355cc80efb4e5c7a97ad",
+  "safety": {
+    "value_free": true,
+    "html_free": true,
+    "url_free": true,
+    "selector_free": true,
+    "cookie_storage_free": true,
+    "credential_free": true,
+    "browser_token_free": true,
+    "screenshot_free": true,
+    "fixed_error_codes_only": true
+  }
+}

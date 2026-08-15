@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://betguard.local/schemas/vision-webfill-adapter-target-profile-v1.json",
+  "title": "Betguard Webfill Adapter Target Profile V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "adapter_target_profile_id", "adapter_target_profile_version",
+    "logical_target_profile_identity", "site_contract", "form_contract",
+    "logical_field_rules", "created_at", "profile_integrity_hash", "safety"
+  ],
+  "properties": {
+    "schema_version": {"const": "vision-webfill-adapter-target-profile-v1"},
+    "adapter_target_profile_id": {"$ref": "#/$defs/profileId"},
+    "adapter_target_profile_version": {"type": "integer", "minimum": 1},
+    "logical_target_profile_identity": {"$ref": "#/$defs/logicalProfileIdentity"},
+    "site_contract": {"$ref": "#/$defs/siteContract"},
+    "form_contract": {"$ref": "#/$defs/formContract"},
+    "logical_field_rules": {"type": "array", "minItems": 4, "uniqueItems": true, "items": {"$ref": "#/$defs/rule"}},
+    "created_at": {"type": "string", "format": "date-time"},
+    "profile_integrity_hash": {"$ref": "#/$defs/hash"},
+    "safety": {"$ref": "#/$defs/safety"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "profileId": {"type": "string", "pattern": "^watp-[a-z0-9][a-z0-9._-]{2,63}$"},
+    "logicalProfileIdentity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["target_profile_id", "target_profile_version", "profile_integrity_hash"],
+      "properties": {
+        "target_profile_id": {"type": "string", "pattern": "^wtp-[a-z0-9][a-z0-9._-]{2,63}$"},
+        "target_profile_version": {"type": "integer", "minimum": 1},
+        "profile_integrity_hash": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "siteContract": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "site_id", "game", "origin_identity_hash", "normalized_path_identity_hash",
+        "page_fingerprint_algorithm", "expected_page_fingerprint", "required_page_marker_hashes"
+      ],
+      "properties": {
+        "site_id": {"type": "string", "pattern": "^site-[a-z0-9][a-z0-9._-]{2,63}$"},
+        "game": {"type": "string", "minLength": 1},
+        "origin_identity_hash": {"$ref": "#/$defs/hash"},
+        "normalized_path_identity_hash": {"$ref": "#/$defs/hash"},
+        "page_fingerprint_algorithm": {"const": "sha256-canonical-dom-structure-v1"},
+        "expected_page_fingerprint": {"$ref": "#/$defs/hash"},
+        "required_page_marker_hashes": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/hash"}}
+      }
+    },
+    "formContract": {
+      "type": "object", "additionalProperties": false,
+      "required": ["expected_form_id", "expected_form_fingerprint", "required_form_marker_hashes", "exact_form_match"],
+      "properties": {
+        "expected_form_id": {"type": "string", "pattern": "^vwform-[a-f0-9]{32}$"},
+        "expected_form_fingerprint": {"$ref": "#/$defs/hash"},
+        "required_form_marker_hashes": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/hash"}},
+        "exact_form_match": {"const": true}
+      }
+    },
+    "expectedField": {
+      "type": "object", "additionalProperties": false,
+      "required": ["tag_name", "input_types", "label_text", "required_structural_marker_hashes", "must_be_visible", "must_be_enabled", "must_be_writable", "must_be_empty"],
+      "properties": {
+        "tag_name": {"enum": ["input", "select", "textarea", "button", "fieldset", "div"]},
+        "input_types": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["text", "number", "radio", "checkbox", "select-one", "select-multiple", "button", "other"]}},
+        "label_text": {"type": ["string", "null"], "maxLength": 256},
+        "required_structural_marker_hashes": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/hash"}},
+        "must_be_visible": {"const": true},
+        "must_be_enabled": {"const": true},
+        "must_be_writable": {"const": true},
+        "must_be_empty": {"const": true}
+      }
+    },
+    "rule": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "rule_id", "logical_action", "applicable_bet_types", "source_scope",
+        "selector_kind", "selector_template", "allowed_placeholders",
+        "component_policy", "required_component_count", "cardinality",
+        "expected_field", "lossless_required"
+      ],
+      "properties": {
+        "rule_id": {"type": "string", "pattern": "^rule-[a-z0-9][a-z0-9._-]{2,63}$"},
+        "logical_action": {"enum": ["SET_BET_TYPE", "SET_NUMBER", "SET_MULTIPLIER_RULE", "SET_SPECIAL_PLAY", "SET_CONTINUATION"]},
+        "applicable_bet_types": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["normal", "column"]}},
+        "source_scope": {"enum": ["BET", "GROUP", "NUMBER", "MULTIPLIER_RULE", "SPECIAL_PLAY", "CONTINUATION"]},
+        "selector_kind": {"enum": ["ID", "NAME", "DATA_TESTID", "CSS_STRUCTURAL"]},
+        "selector_template": {"type": "string", "minLength": 1, "maxLength": 512},
+        "allowed_placeholders": {
+          "type": "array", "uniqueItems": true,
+          "items": {"enum": ["operation_index", "group_index", "number_index", "multiplier_rule_index", "component_index"]}
+        },
+        "component_policy": {"enum": ["SINGLE_FIELD", "ORDERED_LOSSLESS_COMPONENTS"]},
+        "required_component_count": {"type": "integer", "minimum": 1},
+        "cardinality": {"const": "EXACTLY_ONE_PER_COMPONENT"},
+        "expected_field": {"$ref": "#/$defs/expectedField"},
+        "lossless_required": {"const": true}
+      }
+    },
+    "safety": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "contains_bet_values", "logical_profile_extension_only", "read_only_mapping_only",
+        "selector_values_are_structural_only", "browser_execution_authorized",
+        "dom_mutation_authorized", "fill_authorized", "submit_authorized"
+      ],
+      "properties": {
+        "contains_bet_values": {"const": false},
+        "logical_profile_extension_only": {"const": true},
+        "read_only_mapping_only": {"const": true},
+        "selector_values_are_structural_only": {"const": true},
+        "browser_execution_authorized": {"const": false},
+        "dom_mutation_authorized": {"const": false},
+        "fill_authorized": {"const": false},
+        "submit_authorized": {"const": false}
+      }
+    }
+  }
+}
