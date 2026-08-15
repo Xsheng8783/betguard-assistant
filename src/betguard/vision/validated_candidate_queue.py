@@ -23,7 +23,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 from betguard.vision.candidate_authority import (
     CandidateAuthorityError,
@@ -238,6 +238,12 @@ class ValidatedCandidateQueueStore:
         )
         self._transactions_dir = self.base_dir / "enqueue-transactions"
         self._identity_index_dir = self.base_dir / "candidate-identity"
+        self._claim_authority_block_idempotency_dir = (
+            self.base_dir / "claim-authority-block-idempotency"
+        )
+        self._claim_store_root = self.base_dir / "claim-leases-v1"
+        self._claim_store_marker = self._claim_store_root / "store-enabled.json"
+        self._claim_activity_guard: Callable[[str], bool] | None = None
         self._locks_dir = self.base_dir / "locks"
         self._sequence_dir = self.base_dir / "sequence"
         for directory in (
@@ -250,10 +256,53 @@ class ValidatedCandidateQueueStore:
             self._action_issue_idempotency_dir,
             self._transactions_dir,
             self._identity_index_dir,
+            self._claim_authority_block_idempotency_dir,
             self._locks_dir,
             self._sequence_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def claim_store_root(self) -> Path:
+        """Return the one claim-store root coordinated by this Queue store."""
+
+        return self._claim_store_root
+
+    def install_claim_activity_guard(
+        self,
+        guard: Callable[[str], bool],
+    ) -> None:
+        """Install the in-process active-Claim guard used by human removal.
+
+        The persisted store marker makes a process without the guard fail
+        closed.  A Claim store installs this hook during construction; it must
+        inspect durable Claim state without acquiring another lock.
+        """
+
+        if not callable(guard):
+            raise TypeError("guard must be callable")
+        if (
+            self._claim_activity_guard is not None
+            and self._claim_activity_guard != guard
+        ):
+            raise _error(
+                "CLAIM_GUARD_CONFLICT",
+                "another Claim activity guard is already installed",
+                409,
+            )
+        self._claim_activity_guard = guard
+
+    @contextmanager
+    def claim_coordination(self) -> Iterator["ValidatedCandidateQueueStore"]:
+        """Hold the Queue's sole process/cross-process mutation lock.
+
+        Claim code uses this narrow surface for selection, lifecycle mutation,
+        lazy expiry, and cross-ledger blocking.  Callers must not re-enter this
+        context from a method that already holds the Queue lock.
+        """
+
+        with self._queue_lock():
+            yield self
 
     @classmethod
     def from_authority_store(
@@ -555,6 +604,19 @@ class ValidatedCandidateQueueStore:
                     "queue entry was removed by another human action",
                     409,
                 )
+            if self._claim_store_marker.exists():
+                if self._claim_activity_guard is None:
+                    raise _error(
+                        "CLAIM_GUARD_UNAVAILABLE",
+                        "Claim store is enabled but its active-Claim guard is unavailable",
+                        503,
+                    )
+                if self._claim_activity_guard(queue_entry_id):
+                    raise _error(
+                        "CLAIM_ACTIVE",
+                        "active Claim must be released, abandoned, or expire before removal",
+                        409,
+                    )
             self._append_event(
                 current["queue_entry"],
                 event_type="REMOVED",
@@ -1172,6 +1234,88 @@ class ValidatedCandidateQueueStore:
             action_id=prepare_action_id,
         )
         _write_immutable_json(idempotency_path, expected)
+
+    def append_claim_authority_blocked_locked(
+        self,
+        *,
+        queue_entry_id: str,
+        claim_action_id: str,
+        reason_code: str,
+    ) -> dict[str, Any]:
+        """Append Queue ``BLOCKED`` while Claim coordination is held.
+
+        This is the sole Queue half of the recoverable Claim/Queue authority
+        block transaction.  It stores identity and a stable reason only.
+        Claim callers must invoke it from :meth:`claim_coordination`.
+        """
+
+        self._require_entry_id(queue_entry_id, request=True)
+        if not isinstance(claim_action_id, str) or not re.fullmatch(
+            r"^qba-[a-f0-9]{32}$", claim_action_id
+        ):
+            raise _error("QUEUE_REQUEST_INVALID", "claim block action invalid", 400)
+        if not isinstance(reason_code, str) or not reason_code.startswith("CANDIDATE_"):
+            raise _error("QUEUE_REQUEST_INVALID", "claim block reason invalid", 400)
+        item = self.get_entry(queue_entry_id)
+        if item is None:
+            raise _error("QUEUE_ENTRY_NOT_FOUND", "queue entry was not found", 404)
+        path = self._claim_authority_block_idempotency_dir / f"{claim_action_id}.json"
+        expected = {
+            "claim_action_id": claim_action_id,
+            "queue_entry_id": queue_entry_id,
+            "reason_code": reason_code,
+        }
+        if path.exists():
+            if _read_json(path) != expected:
+                raise _error(
+                    "QUEUE_IDEMPOTENCY_CONFLICT",
+                    "claim authority block action has a conflicting result",
+                    409,
+                )
+            current = self.get_entry(queue_entry_id)
+            if current is None or current["state"] != "BLOCKED":
+                raise _error(
+                    "QUEUE_STORE_CORRUPT",
+                    "claim authority block marker is not reflected in Queue state",
+                    500,
+                )
+            return deepcopy(current)
+        if item["state"] == "BLOCKED":
+            action_hash = hashlib.sha256(claim_action_id.encode("utf-8")).hexdigest()
+            matching = [
+                event
+                for event in self.get_lifecycle_events(queue_entry_id)
+                if event["event_type"] == "BLOCKED"
+                and event["action_id_hash"] == action_hash
+                and event["reason_code"] == reason_code
+            ]
+            if matching:
+                _write_immutable_json(path, expected)
+                return deepcopy(item)
+            # Another Gate 3B-2 access may already have made the Queue entry
+            # terminal.  The Claim ledger still needs its own
+            # AUTHORITY_BLOCKED event; an already-BLOCKED Queue is the desired
+            # fail-closed state, not a reason to keep the Claim usable.
+            _write_immutable_json(path, expected)
+            return deepcopy(item)
+        if item["state"] != "QUEUED":
+            raise _error(
+                "QUEUE_ENTRY_NOT_REMOVABLE",
+                f"queue entry state {item['state']} cannot be authority-blocked",
+                409,
+            )
+        self._append_event(
+            item["queue_entry"],
+            event_type="BLOCKED",
+            actor="candidate-consumption-validator",
+            reason_code=reason_code,
+            action_id=claim_action_id,
+        )
+        _write_immutable_json(path, expected)
+        result = self.get_entry(queue_entry_id)
+        if result is None or result["state"] != "BLOCKED":
+            raise _error("QUEUE_STORE_CORRUPT", "Queue block commit is invisible", 500)
+        return deepcopy(result)
 
     def _event_record(
         self,

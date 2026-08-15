@@ -1,0 +1,15 @@
+{
+  "schema_version": "vision-webfill-prepare-lifecycle-event-v1",
+  "event_id": "vwpe-66666666666666666666666666666666",
+  "prepare_id": "vwp-44444444444444444444444444444444",
+  "event_sequence": 1,
+  "event_type": "PREPARED",
+  "occurred_at": "2026-08-15T08:05:00+00:00",
+  "actor": "webfill-prepare-service",
+  "reason_code": null,
+  "upstream_state": null,
+  "authority_binding_hash": "c763f21d1c9eba8de0bee9ad498a835ad0bef4dc7d19750c4ecfe86240efed26",
+  "deterministic_plan_hash": "2074569a380c0069e25d8344b1157175752bcb16e86d47b11c46f292f6aa0581",
+  "prepare_record_integrity_hash": "50fbbfb510eeaa1ff03750931574d7e648ca724e38cf4149ede3974a3f42aa6b",
+  "event_integrity_hash": "d3677e0ef3db83edcea00788ae2465bb8b312466208b3656672316ab834244a9"
+}

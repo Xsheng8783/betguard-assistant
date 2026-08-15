@@ -1,0 +1,645 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://betguard.local/schemas/vision-webfill-prepare-artifact-v1.json",
+  "title": "Betguard Webfill Prepare Artifact V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "prepare_id",
+    "created_at",
+    "state_at_creation",
+    "authority",
+    "logical_plan",
+    "deterministic_plan_hash",
+    "authority_binding_hash",
+    "validation",
+    "executable",
+    "blocking_reasons",
+    "provenance",
+    "record_integrity_hash",
+    "safety"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "vision-webfill-prepare-artifact-v1"
+    },
+    "prepare_id": {
+      "type": "string",
+      "pattern": "^vwp-[a-f0-9]{32}$"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "state_at_creation": {
+      "const": "PREPARED"
+    },
+    "authority": {
+      "$ref": "#/$defs/authority"
+    },
+    "logical_plan": {
+      "$ref": "#/$defs/logicalPlan"
+    },
+    "deterministic_plan_hash": {
+      "$ref": "#/$defs/hash"
+    },
+    "authority_binding_hash": {
+      "$ref": "#/$defs/hash"
+    },
+    "validation": {
+      "$ref": "#/$defs/validation"
+    },
+    "executable": {
+      "const": false
+    },
+    "blocking_reasons": {
+      "type": "array",
+      "maxItems": 0
+    },
+    "provenance": {
+      "$ref": "#/$defs/provenance"
+    },
+    "record_integrity_hash": {
+      "$ref": "#/$defs/hash"
+    },
+    "safety": {
+      "$ref": "#/$defs/safety"
+    }
+  },
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "humanBetId": {
+      "type": "string",
+      "pattern": "^H-[0-9]{3,}$"
+    },
+    "number": {
+      "type": "string",
+      "pattern": "^[0-9]{2}$"
+    },
+    "candidateIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_id",
+        "candidate_revision",
+        "canonical_content_hash"
+      ],
+      "properties": {
+        "candidate_id": {
+          "type": "string",
+          "pattern": "^vc-[a-f0-9]{32}$"
+        },
+        "candidate_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "canonical_content_hash": {
+          "$ref": "#/$defs/hash"
+        }
+      }
+    },
+    "queueIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "queue_entry_id",
+        "enqueue_sequence",
+        "queue_revision",
+        "entry_integrity_hash"
+      ],
+      "properties": {
+        "queue_entry_id": {
+          "type": "string",
+          "pattern": "^vcq-[a-f0-9]{32}$"
+        },
+        "enqueue_sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "queue_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "entry_integrity_hash": {
+          "$ref": "#/$defs/hash"
+        }
+      }
+    },
+    "claimBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claim_id",
+        "claim_generation",
+        "fencing_token_hash",
+        "consumer_id",
+        "authenticated_principal",
+        "claim_session_id_hash",
+        "lease_expires_at_at_prepare"
+      ],
+      "properties": {
+        "claim_id": {
+          "type": "string",
+          "pattern": "^vqc-[a-f0-9]{32}$"
+        },
+        "claim_generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "fencing_token_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "consumer_id": {
+          "type": "string",
+          "pattern": "^vqcns-[a-f0-9]{32}$"
+        },
+        "authenticated_principal": {
+          "type": "string",
+          "minLength": 1
+        },
+        "claim_session_id_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "lease_expires_at_at_prepare": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "targetProfileIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target_profile_id",
+        "target_profile_version",
+        "profile_integrity_hash"
+      ],
+      "properties": {
+        "target_profile_id": {
+          "type": "string",
+          "pattern": "^wtp-[a-z0-9][a-z0-9._-]{2,63}$"
+        },
+        "target_profile_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "profile_integrity_hash": {
+          "$ref": "#/$defs/hash"
+        }
+      }
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "queue",
+        "candidate",
+        "claim",
+        "target_profile",
+        "idempotency_key_hash"
+      ],
+      "properties": {
+        "queue": {
+          "$ref": "#/$defs/queueIdentity"
+        },
+        "candidate": {
+          "$ref": "#/$defs/candidateIdentity"
+        },
+        "claim": {
+          "$ref": "#/$defs/claimBinding"
+        },
+        "target_profile": {
+          "$ref": "#/$defs/targetProfileIdentity"
+        },
+        "idempotency_key_hash": {
+          "$ref": "#/$defs/hash"
+        }
+      }
+    },
+    "numberGroups": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "array",
+        "minItems": 1,
+        "uniqueItems": true,
+        "items": {
+          "$ref": "#/$defs/number"
+        }
+      }
+    },
+    "multiplier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ordered_rules", "scope", "resolved"],
+      "properties": {
+        "ordered_rules": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "scope": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resolved": {
+          "const": true
+        }
+      }
+    },
+    "specialPlay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "raw_text", "scope", "resolved"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "raw_text": {
+          "type": ["string", "null"]
+        },
+        "scope": {
+          "type": ["string", "null"]
+        },
+        "resolved": {
+          "const": true
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "none"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "raw_text": {
+                "type": "null"
+              },
+              "scope": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "scope": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "continuation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["present", "resolved", "binding"],
+      "properties": {
+        "present": {
+          "type": "boolean"
+        },
+        "resolved": {
+          "const": true
+        },
+        "binding": {
+          "const": "within_human_bet"
+        }
+      }
+    },
+    "logicalOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation_index",
+        "operation_type",
+        "human_bet_id",
+        "bet_type",
+        "number_groups",
+        "multiplier",
+        "special_play",
+        "continuation",
+        "cancelled",
+        "active",
+        "source_executable",
+        "value_authority"
+      ],
+      "properties": {
+        "operation_index": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "operation_type": {
+          "const": "LOGICAL_BET_ENTRY"
+        },
+        "human_bet_id": {
+          "$ref": "#/$defs/humanBetId"
+        },
+        "bet_type": {
+          "enum": ["normal", "column"]
+        },
+        "number_groups": {
+          "$ref": "#/$defs/numberGroups"
+        },
+        "multiplier": {
+          "$ref": "#/$defs/multiplier"
+        },
+        "special_play": {
+          "$ref": "#/$defs/specialPlay"
+        },
+        "continuation": {
+          "$ref": "#/$defs/continuation"
+        },
+        "cancelled": {
+          "const": false
+        },
+        "active": {
+          "const": true
+        },
+        "source_executable": {
+          "const": true
+        },
+        "value_authority": {
+          "const": "validated_candidate"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "bet_type": {
+                "const": "normal"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "number_groups": {
+                "minItems": 1,
+                "maxItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "bet_type": {
+                "const": "column"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "number_groups": {
+                "minItems": 2
+              }
+            }
+          }
+        }
+      ]
+    },
+    "cancelledAuditRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "human_bet_id",
+        "candidate_section",
+        "excluded_reason"
+      ],
+      "properties": {
+        "human_bet_id": {
+          "$ref": "#/$defs/humanBetId"
+        },
+        "candidate_section": {
+          "const": "cancelled_audit"
+        },
+        "excluded_reason": {
+          "const": "cancelled_non_executable"
+        }
+      }
+    },
+    "orderingPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bet_order",
+        "group_order",
+        "number_order",
+        "multiplier_rule_order"
+      ],
+      "properties": {
+        "bet_order": {
+          "const": "candidate_active_bets"
+        },
+        "group_order": {
+          "const": "preserve"
+        },
+        "number_order": {
+          "const": "preserve"
+        },
+        "multiplier_rule_order": {
+          "const": "preserve"
+        }
+      }
+    },
+    "logicalPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "game",
+        "source_candidate_identity",
+        "target_profile_identity",
+        "ordering_policy",
+        "operations",
+        "cancelled_audit_refs"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "vision-webfill-logical-plan-v1"
+        },
+        "game": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_candidate_identity": {
+          "$ref": "#/$defs/candidateIdentity"
+        },
+        "target_profile_identity": {
+          "$ref": "#/$defs/targetProfileIdentity"
+        },
+        "ordering_policy": {
+          "$ref": "#/$defs/orderingPolicy"
+        },
+        "operations": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/logicalOperation"
+          }
+        },
+        "cancelled_audit_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/cancelledAuditRef"
+          }
+        }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "validated_operation_count",
+        "source_active_bet_count",
+        "source_cancelled_bet_count",
+        "all_source_bets_accounted",
+        "adapter_compilation_status"
+      ],
+      "properties": {
+        "status": {
+          "const": "VALID_DRY_RUN"
+        },
+        "validated_operation_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "source_active_bet_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "source_cancelled_bet_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "all_source_bets_accounted": {
+          "const": true
+        },
+        "adapter_compilation_status": {
+          "const": "NOT_COMPILED"
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value_authority",
+        "candidate_validation_schema_version",
+        "candidate_validation_status",
+        "candidate_validated_at",
+        "review_session_id",
+        "human_answer_revision",
+        "human_answer_hash",
+        "source_image_hash",
+        "machine_evidence_used_as_values"
+      ],
+      "properties": {
+        "value_authority": {
+          "const": "validated_candidate_human_answer"
+        },
+        "candidate_validation_schema_version": {
+          "const": "vision-candidate-consumption-validation-v1"
+        },
+        "candidate_validation_status": {
+          "const": "VALID_CURRENT"
+        },
+        "candidate_validated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "review_session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "human_answer_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "human_answer_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "source_image_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "machine_evidence_used_as_values": {
+          "const": false
+        }
+      }
+    },
+    "safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dry_run_only",
+        "semantic_plan_only",
+        "adapter_compiled",
+        "dom_mapping_present",
+        "browser_automation_authorized",
+        "approved_for_fill",
+        "approved_for_submit",
+        "webfill_authorized",
+        "submitted",
+        "auto_submit",
+        "queue_completed"
+      ],
+      "properties": {
+        "dry_run_only": {
+          "const": true
+        },
+        "semantic_plan_only": {
+          "const": true
+        },
+        "adapter_compiled": {
+          "const": false
+        },
+        "dom_mapping_present": {
+          "const": false
+        },
+        "browser_automation_authorized": {
+          "const": false
+        },
+        "approved_for_fill": {
+          "const": false
+        },
+        "approved_for_submit": {
+          "const": false
+        },
+        "webfill_authorized": {
+          "const": false
+        },
+        "submitted": {
+          "const": false
+        },
+        "auto_submit": {
+          "const": false
+        },
+        "queue_completed": {
+          "const": false
+        }
+      }
+    }
+  }
+}

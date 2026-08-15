@@ -1,0 +1,177 @@
+{
+  "schema_version": "vision-webfill-prepare-artifact-v1",
+  "prepare_id": "vwp-44444444444444444444444444444444",
+  "created_at": "2026-08-15T08:05:00+00:00",
+  "state_at_creation": "PREPARED",
+  "authority": {
+    "queue": {
+      "queue_entry_id": "vcq-11111111111111111111111111111111",
+      "enqueue_sequence": 7,
+      "queue_revision": 1,
+      "entry_integrity_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "candidate": {
+      "candidate_id": "vc-22222222222222222222222222222222",
+      "candidate_revision": 3,
+      "canonical_content_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "claim": {
+      "claim_id": "vqc-33333333333333333333333333333333",
+      "claim_generation": 2,
+      "fencing_token_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "consumer_id": "vqcns-55555555555555555555555555555555",
+      "authenticated_principal": "reviewed-webfill-prepare-user",
+      "claim_session_id_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "lease_expires_at_at_prepare": "2026-08-15T08:10:00+00:00"
+    },
+    "target_profile": {
+      "target_profile_id": "wtp-betguard-539-logical",
+      "target_profile_version": 1,
+      "profile_integrity_hash": "bdb8082c6c1d5ec1fb69d50cde805a71b8bdf3e671dd67f3fe8258eba5fd7447"
+    },
+    "idempotency_key_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  },
+  "logical_plan": {
+    "schema_version": "vision-webfill-logical-plan-v1",
+    "game": "539",
+    "source_candidate_identity": {
+      "candidate_id": "vc-22222222222222222222222222222222",
+      "candidate_revision": 3,
+      "canonical_content_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "target_profile_identity": {
+      "target_profile_id": "wtp-betguard-539-logical",
+      "target_profile_version": 1,
+      "profile_integrity_hash": "bdb8082c6c1d5ec1fb69d50cde805a71b8bdf3e671dd67f3fe8258eba5fd7447"
+    },
+    "ordering_policy": {
+      "bet_order": "candidate_active_bets",
+      "group_order": "preserve",
+      "number_order": "preserve",
+      "multiplier_rule_order": "preserve"
+    },
+    "operations": [
+      {
+        "operation_index": 1,
+        "operation_type": "LOGICAL_BET_ENTRY",
+        "human_bet_id": "H-001",
+        "bet_type": "normal",
+        "number_groups": [
+          [
+            "30",
+            "35",
+            "36",
+            "38"
+          ]
+        ],
+        "multiplier": {
+          "ordered_rules": [
+            "3/4X1"
+          ],
+          "scope": "bet",
+          "resolved": true
+        },
+        "special_play": {
+          "kind": "none",
+          "raw_text": null,
+          "scope": null,
+          "resolved": true
+        },
+        "continuation": {
+          "present": false,
+          "resolved": true,
+          "binding": "within_human_bet"
+        },
+        "cancelled": false,
+        "active": true,
+        "source_executable": true,
+        "value_authority": "validated_candidate"
+      },
+      {
+        "operation_index": 2,
+        "operation_type": "LOGICAL_BET_ENTRY",
+        "human_bet_id": "H-002",
+        "bet_type": "column",
+        "number_groups": [
+          [
+            "12"
+          ],
+          [
+            "15"
+          ],
+          [
+            "06",
+            "16"
+          ]
+        ],
+        "multiplier": {
+          "ordered_rules": [
+            "2X3",
+            "3X1"
+          ],
+          "scope": "bet",
+          "resolved": true
+        },
+        "special_play": {
+          "kind": "half_car",
+          "raw_text": "各半車",
+          "scope": "bet",
+          "resolved": true
+        },
+        "continuation": {
+          "present": true,
+          "resolved": true,
+          "binding": "within_human_bet"
+        },
+        "cancelled": false,
+        "active": true,
+        "source_executable": true,
+        "value_authority": "validated_candidate"
+      }
+    ],
+    "cancelled_audit_refs": [
+      {
+        "human_bet_id": "H-003",
+        "candidate_section": "cancelled_audit",
+        "excluded_reason": "cancelled_non_executable"
+      }
+    ]
+  },
+  "deterministic_plan_hash": "2074569a380c0069e25d8344b1157175752bcb16e86d47b11c46f292f6aa0581",
+  "authority_binding_hash": "c763f21d1c9eba8de0bee9ad498a835ad0bef4dc7d19750c4ecfe86240efed26",
+  "validation": {
+    "status": "VALID_DRY_RUN",
+    "validated_operation_count": 2,
+    "source_active_bet_count": 2,
+    "source_cancelled_bet_count": 1,
+    "all_source_bets_accounted": true,
+    "adapter_compilation_status": "NOT_COMPILED"
+  },
+  "executable": false,
+  "blocking_reasons": [],
+  "provenance": {
+    "value_authority": "validated_candidate_human_answer",
+    "candidate_validation_schema_version": "vision-candidate-consumption-validation-v1",
+    "candidate_validation_status": "VALID_CURRENT",
+    "candidate_validated_at": "2026-08-15T08:05:00+00:00",
+    "review_session_id": "sample-011-review-session",
+    "human_answer_revision": 12,
+    "human_answer_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "source_image_hash": "9999999999999999999999999999999999999999999999999999999999999999",
+    "machine_evidence_used_as_values": false
+  },
+  "record_integrity_hash": "50fbbfb510eeaa1ff03750931574d7e648ca724e38cf4149ede3974a3f42aa6b",
+  "safety": {
+    "dry_run_only": true,
+    "semantic_plan_only": true,
+    "adapter_compiled": false,
+    "dom_mapping_present": false,
+    "browser_automation_authorized": false,
+    "approved_for_fill": false,
+    "approved_for_submit": false,
+    "webfill_authorized": false,
+    "submitted": false,
+    "auto_submit": false,
+    "queue_completed": false
+  }
+}

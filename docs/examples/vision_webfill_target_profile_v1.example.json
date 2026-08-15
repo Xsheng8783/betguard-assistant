@@ -1,0 +1,40 @@
+{
+  "schema_version": "vision-webfill-target-profile-v1",
+  "target_profile_id": "wtp-betguard-539-logical",
+  "target_profile_version": 1,
+  "game": "539",
+  "capabilities": {
+    "supported_bet_types": [
+      "normal",
+      "column"
+    ],
+    "supported_special_play_kinds": [
+      "none",
+      "tail",
+      "car",
+      "half_car",
+      "each",
+      "each_half_car",
+      "structured_human_play"
+    ],
+    "supports_continuation": true,
+    "supports_multiple_multiplier_rules": true,
+    "maximum_active_bets": 100,
+    "maximum_number_groups_per_bet": 12,
+    "maximum_numbers_per_group": 39
+  },
+  "ordering_contract": {
+    "bet_order": "preserve_candidate_active_bets",
+    "group_order": "preserve",
+    "number_order": "preserve",
+    "multiplier_rule_order": "preserve"
+  },
+  "adapter_boundary": {
+    "logical_contract_only": true,
+    "dom_mapping_present": false,
+    "browser_execution_authorized": false,
+    "submit_authorized": false
+  },
+  "created_at": "2026-08-15T08:00:00+00:00",
+  "profile_integrity_hash": "bdb8082c6c1d5ec1fb69d50cde805a71b8bdf3e671dd67f3fe8258eba5fd7447"
+}

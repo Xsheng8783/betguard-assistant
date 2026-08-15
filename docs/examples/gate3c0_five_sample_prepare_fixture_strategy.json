@@ -1,0 +1,77 @@
+{
+  "schema_version": "gate3c0-five-sample-prepare-fixture-strategy-v1",
+  "authority_fixture_chain": [
+    "persisted_human_review",
+    "immutable_candidate",
+    "candidate_consumption_valid_current",
+    "validated_candidate_queue_entry",
+    "active_claim",
+    "webfill_prepare_dry_run"
+  ],
+  "fixtures": [
+    {
+      "sample_id": "sample-007",
+      "required_features": [
+        "normal_bet",
+        "column_bet",
+        "special_play_scope",
+        "cancelled_audit"
+      ],
+      "expected_active_operation_count": 24,
+      "expected_cancelled_audit_ref_count": 1
+    },
+    {
+      "sample_id": "sample-008",
+      "required_features": [
+        "human_corrected_numbers",
+        "nested_number_groups"
+      ],
+      "expected_active_operation_count": null,
+      "expected_cancelled_audit_ref_count": null
+    },
+    {
+      "sample_id": "sample-010",
+      "required_features": [
+        "column_bet",
+        "multiple_multiplier_rules",
+        "special_play_scope"
+      ],
+      "expected_active_operation_count": null,
+      "expected_cancelled_audit_ref_count": null
+    },
+    {
+      "sample_id": "sample-011",
+      "required_features": [
+        "human_corrected_number_30",
+        "stacked_multiplier_3_4X1",
+        "column_bet",
+        "continuation"
+      ],
+      "expected_active_operation_count": null,
+      "expected_cancelled_audit_ref_count": null
+    },
+    {
+      "sample_id": "sample-014",
+      "required_features": [
+        "continuation",
+        "independent_multiplier_scopes",
+        "special_play_scope",
+        "cancelled_audit"
+      ],
+      "expected_active_operation_count": null,
+      "expected_cancelled_audit_ref_count": null
+    }
+  ],
+  "common_assertions": [
+    "one_operation_per_active_candidate_bet",
+    "candidate_order_preserved",
+    "nested_number_groups_deep_equal",
+    "multiplier_rules_and_scope_deep_equal",
+    "special_play_deep_equal",
+    "continuation_deep_equal",
+    "cancelled_values_absent_from_operations",
+    "deterministic_plan_hash_stable",
+    "upstream_store_bytes_unchanged",
+    "browser_webfill_submit_queue_completion_external_calls_zero"
+  ]
+}

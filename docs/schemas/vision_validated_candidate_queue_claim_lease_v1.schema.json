@@ -1,0 +1,432 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://betguard.local/schemas/vision-validated-candidate-queue-claim-lease-v1.json",
+  "title": "Betguard Validated Candidate Queue Claim and Lease Records V1",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/claimRecord"
+    },
+    {
+      "$ref": "#/$defs/claimEvent"
+    },
+    {
+      "$ref": "#/$defs/clockState"
+    }
+  ],
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "candidateIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_id",
+        "candidate_revision",
+        "canonical_content_hash"
+      ],
+      "properties": {
+        "candidate_id": {
+          "type": "string",
+          "pattern": "^vc-[a-f0-9]{32}$"
+        },
+        "candidate_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "canonical_content_hash": {
+          "$ref": "#/$defs/hash"
+        }
+      }
+    },
+    "queueEntryIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "queue_entry_id",
+        "enqueue_sequence",
+        "entry_integrity_hash"
+      ],
+      "properties": {
+        "queue_entry_id": {
+          "type": "string",
+          "pattern": "^vcq-[a-f0-9]{32}$"
+        },
+        "enqueue_sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "entry_integrity_hash": {
+          "$ref": "#/$defs/hash"
+        }
+      }
+    },
+    "leaseOwner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "consumer_id",
+        "authenticated_principal",
+        "server_session_id"
+      ],
+      "properties": {
+        "consumer_id": {
+          "type": "string",
+          "pattern": "^vqcns-[a-f0-9]{32}$"
+        },
+        "authenticated_principal": {
+          "type": "string",
+          "minLength": 1
+        },
+        "server_session_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "leasePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy_version",
+        "lease_seconds",
+        "maximum_total_seconds"
+      ],
+      "properties": {
+        "policy_version": {
+          "const": "vision-validated-candidate-lease-policy-v1"
+        },
+        "lease_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maximum_total_seconds": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "validationIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "validation_status",
+        "validated_at"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "vision-candidate-consumption-validation-v1"
+        },
+        "validation_status": {
+          "const": "VALID_CURRENT"
+        },
+        "validated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "read_only_claim",
+        "identity_reference_only",
+        "candidate_values_embedded",
+        "approved_for_fill",
+        "approved_for_submit",
+        "webfill_authorized",
+        "auto_confirm",
+        "auto_submit",
+        "completed"
+      ],
+      "properties": {
+        "read_only_claim": {
+          "const": true
+        },
+        "identity_reference_only": {
+          "const": true
+        },
+        "candidate_values_embedded": {
+          "const": false
+        },
+        "approved_for_fill": {
+          "const": false
+        },
+        "approved_for_submit": {
+          "const": false
+        },
+        "webfill_authorized": {
+          "const": false
+        },
+        "auto_confirm": {
+          "const": false
+        },
+        "auto_submit": {
+          "const": false
+        },
+        "completed": {
+          "const": false
+        }
+      }
+    },
+    "claimRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "claim_id",
+        "claim_generation",
+        "fencing_token",
+        "queue_entry_identity",
+        "candidate_identity",
+        "lease_owner",
+        "lease_policy",
+        "claim_action_id",
+        "claim_idempotency_key_hash",
+        "issued_at",
+        "expires_at",
+        "validation",
+        "state_at_creation",
+        "record_integrity_hash",
+        "safety"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "vision-validated-candidate-queue-claim-v1"
+        },
+        "claim_id": {
+          "type": "string",
+          "pattern": "^vqc-[a-f0-9]{32}$"
+        },
+        "claim_generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "fencing_token": {
+          "type": "string",
+          "pattern": "^vqf-[a-f0-9]{64}$"
+        },
+        "queue_entry_identity": {
+          "$ref": "#/$defs/queueEntryIdentity"
+        },
+        "candidate_identity": {
+          "$ref": "#/$defs/candidateIdentity"
+        },
+        "lease_owner": {
+          "$ref": "#/$defs/leaseOwner"
+        },
+        "lease_policy": {
+          "$ref": "#/$defs/leasePolicy"
+        },
+        "claim_action_id": {
+          "type": "string",
+          "pattern": "^qca-[a-f0-9]{32}$"
+        },
+        "claim_idempotency_key_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "issued_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "validation": {
+          "$ref": "#/$defs/validationIdentity"
+        },
+        "state_at_creation": {
+          "const": "ACTIVE"
+        },
+        "record_integrity_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "safety": {
+          "$ref": "#/$defs/safety"
+        }
+      }
+    },
+    "claimEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "event_id",
+        "claim_id",
+        "queue_entry_id",
+        "claim_generation",
+        "event_sequence",
+        "event_type",
+        "occurred_at",
+        "lease_expires_at",
+        "actor",
+        "reason_code",
+        "action_id",
+        "idempotency_key_hash",
+        "fencing_token",
+        "claim_record_integrity_hash",
+        "event_integrity_hash"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "vision-validated-candidate-queue-claim-event-v1"
+        },
+        "event_id": {
+          "type": "string",
+          "pattern": "^vqce-[a-f0-9]{32}$"
+        },
+        "claim_id": {
+          "type": "string",
+          "pattern": "^vqc-[a-f0-9]{32}$"
+        },
+        "queue_entry_id": {
+          "type": "string",
+          "pattern": "^vcq-[a-f0-9]{32}$"
+        },
+        "claim_generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "event_sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "event_type": {
+          "enum": [
+            "CLAIMED",
+            "RENEWED",
+            "RELEASED",
+            "ABANDONED",
+            "EXPIRED",
+            "AUTHORITY_BLOCKED"
+          ]
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "lease_expires_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason_code": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "action_id": {
+          "type": "string",
+          "pattern": "^q(?:ca|ra|xa|aa|ea|ba)-[a-f0-9]{32}$"
+        },
+        "idempotency_key_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "fencing_token": {
+          "type": "string",
+          "pattern": "^vqf-[a-f0-9]{64}$"
+        },
+        "claim_record_integrity_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "event_integrity_hash": {
+          "$ref": "#/$defs/hash"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "event_type": {
+                "enum": [
+                  "CLAIMED",
+                  "RENEWED"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "lease_expires_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {
+                "enum": [
+                  "RELEASED",
+                  "ABANDONED",
+                  "EXPIRED",
+                  "AUTHORITY_BLOCKED"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "lease_expires_at": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "clockState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "store_id",
+        "observation_sequence",
+        "last_observed_utc",
+        "record_integrity_hash"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "vision-validated-candidate-queue-claim-clock-v1"
+        },
+        "store_id": {
+          "type": "string",
+          "pattern": "^vqcs-[a-f0-9]{32}$"
+        },
+        "observation_sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "last_observed_utc": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "record_integrity_hash": {
+          "$ref": "#/$defs/hash"
+        }
+      }
+    }
+  }
+}

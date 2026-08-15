@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://betguard.local/schemas/vision-webfill-prepare-lifecycle-event-v1.json",
+  "title": "Betguard Webfill Prepare Lifecycle Event V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "prepare_id",
+    "event_sequence",
+    "event_type",
+    "occurred_at",
+    "actor",
+    "reason_code",
+    "upstream_state",
+    "authority_binding_hash",
+    "deterministic_plan_hash",
+    "prepare_record_integrity_hash",
+    "event_integrity_hash"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "vision-webfill-prepare-lifecycle-event-v1"
+    },
+    "event_id": {
+      "type": "string",
+      "pattern": "^vwpe-[a-f0-9]{32}$"
+    },
+    "prepare_id": {
+      "type": "string",
+      "pattern": "^vwp-[a-f0-9]{32}$"
+    },
+    "event_sequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "event_type": {
+      "enum": [
+        "PREPARED",
+        "AUTHORITY_BLOCKED",
+        "EXPIRED",
+        "INVALIDATED",
+        "SUPERSEDED",
+        "REVOKED"
+      ]
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "actor": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reason_code": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "upstream_state": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "authority_binding_hash": {
+      "$ref": "#/$defs/hash"
+    },
+    "deterministic_plan_hash": {
+      "$ref": "#/$defs/hash"
+    },
+    "prepare_record_integrity_hash": {
+      "$ref": "#/$defs/hash"
+    },
+    "event_integrity_hash": {
+      "$ref": "#/$defs/hash"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "PREPARED"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "event_sequence": {
+            "const": 1
+          },
+          "reason_code": {
+            "type": "null"
+          },
+          "upstream_state": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "enum": [
+              "AUTHORITY_BLOCKED",
+              "EXPIRED",
+              "INVALIDATED",
+              "SUPERSEDED",
+              "REVOKED"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "event_sequence": {
+            "minimum": 2
+          },
+          "reason_code": {
+            "type": "string",
+            "minLength": 1
+          },
+          "upstream_state": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  }
+}
