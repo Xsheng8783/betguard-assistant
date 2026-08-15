@@ -4,20 +4,76 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+env:
+  BETGUARD_GEMMA_SHADOW_ENABLED: "0"
+  BETGUARD_PPOCR_SHADOW_ENABLED: "0"
+  GEMINI_API_KEY: ""
+  DASHSCOPE_API_KEY: ""
+
 jobs:
-  test:
+  core:
+    name: Deterministic core
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install Python deps
-        run: python -m pip install --upgrade pip pytest pillow
-      - name: Python audit + core suites
-        run: python -m pytest tests/test_sample034_audit.py tests/test_pipeline.py tests/test_column_geometry.py tests/test_deterministic_checks.py tests/test_semantic_parser.py tests/test_vision_closed_set.py tests/test_ab_replay_regression.py -q
+          cache: pip
+      - name: Install project and development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+      - name: Python audit and core suites
+        run: >-
+          python -m pytest --disable-socket
+          --allow-hosts=127.0.0.1,localhost
+          tests/test_sample034_audit.py
+          tests/test_pipeline.py
+          tests/test_column_geometry.py
+          tests/test_deterministic_checks.py
+          tests/test_semantic_parser.py
+          tests/test_vision_closed_set.py
+          tests/test_ab_replay_regression.py
+          -q
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
       - name: Node ROI tests
         run: node sample-034-debug/review-tool/test_roi_apply.mjs
+
+  authority-read-only:
+    name: Authority and read-only synthetic gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install project and development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+      - name: Install Chromium for local synthetic UI tests only
+        run: python -m playwright install --with-deps chromium
+      - name: Candidate, Queue, Claim, Prepare, Mapping, Observation, and Human Review
+        run: >-
+          python -m pytest --disable-socket
+          --allow-hosts=127.0.0.1,localhost
+          tests/test_vision_candidate_authority_gate3b1.py
+          tests/test_vision_candidate_authority_api_gate3b1.py
+          tests/test_vision_candidate_consumption_boundary_gate3b2.py
+          tests/test_vision_validated_candidate_queue_gate3b3a.py
+          tests/test_vision_validated_candidate_queue_api_ui_gate3b3a.py
+          tests/test_vision_validated_candidate_claims_gate3b3b1.py
+          tests/test_vision_validated_candidate_claim_lease_adversarial_gate3b3b1.py
+          tests/test_vision_webfill_prepare_gate3c0.py
+          tests/test_vision_webfill_prepare_adversarial_gate3c0.py
+          tests/test_vision_webfill_mapping_preview_gate3c2.py
+          tests/test_vision_webfill_browser_observation_gate3c4.py
+          tests/test_assisted_human_review_productization.py
+          -q

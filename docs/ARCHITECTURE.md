@@ -1,142 +1,161 @@
-# Architecture
+# Betguard Assistant Architecture
 
-betguard-assistant is organized around a local, auditable review pipeline. The current release package is for local review, mock assisted fill, demo, and audit export. There is no live site operation in this package.
+## System boundary
 
-## Modules
+Betguard Assistant is a local, auditable, human-authorized workflow. Machine
+output is never executable authority. The current branch ends at synthetic,
+read-only browser observation and does not implement real-site capture, DOM
+mutation, fill, or submit.
 
-### `input_preprocessor.py`
-
-Cleans LINE / chat paste text, strips obvious metadata, splits repeated-dot groups, preserves `original_text`, and produces candidate fragments with preprocessing notes.
-
-### `parser.py`
-
-Parses supported bet fragments into structured results. It handles normal, column, tail-expanded column, car, per-star amounts, and game-specific number ranges. Unclear or unsupported text remains invalid or warning instead of being guessed.
-
-### `formatter.py`
-
-Builds human-readable summaries for parsed bets and review results. These summaries are used by CLI output, queue reports, audit, and local HTML review pages.
-
-### `batch_mock_queue.py`
-
-Builds the batch queue from preprocessing and review results. It enforces the review states and the one-item-at-a-time mock flow.
-
-Important statuses:
-
-- `READY_FOR_QUEUE`
-- `NEEDS_REVIEW`
-- `WAITING_FOR_HUMAN_CONFIRM`
-- `MOCK_FILL_FAILED`
-- `REJECTED`
-- `COMPLETED`
-- `BATCH_BLOCKED`
-
-### `assisted_fill_mock.py`
-
-Runs mock-only assisted fill for supported normal, column, and car bets. It records selected numbers, selected columns, car number, and filled amounts. It never clicks danger buttons.
-
-### `batch_audit.py`
-
-Creates and updates JSON-serializable audit data. Audit preserves original text, candidate fragments, invalid reasons, queue item state, mock result summaries, and safety flags.
-
-### `review_console.py`
-
-Builds a local review console model and static HTML report from queue state. The report displays preprocessing, valid candidates, invalid fragments, queue view, actions, audit summary, and safety flags. It does not execute actions.
-
-### `demo_e2e.py`
-
-Generates the offline end-to-end demo pack: queue state, review HTML, audit JSON, and summary text.
-
-### `cli.py`
-
-Provides command-line entry points for demo generation, review HTML, accept/reject, mock next, audit export, and read-only selector inspection tools.
-
-## Data Flow
+## Authority flow
 
 ```text
-original_text
--> input_preprocessor candidate fragments
--> parser parsed result
--> review result
--> queue item
--> mock result
--> audit export
--> local review report
+Image / AI suggestions
+        |
+        v
+Assisted Human Review
+        |
+        | explicit per-bet confirmation
+        v
+Persisted Human Confirmed Answer       (only value authority)
+        |
+        v
+Immutable Candidate                    (value snapshot)
+        |
+        v
+Candidate Consumption Validator        (freshness/integrity/structure)
+        |
+        v
+Identity-only Queue                     (no copied bet values)
+        |
+        v
+Claim / Lease                           (single consumer, fencing token)
+        |
+        v
+Dry-run Prepare Artifact                (deterministic logical plan)
+        |
+        v
+Mapping Preview                         (identity/hash pointers only)
+        |
+        v
+Synthetic Read-only Browser Observation (no real provider)
 ```
 
-The original text and every original fragment are preserved for audit. Invalid fragments are not removed when valid candidates are accepted.
+Each downstream read revalidates upstream identity, integrity, lifecycle, and
+freshness. A downstream store cannot repair, normalize, vote on, or overwrite
+upstream values.
 
-## State Flow
+## Layer responsibilities
 
-```text
-READY
--> READY_FOR_QUEUE
--> WAITING_FOR_HUMAN_CONFIRM
--> COMPLETED
-```
+### Machine evidence and Assisted Human Review
 
-If the batch contains invalid or warning fragments:
+Qwen, Gemma, PP-OCRv6, parser output, and development-time Codex Vision are
+separate evidence sources. The review UI supports field-level adoption and
+manual editing, but every adoption or edit clears `human_confirmed` until the
+user explicitly confirms the bet again. Machine evidence remains immutable.
 
-```text
-NEEDS_REVIEW
--> accept valid -> READY_FOR_QUEUE / WAITING_FOR_HUMAN_CONFIRM
--> reject -> REJECTED
-```
+Dense-page or provider failure must not make review impossible. The user can
+create a manual bet, edit its nested groups and scopes, and confirm it without
+promoting a failed machine response.
 
-If no valid candidate exists:
+### Human Review authority
 
-```text
-BATCH_BLOCKED
-```
+`candidate_authority.py` persists Human Review revisions and explicit
+confirmation metadata. Server-side compare-and-swap operations prevent a stale
+browser session from confirming or creating a Candidate from an old revision.
 
-## Safety Boundary
+### Immutable Candidate
 
-- No live site operation.
-- No submit.
-- No click on send / confirm / clear / delete / danger buttons.
-- Mock fill only operates local mock data.
-- Read-only snapshot tools may inspect DOM/text/attributes only.
-- `real_site_operation=false`
-- `auto_submit=false`
-- `danger_buttons_clicked=[]`
+Candidate values are loaded only from persisted Human Review state. Candidate
+snapshots are immutable and content-addressed. Later Human Review edits make an
+older Candidate stale through append-only lifecycle events; the old Candidate
+bytes are not rewritten.
 
-Readonly snapshot code must remain read-only. It must not fill, click, press, submit, or trigger any real website action.
+Cancelled bets are retained in the audit snapshot with `active=false` and
+`executable=false`.
 
-## End-to-End Flow (gated pipeline)
+### Candidate Consumption Validator
 
-The sections above describe the modules. This section describes the full flow
-and, more importantly, the gates between stages. Every arrow crossing a gate
-requires an explicit human step — nothing advances automatically.
+`candidate_consumption.py` is the read-only authority boundary used by later
+Gates. It validates schema, canonical content hash, lifecycle, persisted Human
+Review projection, nested structure, and provenance. It returns
+`VALID_CURRENT` or a stable fail-closed error and never mutates Candidate data.
 
-```text
-input.txt
-  -> parser (+ input_preprocessor)         # produces valid candidates + invalid/needs-review
-  -> review.html                            # human reads the review
-  -> audit.json                             # raw text + parsed result recorded
-  -> [GATE] accept-valid                    # explicit human confirmation
-  -> approved_fill_queue                    # created ONLY after accept-valid
-  -> queue_state.json                       # persisted approved snapshot
-  -> fill-preview / mock-fill               # read approved_fill_queue ONLY
-  -> site profile (read-only snapshot)      # DOM/text/attribute inspection only
-  -> map-dry-run                            # selector mapping report (SAFE / BLOCKED)
-  -> future assisted fill                   # NOT IMPLEMENTED; stays gated
-```
+### Identity-only Queue
 
-### Gate rules
+`validated_candidate_queue.py` stores Candidate identity, revision, content
+hash, FIFO sequence, and lifecycle only. It does not store numbers,
+`number_groups`, multiplier, continuation, special-play, or bet payloads.
 
-- **Valid candidates alone are not enough.** A parsed-valid item is a
-  *candidate*, not an approved action. It cannot enter any fill flow on its own.
-- **accept-valid is required.** `approved_fill_queue` is created only after a
-  human runs accept-valid. Without that step there is no approved queue.
-- **Needs Review / Invalid / Watchlist never enter the fill flow.** These items
-  must never appear in `approved_fill_queue`, `fill-preview`, `mock-fill`, or any
-  future assisted fill. They stay in review only.
-- **fill-preview and mock-fill read `approved_fill_queue` only.** They never read
-  raw candidates, never re-parse, and never pull unreviewed items.
-- **map-dry-run is reporting-only.** It maps selectors and reports SAFE / BLOCKED.
-  It never clicks, fills, or submits. Ambiguous or shared selectors stay BLOCKED
-  (see `DIAGNOSTICS_GUIDE.md`).
-- **future assisted fill is not implemented.** Any real-site click/fill/submit
-  path is out of scope for this package and must remain gated behind an explicit,
-  separately-implemented step.
+Enqueue and remove require explicit server-bound human actions. `prepare_next`
+is diagnostic and read-only; it does not claim, fill, or complete an entry.
 
-See `SAFETY_INVARIANTS.md` for the non-negotiable rules that back these gates.
+### Claim / Lease
+
+`validated_candidate_claims.py` provides one active claim generation per Queue
+Entry. Owner/session identity, expiry, generation, and fencing token are
+checked on every authoritative access. Candidate authority loss blocks both the
+Claim and Queue. Release, abandon, expiry, and authority blocking are
+append-only lifecycle events. There is no `COMPLETED`, fill, or submit path.
+
+### Dry-run Prepare
+
+`webfill_prepare.py` compiles a deterministic logical plan from a freshly
+validated Candidate. It preserves bet order, nested column groups, multiplier
+order and scope, continuation, special play, and cancelled audit references.
+Prepare is immutable, dry-run-only, and non-executable.
+
+### Mapping Preview
+
+`webfill_mapping_preview.py` maps logical pointers to a committed structural
+Observation and a versioned Adapter Profile. The Preview stores hashes and
+pointers rather than copied bet values. Ambiguous, missing, disabled, readonly,
+or occupied fields remain blocked. A fresh Human Preview joins values at read
+time without persisting them into the Mapping Preview.
+
+### Synthetic read-only Browser Observation
+
+`webfill_browser_observation.py` defines `ReadOnlyBrowserObservationPort` and a
+stable two-pass capture protocol. The production core accepts only sanitized,
+allowlisted structural observations from a trusted port. It records immutable
+capture/audit data, uses commit-last visibility, and detects navigation,
+document, mutation-generation, restart, and TOCTOU changes.
+
+Only a synthetic driver exists in tests. There is no Playwright, Selenium,
+browser-protocol, HTTP, or real-site provider in this production module.
+
+## Persistence model
+
+Authority stores use immutable snapshots, append-only lifecycle events,
+deterministic canonical JSON, integrity hashes, atomic writes, and final commit
+markers. Read paths ignore or reject incomplete transactions. Recovery resumes
+only exact, validated pending work and fails closed on conflicts.
+
+## Legacy isolation
+
+The validated Candidate/Queue/Claim chain is isolated from legacy
+`approved_fill_queue`, manual candidate registries, old mock queues, and legacy
+Webfill routes. No implicit conversion or ID aliasing is allowed.
+
+## Current completion boundary
+
+Implemented and tested:
+
+- Assisted Human Review and server-side Human Review authority
+- immutable Candidate and consumption validation
+- identity-only Queue
+- Claim / Lease with fencing and recovery
+- dry-run Prepare
+- Mapping Preview
+- synthetic read-only Browser Observation
+
+Not implemented:
+
+- Real Browser Read-only Provider
+- real DOM capture
+- Assisted Fill execution
+- Queue/Claim completion by a fill consumer
+- submit or auto-submit
+
+The next permissible activity is design review for a Real Browser Read-only
+Provider. It is not authorized by the current implementation.
