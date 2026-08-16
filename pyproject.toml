@@ -13,7 +13,8 @@ authors = [
 ]
 dependencies = [
   "streamlit>=1.36",
-  "Pillow>=10.3"
+  "Pillow>=10.3",
+  "cryptography>=41"
 ]
 
 [project.optional-dependencies]
@@ -21,7 +22,8 @@ dev = [
   "pytest>=8",
   "pytest-socket>=0.7",
   "jsonschema[format]>=4.22",
-  "playwright>=1.45"
+  "playwright>=1.45",
+  "pynacl>=1.5"
 ]
 
 [project.scripts]
