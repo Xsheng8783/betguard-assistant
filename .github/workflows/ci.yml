@@ -38,6 +38,31 @@ jobs:
           tests/test_semantic_parser.py
           tests/test_vision_closed_set.py
           tests/test_ab_replay_regression.py
+          tests/test_license.py
+          tests/test_license_canonical.py
+          tests/test_license_dedup.py
+          tests/test_license_unbound.py
+          tests/test_webui_license.py
+          tests/test_launcher_frozen.py
+          tests/test_parser_car.py
+          tests/test_parser_column.py
+          tests/test_parser_complex_normal.py
+          tests/test_parser_normal.py
+          tests/test_parser_review_expectations.py
+          tests/test_parser_safe_format_expansion.py
+          tests/test_input_preprocessor.py
+          tests/test_input_format_boundaries.py
+          tests/test_input_format_diagnostic_report.py
+          tests/test_validator.py
+          tests/test_formatter.py
+          tests/test_game_rules.py
+          tests/test_tail_expander.py
+          tests/test_dotted_star_suffix.py
+          tests/test_needs_review_classification.py
+          tests/test_customer_real_formats_v3.py
+          tests/test_batch_preprocessor_review_mode.py
+          tests/test_amount_field_position_precision.py
+          tests/test_release_docs.py
           -q
       - uses: actions/setup-node@v4
         with:
