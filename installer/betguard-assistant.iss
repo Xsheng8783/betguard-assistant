@@ -1,7 +1,7 @@
 ; Inno Setup script for Betguard Assistant v0.5.36-beta
 
 #define MyAppName "Betguard 牌單助手"
-#define MyAppVersion "0.5.39-beta"
+#define MyAppVersion "0.5.40-beta"
 #define MyAppPublisher "Betguard"
 #define MyAppURL "http://127.0.0.1:8765"
 #define MyAppExeName "BetguardAssistant.exe"
