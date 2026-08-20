@@ -370,7 +370,7 @@ def render_vision_ui_section() -> str:
     if (!uploadedImageId) return;
     var btn = document.getElementById("vision-run-btn");
     btn.disabled = true;
-    btn.textContent = "辨識中...";
+    btn.textContent = "AI 辨識中；正在檢查不確定區域...";
     fetch("/api/vision/v1/jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -536,6 +536,9 @@ def render_vision_ui_section() -> str:
     };
     var sourceStatus = provisional ? "incomplete" :
       (staged.number_groups.length && staged.multiplier_rules.length && !draft.uncertain ? "consistent" : "incomplete");
+    var cropSuggestion = draft.crop_reread_suggestion
+      ? _cloneJson(draft.crop_reread_suggestion) : null;
+    var cropStatus = String(draft.crop_reread_status || "");
     return {
       human_bet_id: _qwenHumanBetId(index),
       structure_id: "RUNTIME-" + String(index + 1).padStart(3, "0"),
@@ -545,11 +548,22 @@ def render_vision_ui_section() -> str:
       draft_classification: draftClassification, provisional_review: provisional,
       needs_review: provisional || draft.needs_review === true,
       warnings: (draft.uncertain || provisional) ? ["machine_suggestion_uncertain"] : [],
+      crop_reread_status:cropStatus,
+      crop_reread_geometry:_cloneJson(draft.crop_reread_geometry || null),
+      crop_reread_suggestion:cropSuggestion,
+      crop_reread_conflicts:_cloneJson(draft.crop_reread_conflicts || []),
+      ai_recheck_conflict:draft.ai_recheck_conflict === true,
       evidence: {raw_text: draft.raw_text || ""}, edit_text: draft.raw_text || "", reparse_preview: null,
       preview_error: "", manual_edits: [], field_corrections: [],
       evidence_sources: {
         qwen: qwenEvidence ? {source:"Qwen second opinion", raw:_cloneJson(qwenEvidence)} : null,
         gemma: item ? Object.assign({source:"Gemma suggestion"}, _cloneJson(item)) : null,
+        crop_reread: cropSuggestion ? {
+          source:"Gemma local crop re-read", status:cropStatus,
+          suggestion:_cloneJson(cropSuggestion),
+          geometry:_cloneJson(draft.crop_reread_geometry || null),
+          conflicts:_cloneJson(draft.crop_reread_conflicts || [])
+        } : null,
         ppocr: ppocrShadowEvidence ? {source:"PP evidence"} : null,
         codex: null,
         human_answer: {source:"Human Answer", human_confirmed:false, staged_structure:_cloneJson(staged)}
@@ -599,6 +613,13 @@ def render_vision_ui_section() -> str:
           ? "AI 已讀到部分投注，仍有內容需要人工補充。"
           : "AI 建議已預填；每一筆仍需人工確認。")
       : "AI建議不可用，仍可手動輸入。";
+    var cropDiagnostics = seed.machine_read_diagnostics || {};
+    var cropSelectedCount = Number(cropDiagnostics.crop_reread_selected_count || 0);
+    var cropAcceptedCount = Number(cropDiagnostics.crop_reread_accepted_count || 0);
+    var cropNotice = cropSelectedCount > 0
+      ? '<div id="runtime-crop-reread-notice" style="padding:7px;background:#f0fdf4;color:#166534;font-weight:700">AI 已二次檢查 ' +
+        esc(String(cropSelectedCount)) + ' 個不確定區域；取得 ' +
+        esc(String(cropAcceptedCount)) + ' 筆放大影像建議。</div>' : '';
     var unresolvedCount = Array.isArray(seed.unresolved_machine_fragments)
       ? seed.unresolved_machine_fragments.length : 0;
     var fragmentNotice = unresolvedCount > 0
@@ -606,6 +627,7 @@ def render_vision_ui_section() -> str:
         esc(String(unresolvedCount)) + ' 個未能安全組成投注的片段，請檢查。</div>' : '';
     document.getElementById("vision-results-body").innerHTML =
       '<div id="runtime-reader-status" style="padding:7px;background:#eff6ff;color:#1e40af;font-weight:700">' + esc(status) + '</div>' +
+      cropNotice +
       fragmentNotice +
       '<div id="qwen-review-session"></div><details id="runtime-reader-advanced" style="margin-top:8px"><summary>進階資訊</summary><pre style="white-space:pre-wrap">' +
       esc(JSON.stringify({routing_decision:routing.routing_decision, fallback_reason:routing.fallback_reason, counters:routing.model_call_counters, cache:routing.cache_status, machine_read_diagnostics:seed.machine_read_diagnostics || {}, unresolved_machine_fragments:seed.unresolved_machine_fragments || []}, null, 2)) +
@@ -1538,6 +1560,13 @@ def render_vision_ui_section() -> str:
       conflicts.multiplier = conflicts.multiplier || (gemmaRules.length > 0 && !_sameReviewValue(gemmaRules, stagedRules));
       conflicts.layout = conflicts.layout || (gemmaLayout !== "unknown" && stagedLayout !== "unknown" && gemmaLayout !== stagedLayout);
     }
+    var cropConflicts = Array.isArray(card.crop_reread_conflicts)
+      ? card.crop_reread_conflicts : [];
+    conflicts.numbers = conflicts.numbers || cropConflicts.indexOf("number_groups") >= 0;
+    conflicts.multiplier = conflicts.multiplier ||
+      cropConflicts.indexOf("multiplier_rules") >= 0 ||
+      cropConflicts.indexOf("multiplier_raw") >= 0;
+    conflicts.layout = conflicts.layout || cropConflicts.indexOf("layout") >= 0;
     return conflicts;
   }
 
@@ -1582,7 +1611,22 @@ def render_vision_ui_section() -> str:
     if (gemmaLayout !== "unknown" && layoutDiffer) {
       html += '<button type="button" class="adopt-gemma-layout" onclick="qwenReviewAdoptGemmaLayout(' + index + ')">採用 Gemma 版型</button>';
     }
-    return html + '</div></section>';
+    html += '</div>';
+    var crop = sources.crop_reread || null;
+    if (crop && crop.suggestion) {
+      var cropSuggestion = crop.suggestion || {};
+      html += '<div class="gemma-crop-reread-source" style="margin-top:7px;padding-top:6px;border-top:1px solid #e2e8f0">' +
+        '<strong>Gemma 放大區域二次檢查</strong>' +
+        '<div>號碼 ' + esc(JSON.stringify(cropSuggestion.number_groups_suggestion || [])) +
+        '；倍率 ' + esc(JSON.stringify(cropSuggestion.multiplier_rules_suggestion || cropSuggestion.multiplier_raw || [])) +
+        '；版型 ' + esc(_qwenLayoutLabel(cropSuggestion.layout_suggestion || "unknown")) +
+        '；特殊 ' + esc(String(cropSuggestion.special_play_raw || "none")) + '</div>';
+      if (String(crop.status || "") === "AI_RECHECK_CONFLICT") {
+        html += '<div class="gemma-crop-reread-conflict" style="color:#9a3412;font-weight:700">AI_RECHECK_CONFLICT｜整頁與放大影像不同，請由人工判斷；未自動覆蓋 Human Answer。</div>';
+      }
+      html += '</div>';
+    }
+    return html + '</section>';
   }
 
   function _qwenAdvancedGemmaCandidatesHtml(card, index) {
@@ -1721,6 +1765,13 @@ def render_vision_ui_section() -> str:
     } else if (card.draft_classification === "SAFE_DRAFT") {
       html += '<div class="runtime-draft-classification runtime-draft-safe" style="margin-top:6px;color:#166534;font-size:12px;font-weight:700">SAFE_DRAFT</div>';
     }
+    if (card.crop_reread_status) {
+      var rereadLabel = card.crop_reread_status === "AI_REREAD_CONFIRMED"
+        ? "AI 已二次檢查" : "AI 仍不確定";
+      html += '<div class="runtime-crop-reread-badge" data-crop-reread-status="' +
+        esc(card.crop_reread_status) + '" style="margin-top:5px;font-size:12px;font-weight:700;color:#1d4ed8">' +
+        esc(rereadLabel) + '</div>';
+    }
     html += '<div class="review-image-context" style="font-size:11px;color:#64748b;margin-top:4px">原圖位置：選取本卡時顯示可靠的行／token 範圍；無可靠 bbox 時不猜位置。</div>';
     html += '<div class="qwen-review-human-status" style="margin:6px 0;color:#9a3412;font-weight:700">' +
       esc(_qwenHumanStatus(card.source_status)) + '</div>';
@@ -1758,6 +1809,10 @@ def render_vision_ui_section() -> str:
       '<div>field_corrections=' + esc(JSON.stringify(card.field_corrections || [])) + '</div>' +
       '<div>suggestion_adoptions=' + esc(JSON.stringify(card.suggestion_adoptions || [])) + '</div>' +
       '<div>warnings=' + esc(JSON.stringify(card.warnings)) + '</div>' +
+      '<div>crop_reread_status=' + esc(card.crop_reread_status || "") + '</div>' +
+      '<div>crop_reread_geometry=' + esc(JSON.stringify(card.crop_reread_geometry || null)) + '</div>' +
+      '<div>crop_reread_suggestion=' + esc(JSON.stringify(card.crop_reread_suggestion || null)) + '</div>' +
+      '<div>crop_reread_conflicts=' + esc(JSON.stringify(card.crop_reread_conflicts || [])) + '</div>' +
       _qwenAdvancedGemmaCandidatesHtml(card, index) + '</details>';
     return html + '</article>';
   }

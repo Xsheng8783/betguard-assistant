@@ -767,6 +767,67 @@ def test_dense_partial_gemma_seed_creates_cards_and_shows_folded_diagnostics(
     assert session["runtime_routing"]["model_call_counters"]["qwen_external_calls"] == 0
 
 
+def test_uncertain_crop_reread_is_visible_but_never_overwrites_human_answer(page) -> None:
+    routing = _runtime_sample008_routing()
+    drafts = deepcopy(routing["review_seed"]["draft_items"])
+    original_groups = [["08"], ["01", "04"]]
+    drafts[0].update(
+        number_groups_suggestion=deepcopy(original_groups),
+        draft_classification="AI_UNCERTAIN",
+        provisional=True,
+        needs_review=True,
+        crop_reread_status="AI_RECHECK_CONFLICT",
+        ai_recheck_conflict=True,
+        crop_reread_geometry={
+            "bbox": [15, 10, 300, 205],
+            "linked_pp_evidence_ids": ["PP-0001", "PP-0002"],
+            "selection_reason": "UNIQUE_LITERAL_TO_PP_GEOMETRY",
+        },
+        crop_reread_conflicts=["number_groups", "layout"],
+        crop_reread_suggestion={
+            "number_groups_suggestion": [["08", "04"], ["01", "16"]],
+            "multiplier_rules_suggestion": ["2/3X1"],
+            "layout_suggestion": "column",
+            "special_play_raw": "7尾",
+            "human_confirmed": False,
+            "needs_review": True,
+        },
+    )
+    routing["review_seed"].update(
+        schema_version="betguard.vision.human-review-seed.v2",
+        review_cards=drafts,
+        provisional_bet_drafts=[drafts[0]],
+        safe_bet_drafts=drafts[1:],
+        machine_read_diagnostics={
+            "crop_reread_selected_count": 1,
+            "crop_reread_accepted_count": 1,
+            "crop_reread_conflict_count": 1,
+            "crop_reread_external_call_count": 1,
+            "crop_reread_retry_count": 0,
+        },
+    )
+    routing["model_call_counters"].update(
+        gemma_attempts=2,
+        gemma_external_calls=1,
+    )
+    _mount(page, runtime_routing=routing)
+    _run_runtime_reader(page)
+
+    session = page.evaluate("qwenGetReviewSession()")
+    card = session["structures"][0]
+    assert card["staged_structure"]["number_groups"] == original_groups
+    assert card["human_confirmed"] is False
+    assert card["crop_reread_status"] == "AI_RECHECK_CONFLICT"
+    assert card["crop_reread_suggestion"]["special_play_raw"] == "7尾"
+    assert page.text_content("#runtime-crop-reread-notice") == (
+        "AI 已二次檢查 1 個不確定區域；取得 1 筆放大影像建議。"
+    )
+    assert page.locator(".runtime-crop-reread-badge").count() == 1
+    assert "AI 仍不確定" in page.text_content("#qwen-review-cards")
+    assert "AI_RECHECK_CONFLICT" in page.text_content("#qwen-review-cards")
+    assert page.get_attribute("#runtime-reader-advanced", "open") is None
+
+
 def test_bet_level_seed_renders_only_promoted_drafts_and_keeps_fragments_advanced(
     page,
 ) -> None:

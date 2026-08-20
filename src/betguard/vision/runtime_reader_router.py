@@ -22,6 +22,10 @@ from betguard.vision.gemma_shadow import (
     run_gemma_shadow,
     validate_gemma_evidence,
 )
+from betguard.vision.gemma_crop_reread import (
+    PROVIDER_ID as GEMMA_CROP_PROVIDER_ID,
+    run_gemma_crop_reread,
+)
 from betguard.vision.ppocr_shadow import (
     PROVIDER_ID as PPOCR_PROVIDER_ID,
     get_ppocr_shadow_config,
@@ -110,6 +114,10 @@ AI_UNCERTAIN = "AI_UNCERTAIN"
 GemmaReader = Callable[[RecognitionRequest], dict[str, Any]]
 PPReader = Callable[[RecognitionRequest], dict[str, Any]]
 QwenReader = Callable[[RecognitionRequest], dict[str, Any]]
+CropReader = Callable[
+    [RecognitionRequest, Mapping[str, Any], Mapping[str, Any]],
+    dict[str, Any],
+]
 
 
 @dataclass(frozen=True)
@@ -166,10 +174,12 @@ class RuntimeReaderRouter:
         gemma_reader: GemmaReader | None = None,
         pp_reader: PPReader | None = None,
         qwen_reader: QwenReader | None = None,
+        crop_reader: CropReader | None = None,
     ) -> None:
         self._gemma_reader = gemma_reader or _run_primary_gemma
         self._pp_reader = pp_reader or _run_local_ppocr
         self._qwen_reader = qwen_reader or _run_qwen_once
+        self._crop_reader = crop_reader or run_gemma_crop_reread
 
     def route(
         self,
@@ -218,10 +228,30 @@ class RuntimeReaderRouter:
             selected_prefill_source = None
             routing_decision = ROUTING_MANUAL_ONLY
 
+        review_seed = _review_seed(
+            selected_prefill_source,
+            gemma_evidence=gemma_evidence,
+            pp_evidence=pp_evidence,
+            qwen_evidence=qwen_evidence,
+        )
+        crop_evidence = _not_run_crop_evidence()
+        if gemma_success:
+            crop_evidence = _call_crop_reread(
+                self._crop_reader,
+                request,
+                review_seed,
+                pp_evidence,
+            )
+            review_seed = _reconcile_crop_reread(
+                review_seed,
+                crop_evidence,
+                pp_evidence=pp_evidence,
+            )
         counters = _model_call_counters(
             gemma_evidence,
             pp_evidence,
             qwen_evidence,
+            crop_evidence=crop_evidence,
             qwen_attempted=qwen_allowed,
         )
         cache_status = {
@@ -229,12 +259,6 @@ class RuntimeReaderRouter:
             "ppocr": _cache_record(pp_evidence),
             "qwen": _cache_record(qwen_evidence),
         }
-        review_seed = _review_seed(
-            selected_prefill_source,
-            gemma_evidence=gemma_evidence,
-            pp_evidence=pp_evidence,
-            qwen_evidence=qwen_evidence,
-        )
         conflicts = _unmapped_second_opinion_conflicts(
             gemma_success=gemma_success,
             qwen_success=qwen_success,
@@ -245,11 +269,17 @@ class RuntimeReaderRouter:
             "qwen_latency_ms": _nonnegative_float(
                 qwen_evidence.get("latency_ms") if isinstance(qwen_evidence, dict) else 0.0
             ),
+            "gemma_crop_reread_latency_ms": _nonnegative_float(
+                crop_evidence.get("latency_ms")
+            ),
             "total_routing_latency_ms": round(
                 (time.perf_counter() - started) * 1000.0, 3
             ),
             "gemma_pp_parallel": True,
             "qwen_conditional_after_gemma": qwen_allowed,
+            "crop_reread_bounded_after_first_pass": bool(
+                crop_evidence.get("selected_region_count")
+            ),
         }
         return ReaderRoutingResult(
             schema_version=SCHEMA_VERSION,
@@ -493,6 +523,84 @@ def _call_pp(reader: PPReader, request: RecognitionRequest) -> dict[str, Any]:
     return copy.deepcopy(evidence)
 
 
+def _call_crop_reread(
+    reader: CropReader,
+    request: RecognitionRequest,
+    review_seed: Mapping[str, Any],
+    pp_evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    try:
+        evidence = reader(request, review_seed, pp_evidence)
+    except Exception as exc:
+        return {
+            **_not_run_crop_evidence(),
+            "status": "failed",
+            "error": {
+                "code": "CROP_REREAD_RUNTIME_INTERNAL_FAILURE",
+                "detail": type(exc).__name__,
+            },
+        }
+    if not isinstance(evidence, dict):
+        return {
+            **_not_run_crop_evidence(),
+            "status": "failed",
+            "error": {"code": "CROP_REREAD_ROUTER_SCHEMA_INVALID"},
+        }
+    result = copy.deepcopy(evidence)
+    result.setdefault("provider_id", GEMMA_CROP_PROVIDER_ID)
+    result.setdefault("selected_region_count", 0)
+    result.setdefault("items", [])
+    result.setdefault("accepted_item_count", len(result["items"]))
+    result.setdefault("rejected_item_count", 0)
+    result.setdefault("cache_hit", False)
+    result.setdefault("external_call_count", 0)
+    result.setdefault("retry_count", 0)
+    result.setdefault("latency_ms", 0.0)
+    result.setdefault("human_confirmed", False)
+    result.setdefault("value_authority", VALUE_AUTHORITY)
+    result.setdefault("auto_confirm", False)
+    result.setdefault("auto_submit", False)
+    external_calls = result.get("external_call_count")
+    retry_count = result.get("retry_count")
+    if (
+        not isinstance(external_calls, int)
+        or isinstance(external_calls, bool)
+        or external_calls not in {0, 1}
+        or not isinstance(retry_count, int)
+        or isinstance(retry_count, bool)
+        or retry_count != 0
+        or result.get("human_confirmed") is not False
+        or result.get("value_authority") != VALUE_AUTHORITY
+        or result.get("auto_confirm") is not False
+        or result.get("auto_submit") is not False
+    ):
+        return {
+            **_not_run_crop_evidence(),
+            "status": "failed",
+            "error": {"code": "CROP_REREAD_ROUTER_SCHEMA_INVALID"},
+        }
+    return result
+
+
+def _not_run_crop_evidence() -> dict[str, Any]:
+    return {
+        "provider_id": GEMMA_CROP_PROVIDER_ID,
+        "status": "skipped",
+        "selected_region_count": 0,
+        "items": [],
+        "accepted_item_count": 0,
+        "rejected_item_count": 0,
+        "cache_hit": False,
+        "external_call_count": 0,
+        "retry_count": 0,
+        "latency_ms": 0.0,
+        "human_confirmed": False,
+        "value_authority": VALUE_AUTHORITY,
+        "auto_confirm": False,
+        "auto_submit": False,
+    }
+
+
 def _call_qwen(reader: QwenReader, request: RecognitionRequest) -> dict[str, Any]:
     try:
         evidence = reader(request)
@@ -592,14 +700,17 @@ def _model_call_counters(
     ppocr: Mapping[str, Any],
     qwen: Mapping[str, Any] | None,
     *,
+    crop_evidence: Mapping[str, Any],
     qwen_attempted: bool,
 ) -> dict[str, int]:
+    crop_attempted = int(bool(crop_evidence.get("selected_region_count")))
     return {
-        "gemma_attempts": 1,
+        "gemma_attempts": 1 + crop_attempted,
         "gemma_external_calls": _bounded_call_count(
             gemma.get("external_call_count")
-        ),
-        "gemma_cache_hits": int(bool(gemma.get("cache_hit"))),
+        ) + _bounded_call_count(crop_evidence.get("external_call_count")),
+        "gemma_cache_hits": int(bool(gemma.get("cache_hit")))
+        + int(bool(crop_evidence.get("cache_hit"))),
         "gemma_retries": 0,
         "pp_local_inference_calls": _bounded_call_count(
             ppocr.get("local_inference_calls")
@@ -832,6 +943,273 @@ def _review_seed(
         "auto_confirm": False,
         "auto_submit": False,
     }
+
+
+def _reconcile_crop_reread(
+    review_seed: Mapping[str, Any],
+    crop_evidence: Mapping[str, Any],
+    *,
+    pp_evidence: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Attach higher-resolution evidence without changing Human Answer.
+
+    A crop may confirm a first-pass machine suggestion or disagree with it.
+    Disagreement is kept as an explicit alternative; this function never votes
+    and never silently replaces the first-pass prefill.
+    """
+
+    result = copy.deepcopy(dict(review_seed))
+    if int(crop_evidence.get("selected_region_count") or 0) <= 0:
+        return result
+    cards = result.get("review_cards")
+    if not isinstance(cards, list):
+        return result
+    proposal_by_crop: dict[str, Mapping[str, Any]] = {}
+    for proposal in crop_evidence.get("proposals") or []:
+        if isinstance(proposal, Mapping):
+            proposal_by_crop[str(proposal.get("crop_id") or "")] = proposal
+    card_by_draft = {
+        str(card.get("draft_id") or ""): card
+        for card in cards
+        if isinstance(card, dict)
+    }
+    for crop_id, proposal in proposal_by_crop.items():
+        card = card_by_draft.get(str(proposal.get("draft_id") or ""))
+        if not isinstance(card, dict):
+            continue
+        card["crop_reread_crop_id"] = crop_id
+        card["crop_reread_geometry"] = {
+            "bbox": copy.deepcopy(proposal.get("bbox")),
+            "linked_pp_evidence_ids": copy.deepcopy(
+                proposal.get("linked_pp_evidence_ids") or []
+            ),
+            "selection_reason": str(proposal.get("selection_reason") or ""),
+        }
+        card["crop_reread_status"] = "AI_STILL_UNCERTAIN"
+        card["crop_reread_suggestion"] = None
+        card["crop_reread_conflicts"] = []
+        card["ai_recheck_conflict"] = False
+        card["human_confirmed"] = False
+    consistent_count = 0
+    conflict_count = 0
+    resolved_crop_ids: set[str] = set()
+    reread_column_count = 0
+    reread_special_count = 0
+    for item in crop_evidence.get("items") or []:
+        if not isinstance(item, Mapping):
+            continue
+        proposal = proposal_by_crop.get(str(item.get("crop_id") or ""))
+        if not isinstance(proposal, Mapping):
+            continue
+        card = card_by_draft.get(str(proposal.get("draft_id") or ""))
+        if not isinstance(card, dict):
+            continue
+        suggestion = _compile_crop_item_suggestion(item, pp_evidence=pp_evidence)
+        card["crop_reread_crop_id"] = str(item.get("crop_id") or "")
+        card["crop_reread_geometry"] = {
+            "bbox": copy.deepcopy(proposal.get("bbox")),
+            "linked_pp_evidence_ids": copy.deepcopy(
+                proposal.get("linked_pp_evidence_ids") or []
+            ),
+            "selection_reason": str(proposal.get("selection_reason") or ""),
+        }
+        card["human_confirmed"] = False
+        if suggestion is None:
+            continue
+        resolved_crop_ids.add(str(item.get("crop_id") or ""))
+        fields = _machine_suggestion_projection(suggestion)
+        first_fields = _machine_suggestion_projection(card)
+        conflict_fields = [
+            key
+            for key in fields
+            if not _empty_machine_suggestion_value(fields[key])
+            and first_fields.get(key) != fields[key]
+        ]
+        card["crop_reread_suggestion"] = suggestion
+        card["crop_reread_conflicts"] = conflict_fields
+        if conflict_fields:
+            card["crop_reread_status"] = "AI_RECHECK_CONFLICT"
+            card["ai_recheck_conflict"] = True
+            conflict_count += 1
+        else:
+            card["crop_reread_status"] = "AI_REREAD_CONFIRMED"
+            card["ai_recheck_conflict"] = False
+            consistent_count += 1
+        reread_column_count += int(suggestion.get("layout_suggestion") == "column")
+        reread_special_count += int(
+            str(suggestion.get("special_play_raw") or "none") != "none"
+        )
+
+    reconciled_by_id = {
+        str(card.get("draft_id") or ""): card
+        for card in cards
+        if isinstance(card, dict)
+    }
+    for key in ("safe_bet_drafts", "provisional_bet_drafts"):
+        values = result.get(key)
+        if isinstance(values, list):
+            result[key] = [
+                copy.deepcopy(reconciled_by_id.get(str(item.get("draft_id") or ""), item))
+                if isinstance(item, Mapping)
+                else item
+                for item in values
+            ]
+    result["review_cards"] = cards
+    result["bet_drafts"] = copy.deepcopy(cards)
+    result["draft_items"] = copy.deepcopy(cards)
+    result["crop_reread_evidence"] = copy.deepcopy(dict(crop_evidence))
+    unusable_count = max(len(proposal_by_crop) - len(resolved_crop_ids), 0)
+    diagnostics = result.setdefault("machine_read_diagnostics", {})
+    diagnostics.update(
+        first_pass_uncertain_count=sum(
+            int(
+                isinstance(card, Mapping)
+                and card.get("draft_classification") == AI_UNCERTAIN
+            )
+            for card in cards
+        ),
+        crop_reread_selected_count=int(
+            crop_evidence.get("selected_region_count") or 0
+        ),
+        crop_reread_accepted_count=int(
+            crop_evidence.get("accepted_item_count") or 0
+        ),
+        crop_reread_rejected_count=int(
+            crop_evidence.get("rejected_item_count") or 0
+        ),
+        crop_reread_rejected_reason_codes=sorted(
+            {
+                str(item.get("reason_code") or "CROP_ITEM_INVALID")
+                for item in (crop_evidence.get("rejected_items") or [])
+                if isinstance(item, Mapping)
+            }
+        ),
+        crop_reread_consistent_count=consistent_count,
+        crop_reread_conflict_count=conflict_count,
+        crop_reread_unusable_count=unusable_count,
+        crop_reread_column_suggestion_count=reread_column_count,
+        crop_reread_special_preservation_count=reread_special_count,
+        crop_reread_external_call_count=_bounded_call_count(
+            crop_evidence.get("external_call_count")
+        ),
+        crop_reread_cache_hit=bool(crop_evidence.get("cache_hit")),
+        crop_reread_latency_ms=_nonnegative_float(
+            crop_evidence.get("latency_ms")
+        ),
+        crop_reread_retry_count=0,
+    )
+    return result
+
+
+def _compile_crop_item_suggestion(
+    item: Mapping[str, Any],
+    *,
+    pp_evidence: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    source_item = {
+        "evidence_id": f"CROP-{str(item.get('crop_id') or '')}",
+        "raw_text": str(item.get("raw_text") or ""),
+        "numbers": str(item.get("numbers") or ""),
+        "multiplier_text": str(item.get("multiplier_text") or "none"),
+        "layout_guess": str(item.get("layout_guess") or "unclear"),
+        "continuation": str(item.get("continuation") or "unclear"),
+        "special_text": str(item.get("special_text") or "none"),
+        "cancelled": str(item.get("cancelled") or "unclear"),
+        "uncertain": bool(item.get("uncertain", True)),
+        "uncertain_reason": str(item.get("uncertain_reason") or "none"),
+    }
+    promoted, _reason = _promote_gemma_item(source_item, 1)
+    suggestion: dict[str, Any] | None = promoted
+    if suggestion is None:
+        physical, _consumed = _physical_gemma_review_candidates(
+            source_item,
+            1,
+            pp_evidence=None,
+        )
+        if len(physical) == 1:
+            suggestion = physical[0]
+    if suggestion is None:
+        suggestion = _provisional_gemma_candidate(
+            source_item,
+            1,
+            source_item["raw_text"],
+            source_line_number=1,
+            source_line_end=max(1, len(source_item["raw_text"].splitlines())),
+            cancelled=source_item["cancelled"],
+            whole_item=True,
+            pp_evidence=None,
+        )
+    if suggestion is None:
+        return None
+    result = copy.deepcopy(suggestion)
+    groups = item.get("number_groups")
+    safe_direct_groups = bool(
+        isinstance(groups, list)
+        and groups
+        and all(
+            isinstance(group, list)
+            and group
+            and all(
+                isinstance(number, str)
+                and _NUMBER_LITERAL_RE.fullmatch(number) is not None
+                for number in group
+            )
+            for group in groups
+        )
+    )
+    if safe_direct_groups:
+        result["number_groups_suggestion"] = copy.deepcopy(groups)
+        result["number_groups_raw"] = str(item.get("numbers") or "")
+    rules = item.get("multiplier_rules")
+    if isinstance(rules, list):
+        result["multiplier_rules_suggestion"] = copy.deepcopy(rules)
+    visible_special, _visible_special_evidence_id = _visible_special_play_literal(
+        source_item["raw_text"], None
+    )
+    special = visible_special or source_item["special_text"].strip()
+    if special.lower() not in {"", "none", "unclear"}:
+        result["special_play_raw"] = special
+        result["special_play_evidence_id"] = source_item["evidence_id"]
+    multiplier = source_item["multiplier_text"].strip()
+    if multiplier.lower() not in {"", "none", "unclear", "x", "×"}:
+        result["multiplier_raw"] = multiplier
+    if source_item["layout_guess"] in {"normal", "column"}:
+        result["layout_suggestion"] = source_item["layout_guess"]
+    if source_item["continuation"] in {"yes", "no"}:
+        result["continuation_suggestion"] = source_item["continuation"]
+    if source_item["cancelled"] in {"yes", "no"}:
+        result["cancelled_suggestion"] = source_item["cancelled"]
+    result.update(
+        crop_id=str(item.get("crop_id") or ""),
+        crop_reread=True,
+        uncertain=bool(item.get("uncertain", True)),
+        needs_review=True,
+        human_confirmed=False,
+        draft_classification=AI_UNCERTAIN,
+        provisional=True,
+        promotion_contract="betguard.gemma-crop-reread-review.v1",
+    )
+    return result
+
+
+def _machine_suggestion_projection(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "number_groups": copy.deepcopy(value.get("number_groups_suggestion") or []),
+        "multiplier_rules": copy.deepcopy(
+            value.get("multiplier_rules_suggestion") or []
+        ),
+        "multiplier_raw": str(value.get("multiplier_raw") or ""),
+        "layout": str(value.get("layout_suggestion") or "unclear"),
+        "continuation": str(value.get("continuation_suggestion") or "unclear"),
+        "special_play": str(value.get("special_play_raw") or "none"),
+        "cancelled": str(value.get("cancelled_suggestion") or "unclear"),
+    }
+
+
+def _empty_machine_suggestion_value(value: Any) -> bool:
+    return value is None or value == [] or (
+        isinstance(value, str) and value in {"", "none", "unclear"}
+    )
 
 
 def _safe_review_draft(draft: Mapping[str, Any]) -> dict[str, Any]:
