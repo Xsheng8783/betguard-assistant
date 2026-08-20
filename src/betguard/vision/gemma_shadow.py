@@ -1,8 +1,9 @@
-"""Optional Gemma 4 raw-reader evidence shadow.
+"""Gemma 4 raw-reader machine evidence adapter.
 
 The adapter deliberately does not implement ``ImageRecognitionProvider`` and
-never returns ``RecognitionResult``.  Qwen remains the only primary vision
-authority; this module supplies review-only evidence when explicitly enabled.
+never returns ``RecognitionResult``.  The runtime router may select its raw
+reading as the primary prefill suggestion, but only a Human Confirmed Answer
+can become value authority.
 """
 
 from __future__ import annotations
@@ -48,6 +49,10 @@ Return ONLY one JSON object with this exact shape:
 {"version":"gemma-raw-reader-v2","items":[{"raw_text":"visible text","numbers":"literal visible numbers/columns or unclear","multiplier_text":"all literal visible rules or none","layout_guess":"normal|column|unclear","continuation":"yes|no|unclear","special_text":"raw text or none","cancelled":"yes|no|unclear","uncertain":true,"uncertain_reason":"reason or none"}]}
 This is evidence only. Never claim that an item is confirmed, executable, exportable, or safe to submit."""
 PROMPT_SHA256 = hashlib.sha256(RAW_READER_PROMPT.encode("utf-8")).hexdigest()
+
+
+class GemmaFinishError(ValueError):
+    """The provider returned a candidate that did not finish completely."""
 
 
 @dataclass(frozen=True)
@@ -205,6 +210,8 @@ def run_gemma_shadow(
             **cached,
             "cache_hit": True,
             "cache_identity": identity.to_dict(),
+            "external_call_count": 0,
+            "retry_count": 0,
             "latency_ms": round((time.perf_counter() - started) * 1000.0, 3),
         }
     api_key = os.environ.get(API_KEY_ENV, "").strip()
@@ -213,18 +220,56 @@ def run_gemma_shadow(
             **_failure(base, "GEMMA_SHADOW_NOT_CONFIGURED", started, status="unavailable"),
             "cache_identity": identity.to_dict(),
         }
+    external_call_count = 0
     try:
         image_bytes = Path(request.image_path).read_bytes()
         payload = _request_payload(request, image_bytes, config)
+        external_call_count = 1
         envelope = (transport or _post_generate_content)(payload, api_key, config)
         evidence = _validated_response(envelope, base)
     except TimeoutError:
-        return _failure(base, "GEMMA_SHADOW_TIMEOUT", started, status="timeout")
+        return _failure(
+            base,
+            "GEMMA_SHADOW_TIMEOUT",
+            started,
+            status="timeout",
+            external_call_count=external_call_count,
+        )
     except urllib.error.HTTPError as exc:
-        return _failure(base, "GEMMA_SHADOW_HTTP_ERROR", started, detail=str(exc.code))
+        return _failure(
+            base,
+            "GEMMA_SHADOW_HTTP_ERROR",
+            started,
+            detail=str(exc.code),
+            external_call_count=external_call_count,
+        )
+    except urllib.error.URLError as exc:
+        return _failure(
+            base,
+            "GEMMA_SHADOW_NETWORK_ERROR",
+            started,
+            detail=type(exc.reason).__name__,
+            external_call_count=external_call_count,
+        )
+    except GemmaFinishError as exc:
+        return _failure(
+            base,
+            "GEMMA_SHADOW_FINISH_FAILURE",
+            started,
+            detail=type(exc).__name__,
+            external_call_count=external_call_count,
+        )
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
-        return _failure(base, "GEMMA_SHADOW_INVALID_RESPONSE", started, detail=type(exc).__name__)
+        return _failure(
+            base,
+            "GEMMA_SHADOW_INVALID_RESPONSE",
+            started,
+            detail=type(exc).__name__,
+            external_call_count=external_call_count,
+        )
     evidence["latency_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
+    evidence["external_call_count"] = external_call_count
+    evidence["retry_count"] = 0
     try:
         cache.put_validated(identity, evidence)
     except OSError:
@@ -435,8 +480,10 @@ def _validated_response(envelope: Any, base: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(candidates, list) or len(candidates) != 1:
         raise ValueError("Gemma response must have one candidate")
     candidate = candidates[0]
-    if not isinstance(candidate, dict) or candidate.get("finishReason") != "STOP":
-        raise ValueError("Gemma response did not finish completely")
+    if not isinstance(candidate, dict):
+        raise ValueError("Gemma response candidate is invalid")
+    if candidate.get("finishReason") != "STOP":
+        raise GemmaFinishError("Gemma response did not finish completely")
     parts = ((candidate.get("content") or {}).get("parts") or [])
     texts = [part.get("text") for part in parts if isinstance(part, dict) and isinstance(part.get("text"), str) and not part.get("thought")]
     if len(texts) != 1:
@@ -478,6 +525,7 @@ def _base_evidence(request: RecognitionRequest, config: GemmaShadowConfig) -> di
         "machine_suggestion": True,
         "human_confirmed": False,
         "authority": "qwen-dashscope",
+        "value_authority": "human_confirmed_answer",
         "human_confirmation_required": True,
         "auto_apply": False,
         "auto_confirm": False,
@@ -486,7 +534,13 @@ def _base_evidence(request: RecognitionRequest, config: GemmaShadowConfig) -> di
 
 
 def _failure(
-    base: dict[str, Any], code: str, started: float, *, status: str = "failed", detail: str | None = None
+    base: dict[str, Any],
+    code: str,
+    started: float,
+    *,
+    status: str = "failed",
+    detail: str | None = None,
+    external_call_count: int = 0,
 ) -> dict[str, Any]:
     error: dict[str, Any] = {"code": code}
     if detail:
@@ -496,6 +550,8 @@ def _failure(
         "status": status,
         "error": error,
         "cache_hit": False,
+        "external_call_count": max(0, min(int(external_call_count), 1)),
+        "retry_count": 0,
         "latency_ms": round((time.perf_counter() - started) * 1000.0, 3),
     }
 

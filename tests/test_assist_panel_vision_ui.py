@@ -16,13 +16,13 @@ class TestVisionUIHtml:
         assert "vision-run-btn" in html
         assert "vision-results" in html
 
-    def test_paid_vision_and_human_confirmation_notice(self):
+    def test_runtime_router_and_human_confirmation_notice(self):
         from betguard.webui.assist_panel_vision_html import render_vision_ui_section
         html = render_vision_ui_section()
-        assert 'provider_id: "openai-vision-paid"' in html
+        assert 'provider_id: "runtime-reader-router"' in html
         assert "vision-provider-status" in html
-        assert "PENDING_HUMAN_CONFIRMATION" in html
-        assert "逐行人工確認" in html
+        assert "human_confirmation_required:true" in html
+        assert "逐筆確認" in html
 
     def test_document_mode_can_be_supplied_before_paid_recognition(self):
         from betguard.webui.assist_panel_vision_html import render_vision_ui_section
@@ -80,19 +80,22 @@ class TestVisionUIHtml:
         assert "aided_image_id" in html
         assert "原始圖片品質 Gate 仍然有效" in html
 
-    def test_no_assist_fill_button(self):
+    def test_only_local_sandbox_assist_fill_button(self):
         from betguard.webui.assist_panel_vision_html import render_vision_ui_section
         html = render_vision_ui_section()
-        assert "assist-fill" not in html.lower()
+        assert "輔助填入本機測試頁" in html
+        assert "/api/vision/v1/mvp/sandbox/execute" in html
+        assert "/assist-fill/" not in html.lower()
 
     def test_no_create_batch_call(self):
         from betguard.webui.assist_panel_vision_html import render_vision_ui_section
         html = render_vision_ui_section()
         assert "create-batch" not in html.lower()
 
-    def test_no_external_urls(self):
+    def test_no_external_site_urls(self):
         from betguard.webui.assist_panel_vision_html import render_vision_ui_section
         html = render_vision_ui_section()
+        assert "127.0.0.1" in html
         assert "http://" not in html
         assert "https://" not in html
 

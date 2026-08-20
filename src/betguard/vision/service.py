@@ -23,6 +23,7 @@ from betguard.vision.gemma_shadow import (
     PROVIDER_ID as GEMMA_SHADOW_PROVIDER_ID,
     compare_multi_model_evidence,
     get_gemma_shadow_config,
+    has_api_key as has_gemma_api_key,
     run_gemma_shadow,
 )
 from betguard.vision.image_intake import (
@@ -53,6 +54,10 @@ from betguard.vision.ppocr_shadow import (
     PROVIDER_ID as PPOCR_SHADOW_PROVIDER_ID,
     get_ppocr_shadow_config,
     run_ppocr_shadow,
+)
+from betguard.vision.runtime_reader_router import (
+    PROVIDER_ID as RUNTIME_READER_PROVIDER_ID,
+    route_runtime_readers,
 )
 from betguard.vision.structure_reconstruction import reconstruct_structure
 
@@ -106,12 +111,33 @@ def list_providers() -> dict[str, Any]:
                 "fixtures": ["bet_slip", "no_confidence", "multi_line"],
             },
             {
+                "id": RUNTIME_READER_PROVIDER_ID,
+                "mode": "machine_reader_router",
+                "real_ocr": True,
+                "external_network": "conditional",
+                "configured": True,
+                "selectable": True,
+                "primary_machine_source": GEMMA_SHADOW_PROVIDER_ID,
+                "local_evidence_source": PPOCR_SHADOW_PROVIDER_ID,
+                "conditional_fallback_source": QWEN_PROVIDER_ID,
+                "gemma_configured": has_gemma_api_key(),
+                "ppocr_configured": ppocr_shadow_config.configured,
+                "qwen_configured": has_qwen_api_key(),
+                "runtime_retries": 0,
+                "codex_vision_runtime_calls": 0,
+                "value_authority": "human_confirmed_answer",
+                "human_confirmation_required": True,
+                "auto_submit": False,
+                "auto_confirm": False,
+            },
+            {
                 "id": QWEN_PROVIDER_ID,
                 "mode": "paid_api",
                 "real_ocr": True,
                 "external_network": True,
                 "requires_env": [QWEN_API_KEY_ENV],
                 "configured": has_qwen_api_key(),
+                "routing_role": "conditional_fallback_or_explicit_second_opinion",
                 "human_confirmation_required": True,
                 "auto_submit": False,
                 "auto_confirm": False,
@@ -129,7 +155,7 @@ def list_providers() -> dict[str, Any]:
                 "enabled": ppocr_shadow_config.enabled,
                 "selectable": False,
                 "evidence_only": True,
-                "primary_provider": QWEN_PROVIDER_ID,
+                "routing_provider": RUNTIME_READER_PROVIDER_ID,
                 "human_confirmation_required": True,
                 "auto_submit": False,
                 "auto_confirm": False,
@@ -144,7 +170,8 @@ def list_providers() -> dict[str, Any]:
                 "enabled": gemma_shadow_config.enabled,
                 "selectable": False,
                 "evidence_only": True,
-                "primary_provider": QWEN_PROVIDER_ID,
+                "routing_provider": RUNTIME_READER_PROVIDER_ID,
+                "primary_machine_source": True,
                 "human_confirmation_required": True,
                 "auto_submit": False,
                 "auto_confirm": False,
@@ -225,6 +252,7 @@ def run_job(
     aided_image_id: str = "",
     document_mode: str = "auto",
     game: str | None = None,
+    second_opinion_requested: bool = False,
 ) -> dict[str, Any]:
     """Run a recognition job. Returns RecognitionResult dict on success."""
     # Validate image_id exists and is not expired
@@ -247,7 +275,7 @@ def run_job(
             document_mode=normalized_document_mode,
         )
 
-    if provider_id not in {"fake", QWEN_PROVIDER_ID}:
+    if provider_id not in {"fake", QWEN_PROVIDER_ID, RUNTIME_READER_PROVIDER_ID}:
         return _error("PROVIDER_NOT_SUPPORTED", f"不支援的 provider: {provider_id}")
 
     if provider_id == QWEN_PROVIDER_ID:
@@ -267,6 +295,22 @@ def run_job(
             "size_bytes": meta.byte_size,
         },
     )
+
+    if provider_id == RUNTIME_READER_PROVIDER_ID:
+        try:
+            return _ok(
+                {
+                    "routing_result": route_runtime_readers(
+                        request,
+                        second_opinion_requested=bool(second_opinion_requested),
+                    )
+                }
+            )
+        except Exception:
+            return _safe_error(
+                "RUNTIME_READER_ROUTING_FAILED",
+                "Machine reader routing failed; manual review remains available",
+            )
 
     if provider_id == QWEN_PROVIDER_ID:
         try:

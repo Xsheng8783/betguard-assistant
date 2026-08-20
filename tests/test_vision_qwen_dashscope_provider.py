@@ -207,6 +207,29 @@ def test_request_payload_is_compatible_and_cache_identity_is_complete(tmp_path, 
     assert not list((tmp_path / "cache").glob("*.tmp"))
 
 
+def test_valid_cache_hit_requires_no_api_key_or_external_transport(
+    tmp_path, monkeypatch
+) -> None:
+    calls = 0
+
+    def transport(payload, api_key, config):
+        nonlocal calls
+        calls += 1
+        return _response(VALID_FULL_PAGE)
+
+    client = _client(tmp_path, transport)
+    monkeypatch.setenv(API_KEY_ENV, "request-time-only")
+    first, first_meta = _chat(client)
+    monkeypatch.delenv(API_KEY_ENV, raising=False)
+    second, second_meta = _chat(client)
+
+    assert first == second == VALID_FULL_PAGE
+    assert first_meta["cache_hit"] is False
+    assert second_meta["cache_hit"] is True
+    assert calls == 1
+    assert client.transport_call_count == 1
+
+
 @pytest.mark.parametrize(
     "failure",
     [

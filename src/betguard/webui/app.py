@@ -969,6 +969,9 @@ _VISION_CANDIDATE_AUTHORITY_STORE: Any | None = None
 # Gate 3B-3A is an isolated, identity-only queue authority.  Keep it lazy so
 # importing the web UI cannot create user-data directories.
 _VALIDATED_CANDIDATE_QUEUE_STORE: Any | None = None
+# Server-owned local MVP orchestration.  Tests inject a tmp_path-backed
+# instance; importing this module never launches a browser or creates stores.
+_MVP_LOCAL_SANDBOX_ORCHESTRATOR: Any | None = None
 # Opaque action-to-session bindings issued by explicit Assist Panel clicks.
 # Neither actor nor interactive-session identity is accepted from request JSON.
 _VALIDATED_QUEUE_WEB_ACTIONS: dict[str, dict[str, Any]] = {}
@@ -1001,6 +1004,24 @@ def _get_validated_candidate_queue_store() -> Any:
             )
         )
     return _VALIDATED_CANDIDATE_QUEUE_STORE
+
+
+def _get_mvp_local_sandbox_orchestrator() -> Any:
+    global _MVP_LOCAL_SANDBOX_ORCHESTRATOR
+    if _MVP_LOCAL_SANDBOX_ORCHESTRATOR is None:
+        from betguard.user_data import get_data_dir
+        from betguard.webui.mvp_workflow import (
+            LocalSandboxBrowserRuntime,
+            MvpLocalSandboxOrchestrator,
+        )
+
+        _MVP_LOCAL_SANDBOX_ORCHESTRATOR = MvpLocalSandboxOrchestrator(
+            Path(get_data_dir()) / "vision" / "mvp-local-sandbox-v1",
+            _get_vision_candidate_authority_store(),
+            _get_validated_candidate_queue_store(),
+            browser_runtime=LocalSandboxBrowserRuntime(),
+        )
+    return _MVP_LOCAL_SANDBOX_ORCHESTRATOR
 
 def _register_manual_candidate(candidate: dict[str, Any]) -> str:
     """Register a manually corrected candidate and return its unique ID."""
@@ -1207,6 +1228,22 @@ def build_workbench_handler(
             if path == "/api/vision/v1/candidate-queue":
                 self._handle_validated_candidate_queue_list()
                 return
+            if path == "/api/vision/v1/mvp/status":
+                orchestrator = _MVP_LOCAL_SANDBOX_ORCHESTRATOR
+                self._send_json(
+                    {
+                        "ok": True,
+                        "schema_version": "betguard-mvp-status-v1",
+                        "sandbox_url": (
+                            orchestrator.sandbox_url if orchestrator is not None else None
+                        ),
+                        "browser_automation": "LOCAL_SANDBOX_ONLY",
+                        "external_site_calls": 0,
+                        "submit_calls": 0,
+                        "auto_submit": False,
+                    }
+                )
+                return
             if path.startswith("/api/vision/v1/review-sessions/"):
                 review_session_id = urllib.parse.unquote(
                     path[len("/api/vision/v1/review-sessions/"):]
@@ -1349,6 +1386,12 @@ def build_workbench_handler(
                     return
             if path == "/api/vision/v1/jobs":
                 self._handle_vision_job()
+                return
+            if path == "/api/vision/v1/mvp/sandbox/actions":
+                self._handle_mvp_sandbox_action()
+                return
+            if path == "/api/vision/v1/mvp/sandbox/execute":
+                self._handle_mvp_sandbox_execute()
                 return
             if path == "/api/vision/v1/review-sessions":
                 self._handle_vision_review_create()
@@ -3295,6 +3338,13 @@ window.assistPanelFill = assistPanelFill;
             game = data.get("game")
             provider_id = data.get("provider_id", "fake")
             fixture = data.get("fixture", "bet_slip")
+            second_opinion_requested = data.get("second_opinion_requested", False)
+            if not isinstance(second_opinion_requested, bool):
+                self._send_json(
+                    {"ok": False, "error": {"code": "INVALID_REQUEST", "message": "second_opinion_requested 必須是 boolean"}},
+                    status=400,
+                )
+                return
             from betguard.vision.service import run_job
             result = run_job(
                 image_id,
@@ -3303,8 +3353,86 @@ window.assistPanelFill = assistPanelFill;
                 aided_image_id=aided_image_id,
                 document_mode=document_mode,
                 game=game,
+                second_opinion_requested=second_opinion_requested,
             )
             self._send_json(result, status=200 if result["ok"] else 400)
+
+        @staticmethod
+        def _mvp_plain_message(code: str) -> str:
+            messages = {
+                "CANDIDATE_NOT_READY": "仍有投注尚未確認。",
+                "REVIEW_STALE": "內容已變更，請重新確認。",
+                "QUEUE_BUSY": "有較早的待處理工作，請稍後再試。",
+                "SANDBOX_VERSION_MISMATCH": "本機測試表單版本不符，請重新開啟。",
+                "SANDBOX_MAPPING_INVALID": "本機測試表單版本不符，請重新開啟。",
+                "SANDBOX_OPEN_FAILED": "本機測試表單無法開啟。",
+            }
+            return messages.get(code, "輔助填入目前無法完成，請人工檢查。")
+
+        def _send_mvp_error(self, exc: Exception) -> None:
+            from betguard.vision.candidate_authority import CandidateAuthorityError
+            from betguard.vision.validated_candidate_claims import ValidatedCandidateClaimError
+            from betguard.vision.validated_candidate_queue import ValidatedCandidateQueueError
+            from betguard.vision.webfill_mapping_preview import WebfillMappingError
+            from betguard.vision.webfill_prepare import WebfillPrepareError
+            from betguard.webfill.local_sandbox_contracts import LocalSandboxContractError
+            from betguard.webui.mvp_workflow import MvpWorkflowError
+
+            known = (
+                CandidateAuthorityError,
+                ValidatedCandidateQueueError,
+                ValidatedCandidateClaimError,
+                WebfillPrepareError,
+                WebfillMappingError,
+                LocalSandboxContractError,
+                MvpWorkflowError,
+            )
+            if isinstance(exc, known):
+                code = exc.code
+                status = exc.http_status
+            else:
+                code = "MVP_INTERNAL"
+                status = 500
+            self._send_json(
+                {
+                    "ok": False,
+                    "code": code,
+                    "message": self._mvp_plain_message(code),
+                    "advanced": {"code": code},
+                    "safety": {
+                        "external_site_calls": 0,
+                        "submit_calls": 0,
+                        "auto_submit": False,
+                    },
+                },
+                status=status,
+            )
+
+        def _handle_mvp_sandbox_action(self) -> None:
+            data = self._read_json_body()
+            if data is None or not self._require_exact_json_fields(
+                data, required={"review_session_id"}
+            ):
+                return
+            try:
+                result = _get_mvp_local_sandbox_orchestrator().create_fill_action(
+                    data["review_session_id"]
+                )
+            except Exception as exc:
+                self._send_mvp_error(exc)
+                return
+            self._send_json({"ok": True, **result}, status=201)
+
+        def _handle_mvp_sandbox_execute(self) -> None:
+            data = self._read_json_body()
+            if data is None:
+                return
+            try:
+                result = _get_mvp_local_sandbox_orchestrator().execute_fill(data)
+            except Exception as exc:
+                self._send_mvp_error(exc)
+                return
+            self._send_json({"ok": True, **result})
 
         # ----------------------------------------------------------------
 

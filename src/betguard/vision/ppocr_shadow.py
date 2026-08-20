@@ -192,7 +192,14 @@ def run_ppocr_shadow(
     started = time.perf_counter()
     base = _base_evidence(request, config)
     if not config.enabled:
-        return {**base, "status": "disabled", "error": {"code": "PPOCR_SHADOW_DISABLED"}, "latency_ms": 0.0}
+        return {
+            **base,
+            "status": "disabled",
+            "error": {"code": "PPOCR_SHADOW_DISABLED"},
+            "cache_hit": False,
+            "local_inference_calls": 0,
+            "latency_ms": 0.0,
+        }
     identity = PPShadowCacheIdentity(
         image_sha256=str(request.metadata.get("sha256") or ""),
         provider=PROVIDER_ID,
@@ -210,6 +217,7 @@ def run_ppocr_shadow(
             "regions": cached["regions"],
             "cache_hit": True,
             "cache_identity": identity.to_dict(),
+            "local_inference_calls": 0,
             "latency_ms": round((time.perf_counter() - started) * 1000.0, 3),
         }
     if not config.configured:
@@ -219,9 +227,11 @@ def run_ppocr_shadow(
             "error": {"code": "PPOCR_SHADOW_NOT_CONFIGURED"},
             "cache_hit": False,
             "cache_identity": identity.to_dict(),
+            "local_inference_calls": 0,
             "latency_ms": round((time.perf_counter() - started) * 1000.0, 3),
         }
 
+    local_inference_calls = 0
     try:
         with tempfile.TemporaryDirectory(prefix="betguard-ppocr-shadow-") as temp_dir:
             output_path = Path(temp_dir) / "result.json"
@@ -241,6 +251,7 @@ def run_ppocr_shadow(
                 "--rec-model-dir",
                 str(config.recognition_model_dir),
             ]
+            local_inference_calls = 1
             completed = subprocess.run(
                 command,
                 capture_output=True,
@@ -258,16 +269,34 @@ def run_ppocr_shadow(
                     "PPOCR_SUBPROCESS_FAILED",
                     started,
                     detail=_safe_process_detail(completed.stderr),
+                    local_inference_calls=local_inference_calls,
                 )
             try:
                 raw = json.loads(output_path.read_text(encoding="utf-8"))
                 validated = validate_worker_response(raw)
             except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
-                return _failure(base, "PPOCR_INVALID_RESPONSE", started, detail=type(exc).__name__)
+                return _failure(
+                    base,
+                    "PPOCR_INVALID_RESPONSE",
+                    started,
+                    detail=type(exc).__name__,
+                    local_inference_calls=local_inference_calls,
+                )
     except subprocess.TimeoutExpired:
-        return _failure(base, "PPOCR_TIMEOUT", started)
+        return _failure(
+            base,
+            "PPOCR_TIMEOUT",
+            started,
+            local_inference_calls=local_inference_calls,
+        )
     except (OSError, ValueError) as exc:
-        return _failure(base, "PPOCR_INVOCATION_FAILED", started, detail=type(exc).__name__)
+        return _failure(
+            base,
+            "PPOCR_INVOCATION_FAILED",
+            started,
+            detail=type(exc).__name__,
+            local_inference_calls=local_inference_calls,
+        )
 
     try:
         cache.put_validated(identity, validated)
@@ -280,6 +309,7 @@ def run_ppocr_shadow(
         "regions": validated["regions"],
         "cache_hit": False,
         "cache_identity": identity.to_dict(),
+        "local_inference_calls": local_inference_calls,
         "worker_latency_ms": validated.get("latency_ms"),
         "latency_ms": round((time.perf_counter() - started) * 1000.0, 3),
     }
@@ -375,7 +405,10 @@ def _base_evidence(request: RecognitionRequest, config: PPShadowConfig) -> dict[
         },
         "image_sha256": str(request.metadata.get("sha256") or ""),
         "evidence_only": True,
+        "machine_suggestion": True,
+        "human_confirmed": False,
         "authority": "qwen-dashscope",
+        "value_authority": "human_confirmed_answer",
         "human_confirmation_required": True,
         "auto_apply": False,
         "auto_confirm": False,
@@ -389,6 +422,7 @@ def _failure(
     started: float,
     *,
     detail: str | None = None,
+    local_inference_calls: int = 0,
 ) -> dict[str, Any]:
     error = {"code": code}
     if detail:
@@ -398,6 +432,7 @@ def _failure(
         "status": "failed" if code != "PPOCR_TIMEOUT" else "timeout",
         "error": error,
         "cache_hit": False,
+        "local_inference_calls": max(0, min(int(local_inference_calls), 1)),
         "latency_ms": round((time.perf_counter() - started) * 1000.0, 3),
     }
 

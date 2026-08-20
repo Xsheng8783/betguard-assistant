@@ -483,7 +483,10 @@ def _confirm_structure(page, structure_id: str) -> None:
 
 
 def _create_candidate(page) -> dict:
-    page.click("#qwen-complete-review")
+    # Candidate creation remains a backend boundary in the three-step MVP;
+    # invoke the compatibility API directly rather than exposing a technical
+    # Candidate button to normal users.
+    page.evaluate("qwenCompleteReview()")
     page.wait_for_function("qwenGetReviewSummary() !== null")
     return page.evaluate("qwenGetReviewSummary()")
 
@@ -826,9 +829,7 @@ def test_qwen_failed_ux_is_safe_and_debug_details_are_collapsed(page) -> None:
     _mount(page, failed=True)
     page.click("#vision-qwen-run-btn")
     page.wait_for_selector("#qwen-failure-message")
-    assert page.text_content("#qwen-failure-message") == (
-        "AI 未能完整讀取這張圖片。可以重新辨識或改用手動輸入。"
-    )
+    assert page.text_content("#qwen-failure-message") == "AI建議不可用，仍可手動輸入。"
     assert page.get_attribute(".qwen-failure-details", "open") is None
     assert "private stack trace" not in page.text_content("#qwen-failure-message")
     session = page.evaluate("qwenGetReviewSession()")
@@ -868,8 +869,9 @@ def test_review_workflow_never_calls_webfill_or_paid_provider(page) -> None:
     _create_candidate(page)
     assert calls["jobs"] == [{
         "image_id": "image-gate3a-1",
-        "provider_id": "qwen-dashscope",
+        "provider_id": "runtime-reader-router",
         "game": "539",
+        "second_opinion_requested": True,
     }]
     assert not any("webfill" in url or "assist-fill" in url for url in calls["urls"])
 

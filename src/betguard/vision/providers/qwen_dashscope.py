@@ -182,6 +182,12 @@ class QwenDashScopeClient:
         self.diagnostic_store = diagnostic_store or QwenFailureDiagnosticStore()
         self._transport = transport or _post_chat_completions
         self._sleep = sleep
+        self._transport_call_count = 0
+
+    @property
+    def transport_call_count(self) -> int:
+        """Number of external transport invocations made by this client instance."""
+        return self._transport_call_count
 
     def chat(
         self,
@@ -201,14 +207,6 @@ class QwenDashScopeClient:
         retries: int | None = None,
     ) -> tuple[str, dict[str, Any]]:
         """Send one unchanged compatible-mode request or return a cache hit."""
-        # Read the key for every request.  It is never retained on the client,
-        # placed in metadata, or sent to the persistent cache.
-        api_key = os.environ.get(API_KEY_ENV, "").strip()
-        if not api_key:
-            raise QwenAPIKeyMissing(
-                "DASHSCOPE_API_KEY 未設定；拒絕以空 Bearer token 呼叫。"
-            )
-
         rid = request_id or uuid.uuid4().hex[:12]
         effective_sha = effective_crop_sha256 or _sha256_base64(b64)
         source_sha = image_sha256 or effective_sha
@@ -261,6 +259,14 @@ class QwenDashScopeClient:
                 meta["latency_s"] = 0.0
                 return cached, meta
 
+        # A validated cache hit needs no credential or network.  On a miss,
+        # read the key only for this request; never retain or persist it.
+        api_key = os.environ.get(API_KEY_ENV, "").strip()
+        if not api_key:
+            raise QwenAPIKeyMissing(
+                "DASHSCOPE_API_KEY 未設定；拒絕以空 Bearer token 呼叫。"
+            )
+
         payload = {
             "model": self.config.model,
             "messages": [{"role": "user", "content": [
@@ -276,6 +282,7 @@ class QwenDashScopeClient:
         for attempt in range(retry_limit + 1):
             started = time.time()
             try:
+                self._transport_call_count += 1
                 data = self._transport(payload, api_key, self.config)
                 meta["latency_s"] = round(time.time() - started, 2)
                 meta["retries"] = attempt
@@ -364,8 +371,14 @@ class QwenDashScopeProvider:
 
     provider_id = PROVIDER_ID
 
-    def __init__(self, *, client: QwenDashScopeClient | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        client: QwenDashScopeClient | None = None,
+        retries: int | None = None,
+    ) -> None:
         self._client = client or get_default_client()
+        self._retries = retries
 
     def recognize(self, request: RecognitionRequest) -> RecognitionResult:
         started = time.time()
@@ -398,6 +411,7 @@ class QwenDashScopeProvider:
                 task_type=TASK_TYPE_FULL_PAGE,
                 effective_crop_sha256=sent_sha,
                 request_id=request.request_id,
+                retries=self._retries,
             )
             source.cloud_uploaded = not bool(meta.get("cache_hit"))
             parsed = validate_task_response(
