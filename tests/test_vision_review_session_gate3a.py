@@ -888,6 +888,61 @@ def test_review_seed_v2_prefers_review_cards_and_labels_provisional_cards(page) 
     assert page.locator("#qwen-create-candidate").count() == 0
 
 
+def test_uncertain_physical_column_is_one_card_with_nested_groups_and_special(page) -> None:
+    routing = _runtime_sample008_routing()
+    draft = deepcopy(routing["review_seed"]["draft_items"][0])
+    draft.update(
+        draft_id="gemma-physical-0001-rows-01-02",
+        draft_classification="AI_UNCERTAIN",
+        provisional=True,
+        needs_review=True,
+        raw_text="36x07x08 06\n38 17 18x13",
+        number_groups_raw="36x07x08 06\n38 17 18x13",
+        number_groups_suggestion=[
+            ["36", "38"],
+            ["07", "17"],
+            ["08", "18"],
+            ["06", "13"],
+        ],
+        multiplier_raw="x0.5",
+        multiplier_rules_suggestion=["X0.5"],
+        special_play_raw="7尾",
+        layout_suggestion="column",
+        nested_group_evidence="exact",
+        physical_boundary_evidence="EQUAL_WIDTH_ADJACENT_OPERATOR_ROWS",
+        human_confirmed=False,
+    )
+    routing["review_seed"].update(
+        safe_bet_drafts=[],
+        provisional_bet_drafts=[draft],
+        review_cards=[draft],
+        bet_drafts=[draft],
+        draft_items=[draft],
+        needs_review=True,
+        partial_machine_read=True,
+    )
+    _mount(page, runtime_routing=routing)
+    _run_runtime_reader(page)
+    _wait_authority_ready(page)
+
+    session = page.evaluate("qwenGetReviewSession()")
+    assert len(session["structures"]) == 1
+    card = session["structures"][0]
+    assert card["staged_structure"]["layout"] == "column_bet"
+    assert card["staged_structure"]["number_groups"] == [
+        ["36", "38"],
+        ["07", "17"],
+        ["08", "18"],
+        ["06", "13"],
+    ]
+    assert card["staged_structure"]["multiplier_rules"] == ["X0.5"]
+    assert card["staged_structure"]["special_text"] == "7尾"
+    assert card["human_confirmed"] is False
+    assert page.locator(".qwen-review-card").count() == 1
+    assert "7尾" in page.text_content("#qwen-review-cards")
+    assert page.locator("#qwen-create-candidate").count() == 0
+
+
 def test_provisional_cancelled_card_does_not_break_server_review_creation(page) -> None:
     routing = _runtime_sample008_routing()
     active = deepcopy(routing["review_seed"]["draft_items"][0])

@@ -138,12 +138,17 @@ def _gemma_failure(code: str, *, external_calls: int = 1) -> dict[str, Any]:
     }
 
 
-def _pp(*, status: str = "completed", cache_hit: bool = False) -> dict[str, Any]:
+def _pp(
+    *,
+    status: str = "completed",
+    cache_hit: bool = False,
+    regions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     result: dict[str, Any] = {
         "schema_version": "betguard.vision.ppocr-shadow-evidence.v1",
         "status": status,
         "provider": {"id": "ppocrv6-shadow"},
-        "regions": [] if status == "completed" else None,
+        "regions": list(regions or []) if status == "completed" else None,
         "cache_hit": cache_hit,
         "cache_identity": {
             "image_sha256": IMAGE_SHA,
@@ -268,6 +273,14 @@ def test_partial_gemma_read_keeps_valid_items_and_never_calls_qwen(
         "review_card_count": 1,
         "bet_draft_count": 1,
         "unresolved_fragment_count": 0,
+        "physical_boundary_review_card_count": 0,
+        "cross_cell_split_count": 0,
+        "cross_cell_merge_count": 0,
+        "column_review_card_count": 1,
+        "nested_group_exact_count": 0,
+        "nested_group_partial_count": 0,
+        "multiplier_number_contamination_count": 0,
+        "special_play_preservation_count": 0,
         "partial_machine_read": True,
         "needs_review": True,
     }
@@ -370,25 +383,20 @@ def test_grouped_raw_item_promotes_only_complete_lines_and_keeps_raw_fragment(
     result = _router(_gemma(items=[grouped])).route(_request(tmp_path)).to_dict()
     seed = result["review_seed"]
 
-    assert len(seed["review_cards"]) == 2
+    assert len(seed["review_cards"]) == 1
     assert seed["safe_bet_drafts"] == []
     assert [draft["draft_classification"] for draft in seed["review_cards"]] == [
         "AI_UNCERTAIN",
-        "AI_UNCERTAIN",
     ]
     assert seed["review_cards"][0]["number_groups_suggestion"] == [
-        ["05", "08", "10"]
+        ["05"],
+        ["08", "09", "23"],
+        ["10", "20", "29"],
     ]
-    assert seed["review_cards"][0]["layout_suggestion"] == "unclear"
+    assert seed["review_cards"][0]["layout_suggestion"] == "column"
     assert seed["review_cards"][0]["source_item_split"] is True
-    assert seed["review_cards"][1]["number_groups_suggestion"] == [["23", "29"]]
-    assert [
-        fragment["reason_code"]
-        for fragment in seed["unresolved_machine_fragments"]
-    ] == [
-        "MULTIPLIER_OR_COLUMN_SCOPE_AMBIGUOUS",
-        "INSUFFICIENT_BET_NUMBER_EVIDENCE",
-    ]
+    assert seed["review_cards"][0]["multiplier_raw"] == "23x2"
+    assert seed["unresolved_machine_fragments"] == []
 
 
 def test_line_compiler_joins_only_bounded_column_continuation_and_multiplier(
@@ -411,11 +419,11 @@ def test_line_compiler_joins_only_bounded_column_continuation_and_multiplier(
 
     assert [draft["number_groups_suggestion"] for draft in drafts] == [
         [["11", "19", "24", "25"]],
-        [["08", "16", "26"]],
+        [["08"], ["16", "26"]],
     ]
     assert drafts[1]["multiplier_rules_suggestion"] == ["2X1"]
     assert drafts[1]["draft_classification"] == "AI_UNCERTAIN"
-    assert drafts[1]["layout_suggestion"] == "unclear"
+    assert drafts[1]["layout_suggestion"] == "column"
     assert drafts[1]["source_line_number"] == 2
     assert drafts[1]["source_line_end"] == 3
     assert all(
@@ -479,6 +487,31 @@ def test_multiplier_or_category_only_fragment_is_never_a_provisional_bet(
     assert seed["human_confirmed"] is False
 
 
+def test_even_compact_number_run_is_review_only_and_never_safe_authority(
+    tmp_path: Path,
+) -> None:
+    compact = {
+        **_gemma_item(),
+        "raw_text": "112014363826",
+        "numbers": "112014363826",
+        "multiplier_text": "none",
+        "layout_guess": "normal",
+    }
+
+    seed = _router(_gemma(items=[compact])).route(
+        _request(tmp_path)
+    ).to_dict()["review_seed"]
+
+    assert seed["safe_bet_drafts"] == []
+    assert len(seed["provisional_bet_drafts"]) == 1
+    draft = seed["provisional_bet_drafts"][0]
+    assert draft["number_groups_suggestion"] == [
+        ["11", "20", "14", "36", "38", "26"]
+    ]
+    assert draft["draft_classification"] == "AI_UNCERTAIN"
+    assert draft["human_confirmed"] is False
+
+
 def test_column_with_30_and_cancelled_audit_semantics_are_preserved(
     tmp_path: Path,
 ) -> None:
@@ -535,6 +568,184 @@ def test_explicit_multi_row_column_preserves_row_major_30_and_nested_groups(
     assert "30" in draft["number_groups_raw"]
     assert "34" not in draft["number_groups_suggestion"][-1]
     assert draft["layout_suggestion"] == "column"
+
+
+def test_equal_width_physical_rows_stay_one_uncertain_nested_column(
+    tmp_path: Path,
+) -> None:
+    items = [
+        {
+            **_gemma_item(),
+            "raw_text": "36x07x08 06\n38 17 18x13\n2/3/4x0.5",
+            "numbers": "36 07 08 06 38 17 18 13",
+            "multiplier_text": "2/3/4x0.5",
+            "layout_guess": "normal",
+        },
+        {
+            **_gemma_item(),
+            "raw_text": "12x24x36\n08x14x38\n2/3x0.5",
+            "numbers": "12 24 36 08 14 38",
+            "multiplier_text": "2/3x0.5",
+            "layout_guess": "normal",
+        },
+    ]
+
+    seed = _router(_gemma(items=items)).route(
+        _request(tmp_path)
+    ).to_dict()["review_seed"]
+
+    assert len(seed["review_cards"]) == 2
+    assert seed["review_cards"][0]["number_groups_suggestion"] == [
+        ["36", "38"],
+        ["07", "17"],
+        ["08", "18"],
+        ["06", "13"],
+    ]
+    assert seed["review_cards"][1]["number_groups_suggestion"] == [
+        ["12", "08"],
+        ["24", "14"],
+        ["36", "38"],
+    ]
+    assert all(card["layout_suggestion"] == "column" for card in seed["review_cards"])
+    assert all(card["draft_classification"] == "AI_UNCERTAIN" for card in seed["review_cards"])
+    assert all(card["human_confirmed"] is False for card in seed["review_cards"])
+    assert seed["machine_read_diagnostics"]["nested_group_exact_count"] == 2
+
+
+def test_parallel_operator_chains_split_cells_before_row_transpose(
+    tmp_path: Path,
+) -> None:
+    merged = {
+        **_gemma_item(),
+        "raw_text": (
+            "06x04x36 12x28 39\n"
+            "08x15x38 03x22x31\n"
+            "23x05 23x05"
+        ),
+        "numbers": "06 04 36 12 28 39 08 15 38 03 22 31",
+        "multiplier_text": "x",
+        "layout_guess": "normal",
+    }
+
+    seed = _router(_gemma(items=[merged])).route(
+        _request(tmp_path)
+    ).to_dict()["review_seed"]
+
+    assert [card["number_groups_suggestion"] for card in seed["review_cards"]] == [
+        [["06", "08"], ["04", "15"], ["36", "38"]],
+        [["12", "03"], ["28", "22"], ["39", "31"]],
+    ]
+    assert [card["multiplier_raw"] for card in seed["review_cards"]] == [
+        "23x05",
+        "23x05",
+    ]
+    diagnostics = seed["machine_read_diagnostics"]
+    assert diagnostics["cross_cell_split_count"] == 2
+    assert diagnostics["cross_cell_merge_count"] == 0
+    assert diagnostics["column_review_card_count"] == 2
+
+
+def test_multiplier_literals_are_isolated_from_numbers_without_guessing(
+    tmp_path: Path,
+) -> None:
+    exact_decimal = {
+        **_gemma_item(),
+        "raw_text": "38 17 22x0.5",
+        "numbers": "38 17 22",
+        "multiplier_text": "x0.5",
+        "layout_guess": "normal",
+    }
+    ambiguous_compact = {
+        **_gemma_item(),
+        "raw_text": "36 02 38 12 18x05",
+        "numbers": "36 02 38 12 18 05",
+        "multiplier_text": "x",
+        "layout_guess": "normal",
+    }
+
+    seed = _router(_gemma(items=[exact_decimal, ambiguous_compact])).route(
+        _request(tmp_path)
+    ).to_dict()["review_seed"]
+
+    assert seed["review_cards"][0]["number_groups_suggestion"] == [
+        ["38", "17", "22"]
+    ]
+    assert seed["review_cards"][0]["multiplier_rules_suggestion"] == ["X0.5"]
+    assert seed["review_cards"][1]["number_groups_suggestion"] == [
+        ["36", "02", "38", "12", "18"]
+    ]
+    assert seed["review_cards"][1]["multiplier_rules_suggestion"] == []
+    assert seed["review_cards"][1]["multiplier_raw"] == "x05"
+    assert all(
+        "05" not in group
+        for card in seed["review_cards"]
+        for group in card["number_groups_suggestion"]
+    )
+    assert seed["machine_read_diagnostics"][
+        "multiplier_number_contamination_count"
+    ] == 0
+
+
+def test_internal_x05_in_operator_chain_remains_a_genuine_column_number(
+    tmp_path: Path,
+) -> None:
+    column = {
+        **_gemma_item(),
+        "raw_text": "21x05x34\n23x08x37\n3x1",
+        "numbers": "21 05 34 23 08 37",
+        "multiplier_text": "3x1",
+        "layout_guess": "normal",
+    }
+
+    seed = _router(_gemma(items=[column])).route(
+        _request(tmp_path)
+    ).to_dict()["review_seed"]
+
+    assert len(seed["review_cards"]) == 1
+    assert seed["review_cards"][0]["number_groups_suggestion"] == [
+        ["21", "23"],
+        ["05", "08"],
+        ["34", "37"],
+    ]
+    assert seed["review_cards"][0]["multiplier_raw"] == "3x1"
+    assert seed["machine_read_diagnostics"][
+        "multiplier_number_contamination_count"
+    ] == 0
+
+
+def test_unique_pp_special_literal_is_preserved_as_review_evidence_only(
+    tmp_path: Path,
+) -> None:
+    special = {
+        **_gemma_item(),
+        "evidence_id": "GEMMA-0001",
+        "raw_text": "03x16x7\n23x1",
+        "numbers": "03 16",
+        "multiplier_text": "x",
+        "layout_guess": "normal",
+    }
+    pp = _pp(
+        regions=[
+            {
+                "evidence_id": "PP-0001",
+                "text": "03×16×7尾",
+                "bbox": [10.0, 20.0, 100.0, 40.0],
+                "polygon": [[10.0, 20.0], [100.0, 20.0], [100.0, 40.0], [10.0, 40.0]],
+            }
+        ]
+    )
+
+    seed = _router(_gemma(items=[special]), pp=pp).route(
+        _request(tmp_path)
+    ).to_dict()["review_seed"]
+
+    assert len(seed["review_cards"]) == 1
+    card = seed["review_cards"][0]
+    assert card["number_groups_suggestion"] == [["03", "16"]]
+    assert card["special_play_raw"] == "7尾"
+    assert card["special_play_evidence_id"] == "PP-0001"
+    assert card["human_confirmed"] is False
+    assert seed["machine_read_diagnostics"]["special_play_preservation_count"] == 1
 
 
 def test_gemma_cache_hit_does_not_count_external_call(tmp_path: Path) -> None:

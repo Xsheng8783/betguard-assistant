@@ -93,8 +93,16 @@ _MULTIPLIER_RULE_RE = re.compile(
     r"(?<![\d.])(?:[234](?:\s*/\s*[234])*)\s*[xX×]\s*"
     r"\d+(?:\.\d+)?(?![\d.])"
 )
+_BARE_DECIMAL_MULTIPLIER_RE = re.compile(
+    r"[xX×]\s*\d+\.\d+(?![\d.])"
+)
+_AMBIGUOUS_COMPACT_MULTIPLIER_TAIL_RE = re.compile(
+    r"[xX×]\s*0?5(?![\d.]|\s*[xX×])",
+    re.IGNORECASE,
+)
 _COLUMN_OPERATOR_RE = re.compile(r"[xX×]")
 _SPECIAL_PLAY_LITERAL_RE = re.compile(r"(?:半車|尾|車|各)")
+_SPECIAL_PLAY_VALUE_RE = re.compile(r"(?<!\d)(?:0?\d)\s*(?:尾)")
 
 SAFE_DRAFT = "SAFE_DRAFT"
 AI_UNCERTAIN = "AI_UNCERTAIN"
@@ -224,6 +232,7 @@ class RuntimeReaderRouter:
         review_seed = _review_seed(
             selected_prefill_source,
             gemma_evidence=gemma_evidence,
+            pp_evidence=pp_evidence,
             qwen_evidence=qwen_evidence,
         )
         conflicts = _unmapped_second_opinion_conflicts(
@@ -622,6 +631,7 @@ def _review_seed(
     selected_source: str | None,
     *,
     gemma_evidence: Mapping[str, Any],
+    pp_evidence: Mapping[str, Any] | None = None,
     qwen_evidence: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     safe_bet_drafts: list[dict[str, Any]] = []
@@ -656,9 +666,18 @@ def _review_seed(
                 safe_bet_drafts.append(safe)
                 review_cards.append(safe)
             else:
+                physical_drafts, physical_lines = _physical_gemma_review_candidates(
+                    item,
+                    index,
+                    pp_evidence=pp_evidence,
+                )
                 line_drafts: list[dict[str, Any]] = []
                 provisional_line_drafts: list[dict[str, Any]] = []
-                for draft in _promote_gemma_line_candidates(item, index):
+                for draft in _promote_gemma_line_candidates(
+                    item,
+                    index,
+                    consumed_line_numbers=physical_lines,
+                ):
                     if draft.get("layout_suggestion") == "column":
                         provisional_line_drafts.append(
                             _provisionalize_split_column_draft(draft)
@@ -667,7 +686,11 @@ def _review_seed(
                         line_drafts.append(_safe_review_draft(draft))
                 consumed_lines = {
                     line_number
-                    for draft in [*line_drafts, *provisional_line_drafts]
+                    for draft in [
+                        *physical_drafts,
+                        *line_drafts,
+                        *provisional_line_drafts,
+                    ]
                     for line_number in range(
                         int(draft.get("source_line_number") or 0),
                         int(
@@ -684,9 +707,11 @@ def _review_seed(
                         item,
                         index,
                         consumed_line_numbers=consumed_lines,
+                        pp_evidence=pp_evidence,
                     )
                 )
                 provisional_drafts = [
+                    *physical_drafts,
                     *provisional_line_drafts,
                     *provisional_drafts,
                 ]
@@ -733,6 +758,44 @@ def _review_seed(
         review_card_count=len(review_cards),
         bet_draft_count=len(review_cards),
         unresolved_fragment_count=len(unresolved_machine_fragments),
+        physical_boundary_review_card_count=sum(
+            int(bool(card.get("physical_boundary_evidence")))
+            for card in review_cards
+        ),
+        cross_cell_split_count=sum(
+            int(bool(card.get("cross_cell_split"))) for card in review_cards
+        ),
+        cross_cell_merge_count=sum(
+            int(_review_card_has_cross_cell_merge(card)) for card in review_cards
+        ),
+        column_review_card_count=sum(
+            int(card.get("layout_suggestion") == "column") for card in review_cards
+        ),
+        nested_group_exact_count=sum(
+            int(card.get("nested_group_evidence") == "exact")
+            for card in review_cards
+        ),
+        nested_group_partial_count=sum(
+            int(card.get("nested_group_evidence") == "partial")
+            for card in review_cards
+        ),
+        multiplier_number_contamination_count=sum(
+            len(
+                set(card.get("isolated_multiplier_number_literals") or [])
+                & {
+                    number
+                    for group in card.get("number_groups_suggestion") or []
+                    if isinstance(group, list)
+                    for number in group
+                    if isinstance(number, str)
+                }
+            )
+            for card in review_cards
+        ),
+        special_play_preservation_count=sum(
+            int(str(card.get("special_play_raw") or "none") != "none")
+            for card in review_cards
+        ),
     )
     partial_machine_read = bool(
         selected_source == GEMMA_PROVIDER_ID
@@ -786,24 +849,357 @@ def _provisionalize_split_column_draft(
     draft: Mapping[str, Any],
 ) -> dict[str, Any]:
     value = copy.deepcopy(dict(draft))
-    groups = value.get("number_groups_suggestion")
-    flattened = [
-        number
-        for group in groups if isinstance(group, list)
-        for number in group if isinstance(number, str)
-    ] if isinstance(groups, list) else []
     value.update(
-        number_groups_suggestion=[flattened] if flattened else [],
-        layout_suggestion="unclear",
+        # The card is review-only because the physical boundary was inferred
+        # from a split model item, but literal operators remain valid nested
+        # grouping evidence.  Do not flatten information the human needs to
+        # inspect.
+        layout_suggestion="column",
         uncertain=True,
         draft_classification=AI_UNCERTAIN,
         provisional=True,
         needs_review=True,
         human_confirmed=False,
-        operator_evidence_preserved_as_raw_only=True,
+        operator_evidence_preserved_as_raw_only=False,
+        nested_group_evidence="partial",
         promotion_contract="betguard.gemma-provisional-review.v1",
     )
     return value
+
+
+def _physical_gemma_review_candidates(
+    item: Mapping[str, Any],
+    item_index: int,
+    *,
+    pp_evidence: Mapping[str, Any] | None,
+) -> tuple[list[dict[str, Any]], set[int]]:
+    """Create review-only physical-bet bundles from explicit row evidence.
+
+    This is intentionally not a value parser.  It can transpose two explicit,
+    equal-width number rows or split two parallel operator chains, but it never
+    invents a number, repairs OCR, or consults benchmark answers.
+    """
+
+    raw_text = str(item.get("raw_text") or "")
+    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return [], set()
+    if str(item.get("continuation") or "unclear") != "no":
+        return [], set()
+    if str(item.get("cancelled") or "unclear") != "no":
+        return [], set()
+
+    infos = [_review_line_evidence(line) for line in lines]
+    drafts: list[dict[str, Any]] = []
+    consumed: set[int] = set()
+    offset = 0
+    while offset + 1 < len(lines):
+        first_number = offset + 1
+        second_number = offset + 2
+        if first_number in consumed or second_number in consumed:
+            offset += 1
+            continue
+        first = infos[offset]
+        second = infos[offset + 1]
+        if first["multiplier_only"] or second["multiplier_only"]:
+            offset += 1
+            continue
+
+        first_numbers = list(first["numbers"])
+        second_numbers = list(second["numbers"])
+        if not first_numbers or not second_numbers:
+            offset += 1
+            continue
+
+        first_width = len(first_numbers)
+        second_width = len(second_numbers)
+        shared_width = min(first_width, second_width)
+        maximum_width = max(first_width, second_width)
+        boundary_end = second_number
+        continuation_info: dict[str, Any] | None = None
+        continuation_line_number: int | None = None
+        if (
+            first_width == second_width + 1
+            and offset + 2 < len(lines)
+            and not infos[offset + 2]["multiplier_only"]
+            and int(infos[offset + 2]["operator_count"]) == 0
+            and len(infos[offset + 2]["numbers"]) == second_width
+        ):
+            continuation_info = infos[offset + 2]
+            continuation_line_number = second_number + 1
+            boundary_end = continuation_line_number
+        following_info: dict[str, Any] | None = None
+        following_offset = offset + (3 if continuation_info is not None else 2)
+        if following_offset < len(lines) and infos[following_offset]["multiplier_only"]:
+            following_info = infos[following_offset]
+            boundary_end = following_offset + 1
+
+        parallel_widths = _parallel_operator_chain_widths(lines[offset : offset + 2])
+        if parallel_widths is not None:
+            parallel_parts = None
+            if offset + 2 < len(lines):
+                parallel_parts = _parallel_multiplier_parts(
+                    lines[offset + 2],
+                    len(parallel_widths),
+                )
+                if parallel_parts is not None:
+                    boundary_end = second_number + 1
+            cursor = 0
+            created: list[dict[str, Any]] = []
+            for cell_index, width in enumerate(parallel_widths, 1):
+                first_slice = first_numbers[cursor : cursor + width]
+                second_slice = second_numbers[cursor : cursor + width]
+                cursor += width
+                column_groups = [
+                    [first_slice[position], second_slice[position]]
+                    for position in range(width)
+                ]
+                multiplier_lines = (
+                    [parallel_parts[cell_index - 1]]
+                    if parallel_parts is not None
+                    else []
+                )
+                draft = _physical_column_review_draft(
+                    item,
+                    item_index,
+                    column_groups=column_groups,
+                    source_lines=lines[offset : offset + 2],
+                    source_line_number=first_number,
+                    source_line_end=boundary_end,
+                    row_infos=(first, second),
+                    multiplier_lines=multiplier_lines,
+                    pp_evidence=pp_evidence,
+                    boundary_evidence="EXPLICIT_PARALLEL_OPERATOR_CHAINS",
+                    draft_suffix=f"cell-{cell_index:02d}",
+                    cross_cell_split=True,
+                    nested_group_evidence="exact",
+                )
+                if draft is None:
+                    created = []
+                    break
+                created.append(draft)
+            if created:
+                drafts.extend(created)
+                consumed.update(range(first_number, boundary_end + 1))
+                offset = boundary_end
+                continue
+
+        operator_count = int(first["operator_count"]) + int(second["operator_count"])
+        if (
+            2 <= shared_width <= maximum_width <= 4
+            and maximum_width - shared_width <= 1
+            and int(first["operator_count"]) > 0
+            and int(second["operator_count"]) > 0
+            and operator_count >= shared_width - 1
+        ):
+            if first_width > second_width:
+                if int(first["operator_count"]) >= first_width - 1:
+                    column_groups = [
+                        [first_numbers[position], second_numbers[position]]
+                        for position in range(shared_width)
+                    ]
+                    column_groups.append(first_numbers[shared_width:])
+                else:
+                    leading = first_width - second_width
+                    column_groups = [
+                        [number] for number in first_numbers[:leading]
+                    ]
+                    column_groups.extend(
+                        [
+                            [first_numbers[leading + position], second_numbers[position]]
+                            for position in range(shared_width)
+                        ]
+                    )
+            elif second_width > shared_width:
+                column_groups = [
+                    [first_numbers[position], second_numbers[position]]
+                    for position in range(shared_width)
+                ]
+                column_groups.append(second_numbers[shared_width:])
+            else:
+                column_groups = [
+                    [first_numbers[position], second_numbers[position]]
+                    for position in range(shared_width)
+                ]
+            if continuation_info is not None:
+                continuation_numbers = list(continuation_info["numbers"])
+                for position, number in enumerate(continuation_numbers):
+                    column_groups[len(column_groups) - len(continuation_numbers) + position].append(
+                        number
+                    )
+            nested_evidence = (
+                "exact" if first_width == second_width else "partial"
+            )
+            multiplier_lines = (
+                [str(following_info["raw_text"])] if following_info else []
+            )
+            draft = _physical_column_review_draft(
+                item,
+                item_index,
+                column_groups=column_groups,
+                source_lines=lines[
+                    offset : offset + (3 if continuation_line_number is not None else 2)
+                ],
+                source_line_number=first_number,
+                source_line_end=boundary_end,
+                row_infos=(first, second),
+                multiplier_lines=multiplier_lines,
+                pp_evidence=pp_evidence,
+                boundary_evidence="EQUAL_WIDTH_ADJACENT_OPERATOR_ROWS",
+                draft_suffix=f"rows-{first_number:02d}-{second_number:02d}",
+                cross_cell_split=False,
+                nested_group_evidence=nested_evidence,
+            )
+            if draft is not None:
+                drafts.append(draft)
+                consumed.update(range(first_number, boundary_end + 1))
+                offset = boundary_end
+                continue
+        offset += 1
+    return drafts, consumed
+
+
+def _review_line_evidence(raw_text: str) -> dict[str, Any]:
+    multiplier_rules, body = _literal_multiplier_rules_and_body(raw_text)
+    isolated_literals, body = _isolate_ambiguous_multiplier_tails(body)
+    numbers = _review_number_literals(body)
+    operator_count = len(_COLUMN_OPERATOR_RE.findall(body))
+    multiplier_only = bool(
+        len(numbers) <= 1
+        and (
+            multiplier_rules
+            or isolated_literals
+            or (operator_count > 0 and bool(numbers))
+        )
+    )
+    return {
+        "raw_text": raw_text,
+        "body": body,
+        "numbers": numbers,
+        "operator_count": operator_count,
+        "multiplier_rules": multiplier_rules,
+        "isolated_literals": isolated_literals,
+        "multiplier_only": multiplier_only,
+    }
+
+
+def _parallel_operator_chain_widths(lines: list[str]) -> list[int] | None:
+    if len(lines) != 2:
+        return None
+    total_numbers = [len(_review_line_evidence(line)["numbers"]) for line in lines]
+    if total_numbers[0] < 4 or total_numbers[0] != total_numbers[1]:
+        return None
+    for line in lines:
+        widths: list[int] = []
+        for chunk in re.split(r"\s+", line.strip()):
+            info = _review_line_evidence(chunk)
+            count = len(info["numbers"])
+            if count >= 2 and int(info["operator_count"]) >= count - 1:
+                widths.append(count)
+            elif count:
+                widths = []
+                break
+        if len(widths) >= 2 and sum(widths) == total_numbers[0]:
+            return widths
+    return None
+
+
+def _review_card_has_cross_cell_merge(card: Mapping[str, Any]) -> bool:
+    if card.get("cross_cell_split") is True:
+        return False
+    lines = [
+        line.strip()
+        for line in str(card.get("raw_text") or "").splitlines()
+        if line.strip()
+    ]
+    return _parallel_operator_chain_widths(lines[:2]) is not None
+
+
+def _parallel_multiplier_parts(raw_text: str, count: int) -> list[str] | None:
+    if not raw_text:
+        return [] if count == 0 else None
+    parts = [part for part in re.split(r"\s+", raw_text.strip()) if part]
+    if len(parts) != count:
+        return None
+    if not all(_review_line_evidence(part)["multiplier_only"] for part in parts):
+        return None
+    return parts
+
+
+def _physical_column_review_draft(
+    item: Mapping[str, Any],
+    item_index: int,
+    *,
+    column_groups: list[list[str]],
+    source_lines: list[str],
+    source_line_number: int,
+    source_line_end: int,
+    row_infos: tuple[dict[str, Any], dict[str, Any]],
+    multiplier_lines: list[str],
+    pp_evidence: Mapping[str, Any] | None,
+    boundary_evidence: str,
+    draft_suffix: str,
+    cross_cell_split: bool,
+    nested_group_evidence: str,
+) -> dict[str, Any] | None:
+    flattened = [number for group in column_groups for number in group]
+    if not flattened or len(flattened) != len(set(flattened)):
+        return None
+
+    rules: list[str] = []
+    isolated_literals: list[str] = []
+    multiplier_raw_parts: list[str] = []
+    for info in row_infos:
+        for rule in info["multiplier_rules"]:
+            if rule not in rules:
+                rules.append(rule)
+        isolated_literals.extend(info["isolated_literals"])
+        multiplier_raw_parts.extend(info["isolated_literals"])
+    for raw_multiplier in multiplier_lines:
+        line_rules, line_body = _literal_multiplier_rules_and_body(raw_multiplier)
+        line_isolated, _line_body = _isolate_ambiguous_multiplier_tails(line_body)
+        for rule in line_rules:
+            if rule not in rules:
+                rules.append(rule)
+        multiplier_raw_parts.append(raw_multiplier)
+        isolated_literals.extend(line_isolated)
+
+    source_raw = "\n".join(source_lines)
+    special_literal, special_source_id = _visible_special_play_literal(
+        source_raw,
+        pp_evidence,
+    )
+    return {
+        "draft_id": f"gemma-physical-{item_index:04d}-{draft_suffix}",
+        "source_evidence_id": item.get("evidence_id"),
+        "raw_text": source_raw,
+        "source_item_raw_text": str(item.get("raw_text") or ""),
+        "number_groups_raw": source_raw,
+        "number_groups_suggestion": column_groups,
+        "multiplier_raw": " | ".join(
+            part for part in multiplier_raw_parts if part
+        ),
+        "multiplier_rules_suggestion": rules,
+        "isolated_multiplier_number_literals": sorted(set(isolated_literals)),
+        "layout_suggestion": "column",
+        "continuation_suggestion": "no",
+        "special_play_raw": special_literal or "none",
+        "special_play_evidence_id": special_source_id,
+        "cancelled_suggestion": "no",
+        "uncertain": True,
+        "draft_classification": AI_UNCERTAIN,
+        "provisional": True,
+        "needs_review": True,
+        "human_confirmed": False,
+        "source_line_number": source_line_number,
+        "source_line_end": source_line_end,
+        "source_item_split": True,
+        "physical_boundary_evidence": boundary_evidence,
+        "cross_cell_split": cross_cell_split,
+        "nested_group_evidence": nested_group_evidence,
+        "operator_evidence_preserved_as_raw_only": False,
+        "promotion_contract": "betguard.gemma-physical-review.v1",
+    }
 
 
 def _promote_gemma_item(
@@ -824,6 +1220,7 @@ def _promote_gemma_item(
         return None, "LAYOUT_UNCLEAR"
 
     multiplier_rules, body = _literal_multiplier_rules_and_body(raw_text)
+    isolated_multiplier_literals, body = _isolate_ambiguous_multiplier_tails(body)
     multiplier_text = str(item.get("multiplier_text") or "").strip()
     if (
         multiplier_text
@@ -835,7 +1232,13 @@ def _promote_gemma_item(
         return None, "NUMBER_LITERAL_OUT_OF_RANGE"
 
     raw_numbers = _number_literals(body)
-    number_field_literals = _number_literals(str(item.get("numbers") or ""))
+    _number_field_rules, number_field_body = _literal_multiplier_rules_and_body(
+        str(item.get("numbers") or "")
+    )
+    _number_field_isolated, number_field_body = _isolate_ambiguous_multiplier_tails(
+        number_field_body
+    )
+    number_field_literals = _number_literals(number_field_body)
     if not raw_numbers:
         if multiplier_rules:
             return None, "MULTIPLIER_OR_CATEGORY_FRAGMENT_REQUIRES_REVIEW"
@@ -901,13 +1304,25 @@ def _promote_gemma_item(
             "raw_text": raw_text,
             "number_groups_raw": str(item.get("numbers") or ""),
             "number_groups_suggestion": number_groups,
-            "multiplier_raw": multiplier_text,
+            "multiplier_raw": " | ".join(
+                part
+                for part in [
+                    multiplier_text if multiplier_text.lower() not in {"", "none", "x", "×"} else "",
+                    *isolated_multiplier_literals,
+                ]
+                if part
+            ),
             "multiplier_rules_suggestion": multiplier_rules,
+            "isolated_multiplier_number_literals": sorted(
+                set(isolated_multiplier_literals)
+            ),
             "layout_suggestion": promoted_layout,
             "continuation_suggestion": "no",
             "special_play_raw": str(item.get("special_text") or "none"),
             "cancelled_suggestion": cancelled,
-            "uncertain": bool(item.get("uncertain", True)),
+            "uncertain": bool(
+                item.get("uncertain", True) or isolated_multiplier_literals
+            ),
             "operator_conflict_downgraded_to_normal": bool(
                 has_column_operator and promoted_layout == "normal"
             ),
@@ -918,7 +1333,10 @@ def _promote_gemma_item(
 
 
 def _promote_gemma_line_candidates(
-    item: Mapping[str, Any], item_index: int
+    item: Mapping[str, Any],
+    item_index: int,
+    *,
+    consumed_line_numbers: set[int] | None = None,
 ) -> list[dict[str, Any]]:
     raw_text = str(item.get("raw_text") or "")
     lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
@@ -936,9 +1354,13 @@ def _promote_gemma_line_candidates(
         return []
 
     drafts: list[dict[str, Any]] = []
+    consumed_line_numbers = consumed_line_numbers or set()
     offset = 0
     while offset < len(lines):
         line_index = offset + 1
+        if line_index in consumed_line_numbers:
+            offset += 1
+            continue
         line = lines[offset]
         line_rules, line_body = _literal_multiplier_rules_and_body(line)
         line_numbers = _number_literals(line_body)
@@ -955,6 +1377,9 @@ def _promote_gemma_line_candidates(
             and offset + 1 < len(lines)
         ):
             next_line = lines[offset + 1]
+            if line_index + 1 in consumed_line_numbers:
+                offset += 1
+                continue
             next_rules, next_body = _literal_multiplier_rules_and_body(next_line)
             previous_is_singleton = False
             if offset > 0:
@@ -1012,6 +1437,7 @@ def _provisional_gemma_line_candidates(
     item_index: int,
     *,
     consumed_line_numbers: set[int],
+    pp_evidence: Mapping[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Compile review-only cards from explicit model line boundaries.
 
@@ -1039,6 +1465,7 @@ def _provisional_gemma_line_candidates(
             source_line_end=max(1, len(lines)),
             cancelled=cancelled,
             whole_item=True,
+            pp_evidence=pp_evidence,
         )
         return ([whole] if whole is not None else []), []
 
@@ -1055,6 +1482,7 @@ def _provisional_gemma_line_candidates(
             source_line_end=line_number,
             cancelled=cancelled,
             whole_item=False,
+            pp_evidence=pp_evidence,
         )
         if provisional is not None:
             drafts.append(provisional)
@@ -1081,6 +1509,7 @@ def _provisional_gemma_line_candidates(
             source_line_end=len(lines),
             cancelled=cancelled,
             whole_item=True,
+            pp_evidence=pp_evidence,
         )
         if whole is not None:
             return [whole], []
@@ -1096,15 +1525,21 @@ def _provisional_gemma_candidate(
     source_line_end: int,
     cancelled: str,
     whole_item: bool,
+    pp_evidence: Mapping[str, Any] | None,
 ) -> dict[str, Any] | None:
     multiplier_rules, body = _literal_multiplier_rules_and_body(raw_text)
+    isolated_multiplier_literals, body = _isolate_ambiguous_multiplier_tails(body)
     if _INVALID_NUMBER_LITERAL_RE.search(body):
         return None
-    numbers = _number_literals(body)
+    numbers = _review_number_literals(body)
     if len(numbers) != len(set(numbers)):
         return None
     operator_count = len(_COLUMN_OPERATOR_RE.findall(body))
-    has_special = _SPECIAL_PLAY_LITERAL_RE.search(raw_text) is not None
+    special_literal, special_source_id = _visible_special_play_literal(
+        raw_text,
+        pp_evidence,
+    )
+    has_special = special_literal is not None
     is_bet_like = len(numbers) >= 3 or (
         len(numbers) == 2
         and (operator_count == 0 or operator_count >= 2 or has_special)
@@ -1112,7 +1547,6 @@ def _provisional_gemma_candidate(
     if not is_bet_like:
         return None
 
-    special_match = _SPECIAL_PLAY_LITERAL_RE.search(raw_text)
     return {
         "draft_id": (
             f"gemma-provisional-{item_index:04d}-{source_line_number:02d}"
@@ -1122,11 +1556,25 @@ def _provisional_gemma_candidate(
         "number_groups_raw": raw_text,
         # Flat literals are a provisional editing aid, not a geometry claim.
         "number_groups_suggestion": [numbers],
-        "multiplier_raw": str(item.get("multiplier_text") or ""),
+        "multiplier_raw": " | ".join(
+            part
+            for part in [
+                str(item.get("multiplier_text") or "")
+                if str(item.get("multiplier_text") or "").lower()
+                not in {"", "none", "x", "×"}
+                else "",
+                *isolated_multiplier_literals,
+            ]
+            if part
+        ),
         "multiplier_rules_suggestion": multiplier_rules,
+        "isolated_multiplier_number_literals": sorted(
+            set(isolated_multiplier_literals)
+        ),
         "layout_suggestion": "unclear" if operator_count else "normal",
         "continuation_suggestion": "no",
-        "special_play_raw": special_match.group(0) if special_match else "none",
+        "special_play_raw": special_literal or "none",
+        "special_play_evidence_id": special_source_id,
         "cancelled_suggestion": cancelled,
         "uncertain": True,
         "draft_classification": AI_UNCERTAIN,
@@ -1145,7 +1593,7 @@ def _provisional_rejection_reason(raw_text: str) -> str:
     multiplier_rules, body = _literal_multiplier_rules_and_body(raw_text)
     if _INVALID_NUMBER_LITERAL_RE.search(body):
         return "NUMBER_LITERAL_OUT_OF_RANGE"
-    numbers = _number_literals(body)
+    numbers = _review_number_literals(body)
     if len(numbers) != len(set(numbers)):
         return "NUMBER_LITERAL_DUPLICATE"
     if not numbers:
@@ -1197,22 +1645,138 @@ def _unresolved_gemma_fragment(
 
 
 def _literal_multiplier_rules_and_body(raw_text: str) -> tuple[list[str], str]:
-    matches = list(_MULTIPLIER_RULE_RE.finditer(raw_text))
-    rules: list[str] = []
+    matches = sorted(
+        [
+            *_MULTIPLIER_RULE_RE.finditer(raw_text),
+            *_BARE_DECIMAL_MULTIPLIER_RE.finditer(raw_text),
+        ],
+        key=lambda match: (match.start(), -(match.end() - match.start())),
+    )
+    nonoverlapping: list[re.Match[str]] = []
     for match in matches:
+        if any(
+            match.start() < existing.end() and existing.start() < match.end()
+            for existing in nonoverlapping
+        ):
+            continue
+        nonoverlapping.append(match)
+    rules: list[str] = []
+    for match in nonoverlapping:
         canonical = re.sub(r"\s+", "", match.group(0)).replace("×", "X").upper()
         if canonical not in rules:
             rules.append(canonical)
     characters = list(raw_text)
-    for match in matches:
+    for match in nonoverlapping:
         for position in range(match.start(), match.end()):
             if characters[position] not in "\r\n":
                 characters[position] = " "
     return rules, "".join(characters)
 
 
+def _isolate_ambiguous_multiplier_tails(raw_text: str) -> tuple[list[str], str]:
+    """Remove compact x05 evidence tokens from the number surface.
+
+    Without a decimal point, x05 may be an OCR rendering of x0.5 or a column
+    operator followed by number 05.  Either interpretation is unsafe.  Keep
+    the exact literal for Human Review but never silently add 05 to numbers or
+    manufacture a multiplier rule.
+    """
+
+    lines = raw_text.splitlines(keepends=True)
+    if not lines:
+        lines = [raw_text]
+    isolated: list[str] = []
+    output: list[str] = []
+    for line in lines:
+        ending = "\n" if line.endswith("\n") else ""
+        content = line[:-1] if ending else line
+        if content.endswith("\r"):
+            content = content[:-1]
+            ending = "\r" + ending
+        matches = list(_AMBIGUOUS_COMPACT_MULTIPLIER_TAIL_RE.finditer(content))
+        characters = list(content)
+        for match in matches:
+            isolated.append(match.group(0).strip())
+            for position in range(match.start(), match.end()):
+                characters[position] = " "
+        output.append("".join(characters) + ending)
+    return isolated, "".join(output)
+
+
+def _visible_special_play_literal(
+    raw_text: str,
+    pp_evidence: Mapping[str, Any] | None,
+) -> tuple[str | None, str | None]:
+    direct = _SPECIAL_PLAY_VALUE_RE.search(raw_text)
+    if direct is not None:
+        return re.sub(r"\s+", "", direct.group(0)), None
+    direct_kind = _SPECIAL_PLAY_LITERAL_RE.search(raw_text)
+    if direct_kind is not None:
+        return direct_kind.group(0), None
+
+    target = _visual_literal_skeleton(raw_text)
+    if not target or not isinstance(pp_evidence, Mapping):
+        return None, None
+    regions = pp_evidence.get("regions")
+    if not isinstance(regions, list):
+        return None, None
+    matches: list[tuple[str, str | None]] = []
+    for region in regions:
+        if not isinstance(region, Mapping):
+            continue
+        text = str(region.get("text") or "")
+        special = _SPECIAL_PLAY_VALUE_RE.search(text)
+        if special is None:
+            continue
+        without_special = text[: special.start()] + text[special.start() : special.end()].replace(
+            special.group(0), re.sub(r"\D", "", special.group(0))
+        ) + text[special.end() :]
+        if _visual_literal_skeleton(without_special) != target:
+            continue
+        matches.append(
+            (
+                re.sub(r"\s+", "", special.group(0)),
+                str(region.get("evidence_id") or "") or None,
+            )
+        )
+    unique = {(literal, evidence_id) for literal, evidence_id in matches}
+    if len(unique) != 1:
+        return None, None
+    return next(iter(unique))
+
+
+def _visual_literal_skeleton(raw_text: str) -> str:
+    return re.sub(
+        r"[^0-9X]",
+        "",
+        raw_text.replace("×", "X").replace("x", "X"),
+    )
+
+
 def _number_literals(text: str) -> list[str]:
     return [match.group(0) for match in _NUMBER_LITERAL_RE.finditer(text)]
+
+
+def _review_number_literals(text: str) -> list[str]:
+    """Read explicit literals plus unbroken, even two-digit review runs.
+
+    Compact runs are accepted only when they contain at least three complete
+    01-39 pairs.  This supplies an uncertain editing draft; it is never used by
+    safe promotion or any executable authority boundary.
+    """
+
+    literals: list[str] = []
+    for token in re.finditer(r"\d+", text):
+        value = token.group(0)
+        if len(value) == 2 and _NUMBER_LITERAL_RE.fullmatch(value):
+            literals.append(value)
+            continue
+        if len(value) < 6 or len(value) % 2:
+            continue
+        pairs = [value[position : position + 2] for position in range(0, len(value), 2)]
+        if all(_NUMBER_LITERAL_RE.fullmatch(pair) for pair in pairs):
+            literals.extend(pairs)
+    return literals
 
 
 def _literal_column_groups(body: str) -> list[list[str]] | None:
