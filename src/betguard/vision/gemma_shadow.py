@@ -45,6 +45,14 @@ Faithfully transcribe visible writing from top-left to bottom-right. Preserve li
 leading zeroes, separators, stacked writing, corrections, cancellation marks, and uncertainty.
 Do not use betting knowledge or likely patterns to invent missing content.
 
+Each item should represent one physical betting record whenever the image clearly supports that
+boundary. Keep that record's number line, multiplier/category line, special-play text, and visible
+continuation together in the same item. Do not split those components into separate independent
+items without clear visual evidence that they are separate records. A page normally contains
+multiple physical records: return a separate item for each record and never combine unrelated
+records into one item. The keep-together rule applies only inside the same physical record. Do not
+invent multiplication operators from spacing, alignment, or line breaks.
+
 Return ONLY one JSON object with this exact shape:
 {"version":"gemma-raw-reader-v2","items":[{"raw_text":"visible text","numbers":"literal visible numbers/columns or unclear","multiplier_text":"all literal visible rules or none","layout_guess":"normal|column|unclear","continuation":"yes|no|unclear","special_text":"raw text or none","cancelled":"yes|no|unclear","uncertain":true,"uncertain_reason":"reason or none"}]}
 This is evidence only. Never claim that an item is confirmed, executable, exportable, or safe to submit."""

@@ -767,6 +767,78 @@ def test_dense_partial_gemma_seed_creates_cards_and_shows_folded_diagnostics(
     assert session["runtime_routing"]["model_call_counters"]["qwen_external_calls"] == 0
 
 
+def test_bet_level_seed_renders_only_promoted_drafts_and_keeps_fragments_advanced(
+    page,
+) -> None:
+    routing = _runtime_sample008_routing()
+    draft = deepcopy(routing["review_seed"]["draft_items"][1])
+    draft.update(
+        layout_suggestion="column",
+        number_groups_suggestion=[["08"], ["16", "26"]],
+        multiplier_rules_suggestion=["2X1"],
+    )
+    # The server-compiled draft is authoritative for presentation; the raw model
+    # guess remains evidence only and may disagree.
+    routing["gemma_evidence"]["items"][1]["layout_guess"] = "normal"
+    fragments = [
+        {
+            "fragment_id": "gemma-fragment-0001",
+            "source_evidence_id": "GEMMA-0001",
+            "reason_code": "CONTINUATION_FRAGMENT_REQUIRES_REVIEW",
+            "raw_text": "06 07",
+            "needs_review": True,
+            "human_confirmed": False,
+        },
+        {
+            "fragment_id": "gemma-fragment-0002",
+            "source_evidence_id": "GEMMA-0003",
+            "reason_code": "MULTIPLIER_OR_CATEGORY_FRAGMENT_REQUIRES_REVIEW",
+            "raw_text": "2/3X0.5",
+            "needs_review": True,
+            "human_confirmed": False,
+        },
+    ]
+    routing["review_seed"].update(
+        bet_drafts=[draft],
+        # A stale compatibility alias must not create duplicate cards.
+        unresolved_machine_fragments=fragments,
+        needs_review=True,
+        partial_machine_read=True,
+        machine_read_diagnostics={
+            "raw_item_count": 3,
+            "accepted_item_count": 3,
+            "rejected_item_count": 0,
+            "rejected_reason_codes": [],
+            "bet_draft_count": 1,
+            "unresolved_fragment_count": 2,
+            "partial_machine_read": True,
+            "needs_review": True,
+        },
+    )
+    _mount(page, runtime_routing=routing)
+    _run_runtime_reader(page)
+
+    session = page.evaluate("qwenGetReviewSession()")
+    assert len(session["structures"]) == 1
+    assert session["structures"][0]["staged_structure"]["number_groups"] == [
+        ["08"],
+        ["16", "26"],
+    ]
+    assert session["structures"][0]["human_confirmed"] is False
+    assert session["unlinked_gemma_items"] == fragments
+    assert page.text_content("#runtime-unresolved-fragment-notice") == (
+        "AI 另外讀到 2 個未能安全組成投注的片段，請檢查。"
+    )
+    assert page.get_attribute("#runtime-reader-advanced", "open") is None
+    assert "CONTINUATION_FRAGMENT_REQUIRES_REVIEW" in page.text_content(
+        "#runtime-reader-advanced"
+    )
+    _wait_authority_ready(page)
+    page.click("#qwen-add-manual-structure")
+    page.wait_for_function("qwenGetReviewSession().structures.length === 2")
+    assert page.evaluate("qwenGetReviewSession().structures[1].human_confirmed") is False
+
+
 def test_spacing_only_dense_numbers_do_not_invent_a_column_separator(page) -> None:
     routing = _runtime_sample008_routing()
     item = routing["gemma_evidence"]["items"][0]

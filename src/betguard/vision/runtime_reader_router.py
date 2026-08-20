@@ -87,6 +87,13 @@ _COUNTER_KEYS = (
     "qwen_retries",
     "codex_vision_runtime_calls",
 )
+_NUMBER_LITERAL_RE = re.compile(r"(?<!\d)(?:0[1-9]|[12]\d|3[0-9])(?!\d)")
+_INVALID_NUMBER_LITERAL_RE = re.compile(r"(?<!\d)(?:00|[4-9]\d)(?!\d)")
+_MULTIPLIER_RULE_RE = re.compile(
+    r"(?<![\d.])(?:[234](?:\s*/\s*[234])*)\s*[xX×]\s*"
+    r"\d+(?:\.\d+)?(?![\d.])"
+)
+_COLUMN_OPERATOR_RE = re.compile(r"[xX×]")
 
 GemmaReader = Callable[[RecognitionRequest], dict[str, Any]]
 PPReader = Callable[[RecognitionRequest], dict[str, Any]]
@@ -613,7 +620,8 @@ def _review_seed(
     gemma_evidence: Mapping[str, Any],
     qwen_evidence: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
-    draft_items: list[dict[str, Any]] = []
+    bet_drafts: list[dict[str, Any]] = []
+    unresolved_machine_fragments: list[dict[str, Any]] = []
     machine_read_diagnostics = {
         "raw_item_count": 0,
         "accepted_item_count": 0,
@@ -636,29 +644,29 @@ def _review_seed(
         for index, item in enumerate(gemma_evidence.get("items") or [], 1):
             if not isinstance(item, Mapping):
                 continue
-            draft_items.append(
-                {
-                    "draft_id": f"gemma-raw-{index:04d}",
-                    "source_evidence_id": item.get("evidence_id"),
-                    "raw_text": str(item.get("raw_text") or ""),
-                    "number_groups_raw": str(item.get("numbers") or ""),
-                    "multiplier_raw": str(item.get("multiplier_text") or ""),
-                    "layout_suggestion": str(item.get("layout_guess") or "unclear"),
-                    "continuation_suggestion": str(
-                        item.get("continuation") or "unclear"
-                    ),
-                    "special_play_raw": str(item.get("special_text") or "none"),
-                    "cancelled_suggestion": str(item.get("cancelled") or "unclear"),
-                    "uncertain": bool(item.get("uncertain", True)),
-                }
-            )
+            promoted, reason = _promote_gemma_item(item, index)
+            if promoted is not None:
+                bet_drafts.append(promoted)
+            else:
+                line_drafts = _promote_gemma_line_candidates(item, index)
+                bet_drafts.extend(line_drafts)
+                fragment = _unresolved_gemma_fragment(item, index, reason)
+                if line_drafts:
+                    fragment.update(
+                        reason_code="PARTIAL_RECORD_GROUP_REQUIRES_REVIEW",
+                        source_reason_code=reason,
+                        promoted_draft_ids=[
+                            draft["draft_id"] for draft in line_drafts
+                        ],
+                    )
+                unresolved_machine_fragments.append(fragment)
     elif selected_source == QWEN_PROVIDER_ID and isinstance(qwen_evidence, Mapping):
         recognition = qwen_evidence.get("recognition_result")
         if isinstance(recognition, Mapping):
             for index, line in enumerate(recognition.get("lines") or [], 1):
                 if not isinstance(line, Mapping):
                     continue
-                draft_items.append(
+                bet_drafts.append(
                     {
                         "draft_id": f"qwen-line-{index:04d}",
                         "source_evidence_id": line.get("line_id"),
@@ -672,17 +680,31 @@ def _review_seed(
                         "uncertain": True,
                     }
                 )
+    machine_read_diagnostics.update(
+        bet_draft_count=len(bet_drafts),
+        unresolved_fragment_count=len(unresolved_machine_fragments),
+    )
     partial_machine_read = bool(
         selected_source == GEMMA_PROVIDER_ID
-        and machine_read_diagnostics["accepted_item_count"] > 0
-        and machine_read_diagnostics["rejected_item_count"] > 0
+        and (
+            machine_read_diagnostics["rejected_item_count"] > 0
+            or unresolved_machine_fragments
+        )
+    )
+    machine_read_diagnostics.update(
+        partial_machine_read=partial_machine_read,
+        needs_review=bool(partial_machine_read or not bet_drafts),
     )
     return {
         "schema_version": REVIEW_SEED_SCHEMA_VERSION,
-        "status": "machine_prefill_available" if draft_items else "manual_entry_required",
+        "status": "machine_prefill_available" if bet_drafts else "manual_entry_required",
         "selected_machine_source": selected_source,
-        "draft_items": draft_items,
-        "needs_review": bool(partial_machine_read or not draft_items),
+        "bet_drafts": bet_drafts,
+        # Kept as a value-identical compatibility alias for older clients. New
+        # clients must render only bet_drafts and treat raw evidence separately.
+        "draft_items": copy.deepcopy(bet_drafts),
+        "unresolved_machine_fragments": unresolved_machine_fragments,
+        "needs_review": bool(partial_machine_read or not bet_drafts),
         "partial_machine_read": partial_machine_read,
         "machine_read_diagnostics": machine_read_diagnostics,
         "structured_human_answer_required": True,
@@ -693,6 +715,271 @@ def _review_seed(
         "auto_confirm": False,
         "auto_submit": False,
     }
+
+
+def _promote_gemma_item(
+    item: Mapping[str, Any], item_index: int
+) -> tuple[dict[str, Any] | None, str]:
+    raw_text = str(item.get("raw_text") or "")
+    if not raw_text.strip():
+        return None, "RAW_TEXT_EMPTY"
+    if str(item.get("continuation") or "unclear") == "yes":
+        return None, "CONTINUATION_FRAGMENT_REQUIRES_REVIEW"
+    if str(item.get("continuation") or "unclear") != "no":
+        return None, "CONTINUATION_STATE_UNCLEAR"
+    cancelled = str(item.get("cancelled") or "unclear")
+    if cancelled not in {"yes", "no"}:
+        return None, "CANCELLED_STATE_UNCLEAR"
+    layout = str(item.get("layout_guess") or "unclear")
+    if layout == "unclear":
+        return None, "LAYOUT_UNCLEAR"
+
+    multiplier_rules, body = _literal_multiplier_rules_and_body(raw_text)
+    multiplier_text = str(item.get("multiplier_text") or "").strip()
+    if (
+        multiplier_text
+        and multiplier_text.lower() not in {"none", "x", "×"}
+        and not multiplier_rules
+    ):
+        return None, "MULTIPLIER_OR_CATEGORY_FRAGMENT_REQUIRES_REVIEW"
+    if _INVALID_NUMBER_LITERAL_RE.search(body):
+        return None, "NUMBER_LITERAL_OUT_OF_RANGE"
+
+    raw_numbers = _number_literals(body)
+    number_field_literals = _number_literals(str(item.get("numbers") or ""))
+    if not raw_numbers:
+        if multiplier_rules:
+            return None, "MULTIPLIER_OR_CATEGORY_FRAGMENT_REQUIRES_REVIEW"
+        return None, "NO_VALID_NUMBER_EVIDENCE"
+    number_order_matches = number_field_literals[: len(raw_numbers)] == raw_numbers
+
+    has_column_operator = _COLUMN_OPERATOR_RE.search(body) is not None
+    if layout == "column" and not has_column_operator:
+        return None, "COLUMN_LITERAL_OPERATOR_MISSING"
+    if has_column_operator:
+        number_groups = _literal_column_groups(body)
+        if number_groups is None:
+            if (
+                layout == "normal"
+                and not number_order_matches
+                and len(number_field_literals) >= 3
+                and sorted(number_field_literals) == sorted(raw_numbers)
+            ):
+                number_groups = [number_field_literals]
+                promoted_layout = "normal"
+            else:
+                return None, "COLUMN_STRUCTURE_AMBIGUOUS"
+        else:
+            flattened = [number for group in number_groups for number in group]
+            if number_field_literals[: len(flattened)] != flattened:
+                if (
+                    layout == "normal"
+                    and not number_order_matches
+                    and len(number_field_literals) >= 3
+                    and sorted(number_field_literals) == sorted(raw_numbers)
+                ):
+                    number_groups = [number_field_literals]
+                    promoted_layout = "normal"
+                else:
+                    return None, "COLUMN_LITERAL_ORDER_CONFLICT"
+            else:
+                promoted_layout = "column"
+    elif layout == "column":
+        return None, "COLUMN_STRUCTURE_AMBIGUOUS"
+    else:
+        if not number_order_matches:
+            return None, "NUMBER_LITERAL_ORDER_CONFLICT"
+        body_lines = [line for line in body.splitlines() if line.strip()]
+        if len(body_lines) > 1:
+            return None, "MULTI_LINE_SCOPE_AMBIGUOUS"
+        if not multiplier_rules and cancelled != "yes" and len(raw_numbers) < 3:
+            return None, "INCOMPLETE_BET_SCOPE"
+        number_groups = [raw_numbers]
+        promoted_layout = "normal"
+
+    return (
+        {
+            "draft_id": f"gemma-bet-{item_index:04d}",
+            "source_evidence_id": item.get("evidence_id"),
+            "raw_text": raw_text,
+            "number_groups_raw": str(item.get("numbers") or ""),
+            "number_groups_suggestion": number_groups,
+            "multiplier_raw": multiplier_text,
+            "multiplier_rules_suggestion": multiplier_rules,
+            "layout_suggestion": promoted_layout,
+            "continuation_suggestion": "no",
+            "special_play_raw": str(item.get("special_text") or "none"),
+            "cancelled_suggestion": cancelled,
+            "uncertain": bool(item.get("uncertain", True)),
+            "operator_conflict_downgraded_to_normal": bool(
+                has_column_operator and promoted_layout == "normal"
+            ),
+            "promotion_contract": "betguard.gemma-bet-promotion.v1",
+        },
+        "PROMOTED",
+    )
+
+
+def _promote_gemma_line_candidates(
+    item: Mapping[str, Any], item_index: int
+) -> list[dict[str, Any]]:
+    raw_text = str(item.get("raw_text") or "")
+    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return []
+    if str(item.get("continuation") or "unclear") != "no":
+        return []
+    if str(item.get("cancelled") or "unclear") != "no":
+        return []
+
+    # A cross-field literal-order check is the guard against model-invented
+    # multiplication operators. Line promotion is disabled if the independent
+    # numbers reading does not preserve the raw line order exactly.
+    if _number_literals(raw_text) != _number_literals(str(item.get("numbers") or "")):
+        return []
+
+    drafts: list[dict[str, Any]] = []
+    offset = 0
+    while offset < len(lines):
+        line_index = offset + 1
+        line = lines[offset]
+        line_rules, line_body = _literal_multiplier_rules_and_body(line)
+        line_numbers = _number_literals(line_body)
+        source_line_end = line_index
+
+        # A literal column anchor row may consume exactly one following line
+        # when that line contains both continuation numbers and a complete
+        # multiplier rule. This is a bounded, local record boundary—not a
+        # nearest-neighbour merge. A preceding singleton makes the scope
+        # ambiguous, so the pair remains unresolved.
+        if (
+            _COLUMN_OPERATOR_RE.search(line_body)
+            and not line_rules
+            and offset + 1 < len(lines)
+        ):
+            next_line = lines[offset + 1]
+            next_rules, next_body = _literal_multiplier_rules_and_body(next_line)
+            previous_is_singleton = False
+            if offset > 0:
+                previous_rules, previous_body = _literal_multiplier_rules_and_body(
+                    lines[offset - 1]
+                )
+                previous_is_singleton = bool(
+                    not previous_rules
+                    and _COLUMN_OPERATOR_RE.search(previous_body) is None
+                    and len(_number_literals(previous_body)) == 1
+                )
+            if (
+                next_rules
+                and _COLUMN_OPERATOR_RE.search(next_body) is None
+                and _number_literals(next_body)
+                and not previous_is_singleton
+            ):
+                line = f"{line}\n{next_line}"
+                line_rules, line_body = _literal_multiplier_rules_and_body(line)
+                line_numbers = _number_literals(line_body)
+                source_line_end = line_index + 1
+
+        if len(line_numbers) < 2 or (not line_rules and len(line_numbers) < 3):
+            offset += source_line_end - line_index + 1
+            continue
+        line_item = {
+            **item,
+            "raw_text": line,
+            "numbers": line,
+            "multiplier_text": ",".join(line_rules) if line_rules else "none",
+            "layout_guess": (
+                "column" if _COLUMN_OPERATOR_RE.search(line_body) else "normal"
+            ),
+            "continuation": "no",
+            "special_text": "none",
+            "cancelled": "no",
+        }
+        promoted, _reason = _promote_gemma_item(line_item, item_index)
+        if promoted is None:
+            offset += source_line_end - line_index + 1
+            continue
+        promoted.update(
+            draft_id=f"gemma-bet-{item_index:04d}-{line_index:02d}",
+            source_line_number=line_index,
+            source_line_end=source_line_end,
+            source_item_split=True,
+        )
+        drafts.append(promoted)
+        offset += source_line_end - line_index + 1
+    return drafts
+
+
+def _unresolved_gemma_fragment(
+    item: Mapping[str, Any], item_index: int, reason: str
+) -> dict[str, Any]:
+    return {
+        "fragment_id": f"gemma-fragment-{item_index:04d}",
+        "source_evidence_id": item.get("evidence_id"),
+        "reason_code": reason,
+        "raw_text": str(item.get("raw_text") or ""),
+        "numbers": str(item.get("numbers") or ""),
+        "multiplier_text": str(item.get("multiplier_text") or ""),
+        "layout_guess": str(item.get("layout_guess") or "unclear"),
+        "continuation": str(item.get("continuation") or "unclear"),
+        "special_text": str(item.get("special_text") or "none"),
+        "cancelled": str(item.get("cancelled") or "unclear"),
+        "uncertain": bool(item.get("uncertain", True)),
+        "needs_review": True,
+        "human_confirmed": False,
+    }
+
+
+def _literal_multiplier_rules_and_body(raw_text: str) -> tuple[list[str], str]:
+    matches = list(_MULTIPLIER_RULE_RE.finditer(raw_text))
+    rules: list[str] = []
+    for match in matches:
+        canonical = re.sub(r"\s+", "", match.group(0)).replace("×", "X").upper()
+        if canonical not in rules:
+            rules.append(canonical)
+    characters = list(raw_text)
+    for match in matches:
+        for position in range(match.start(), match.end()):
+            if characters[position] not in "\r\n":
+                characters[position] = " "
+    return rules, "".join(characters)
+
+
+def _number_literals(text: str) -> list[str]:
+    return [match.group(0) for match in _NUMBER_LITERAL_RE.finditer(text)]
+
+
+def _literal_column_groups(body: str) -> list[list[str]] | None:
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
+    if not lines or _COLUMN_OPERATOR_RE.search(lines[0]) is None:
+        return None
+    first_parts = _COLUMN_OPERATOR_RE.split(lines[0])
+    groups = [_number_literals(part) for part in first_parts]
+    if len(groups) < 2 or any(not group for group in groups):
+        return None
+    # V1 only promotes an unambiguous chain of single literal anchors plus a
+    # final group that may receive same-record continuation numbers. A multi-
+    # number left segment followed by x and one value is also a common
+    # multiplier-shaped fragment, so it must remain unresolved.
+    if any(len(group) != 1 for group in groups[:-1]):
+        return None
+    continuation_seen = False
+    for line in lines[1:]:
+        if _COLUMN_OPERATOR_RE.search(line) is None:
+            continuation_numbers = _number_literals(line)
+            if continuation_numbers:
+                groups[-1].extend(continuation_numbers)
+                continuation_seen = True
+            continue
+        if continuation_seen:
+            return None
+        row_parts = _COLUMN_OPERATOR_RE.split(line)
+        row_groups = [_number_literals(part) for part in row_parts]
+        if len(row_groups) != len(groups) or any(len(group) != 1 for group in row_groups):
+            return None
+        for group, row_group in zip(groups, row_groups):
+            group.extend(row_group)
+    return groups
 
 
 def _unmapped_second_opinion_conflicts(

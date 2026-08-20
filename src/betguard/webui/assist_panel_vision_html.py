@@ -518,10 +518,14 @@ def render_vision_ui_section() -> str:
   }
 
   function _runtimeCard(draft, item, index, source, qwenEvidence) {
-    var layout = String((item && item.layout_guess) || draft.layout_suggestion || "unclear");
+    var layout = String(draft.layout_suggestion || (item && item.layout_guess) || "unclear");
+    var suggestedGroups = Array.isArray(draft.number_groups_suggestion)
+      ? _cloneJson(draft.number_groups_suggestion) : null;
+    var suggestedRules = Array.isArray(draft.multiplier_rules_suggestion)
+      ? _cloneJson(draft.multiplier_rules_suggestion) : null;
     var staged = {
-      number_groups: source === "gemma4-26b-shadow" ? _gemmaNumberGroups(item || {}, {staged_structure:{layout:layout}}) : [],
-      multiplier_rules: source === "gemma4-26b-shadow" ? _gemmaMultiplierRules(item || {}) : [],
+      number_groups: source === "gemma4-26b-shadow" ? (suggestedGroups || _gemmaNumberGroups(item || {}, {staged_structure:{layout:layout}})) : [],
+      multiplier_rules: source === "gemma4-26b-shadow" ? (suggestedRules || _gemmaMultiplierRules(item || {})) : [],
       layout: layout === "column" ? "column_bet" : (layout === "normal" ? "normal_row" : "unknown"),
       continuation: String(draft.continuation_suggestion || "").toLowerCase() === "yes",
       special_text: draft.special_play_raw === "none" ? "" : String(draft.special_play_raw || ""),
@@ -558,10 +562,17 @@ def render_vision_ui_section() -> str:
     ppocrShadowEvidence = routing.pp_evidence || null;
     qwenEvidenceResult = routing.qwen_evidence && routing.qwen_evidence.recognition_result || null;
     var seed = routing.review_seed || {};
-    var drafts = Array.isArray(seed.draft_items) ? seed.draft_items : [];
+    var drafts = Array.isArray(seed.bet_drafts) ? seed.bet_drafts :
+      (Array.isArray(seed.draft_items) ? seed.draft_items : []);
     var gemmaItems = gemmaShadowEvidence && Array.isArray(gemmaShadowEvidence.items) ? gemmaShadowEvidence.items : [];
+    var gemmaByEvidenceId = Object.create(null);
+    gemmaItems.forEach(function(item) {
+      if (item && item.evidence_id) gemmaByEvidenceId[String(item.evidence_id)] = item;
+    });
     var cards = drafts.map(function(draft, index) {
-      return _runtimeCard(draft || {}, gemmaItems[index] || null, index, routing.selected_prefill_source, routing.qwen_evidence || null);
+      var item = draft && draft.source_evidence_id
+        ? gemmaByEvidenceId[String(draft.source_evidence_id)] || null : null;
+      return _runtimeCard(draft || {}, item, index, routing.selected_prefill_source, routing.qwen_evidence || null);
     });
     qwenReviewSession = {
       schema_version:"vision-review-session-v1",
@@ -569,7 +580,7 @@ def render_vision_ui_section() -> str:
       game:(document.getElementById("vision-qwen-game") || {}).value || "539",
       source_image_id:String(uploadedImageId || ""),
       image_sha256:String((uploadedImageMetadata && uploadedImageMetadata.sha256) || routing.image_sha256 || ""),
-      structures:cards, unlinked_gemma_items:[], active_structure_id:cards.length ? cards[0].structure_id : null,
+      structures:cards, unlinked_gemma_items:_cloneJson(seed.unresolved_machine_fragments || []), active_structure_id:cards.length ? cards[0].structure_id : null,
       show_pending_only:false, candidate_preview:null, boundary_signal:null,
       human_answer_revision:null, human_answer_hash:"", server_state:"saving", server_error:null,
       server_candidate:null, runtime_routing:_cloneJson(routing), created_at:new Date().toISOString(),
@@ -580,10 +591,16 @@ def render_vision_ui_section() -> str:
           ? "AI 已讀到部分投注，仍有內容需要人工補充。"
           : "AI 建議已預填；每一筆仍需人工確認。")
       : "AI建議不可用，仍可手動輸入。";
+    var unresolvedCount = Array.isArray(seed.unresolved_machine_fragments)
+      ? seed.unresolved_machine_fragments.length : 0;
+    var fragmentNotice = unresolvedCount > 0
+      ? '<div id="runtime-unresolved-fragment-notice" style="padding:7px;background:#fff7ed;color:#9a3412;font-weight:700">AI 另外讀到 ' +
+        esc(String(unresolvedCount)) + ' 個未能安全組成投注的片段，請檢查。</div>' : '';
     document.getElementById("vision-results-body").innerHTML =
       '<div id="runtime-reader-status" style="padding:7px;background:#eff6ff;color:#1e40af;font-weight:700">' + esc(status) + '</div>' +
+      fragmentNotice +
       '<div id="qwen-review-session"></div><details id="runtime-reader-advanced" style="margin-top:8px"><summary>進階資訊</summary><pre style="white-space:pre-wrap">' +
-      esc(JSON.stringify({routing_decision:routing.routing_decision, fallback_reason:routing.fallback_reason, counters:routing.model_call_counters, cache:routing.cache_status, machine_read_diagnostics:seed.machine_read_diagnostics || {}}, null, 2)) +
+      esc(JSON.stringify({routing_decision:routing.routing_decision, fallback_reason:routing.fallback_reason, counters:routing.model_call_counters, cache:routing.cache_status, machine_read_diagnostics:seed.machine_read_diagnostics || {}, unresolved_machine_fragments:seed.unresolved_machine_fragments || []}, null, 2)) +
       '</pre>' + _renderPpocrShadowEvidence() + _renderGemmaShadowEvidence() + '</details>';
     document.getElementById("vision-results").style.display = "block";
     _mvpSetStep(2);

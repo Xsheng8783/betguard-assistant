@@ -59,7 +59,7 @@ def _gemma_item() -> dict[str, Any]:
         "numbers": "08 01 04",
         "multiplier_text": "2x5",
         "layout_guess": "column",
-        "continuation": "yes",
+        "continuation": "no",
         "special_text": "none",
         "cancelled": "no",
         "uncertain": False,
@@ -263,9 +263,202 @@ def test_partial_gemma_read_keeps_valid_items_and_never_calls_qwen(
         "accepted_item_count": 1,
         "rejected_item_count": 1,
         "rejected_reason_codes": ["GEMMA_ITEM_LAYOUT_INVALID"],
+        "bet_draft_count": 1,
+        "unresolved_fragment_count": 0,
+        "partial_machine_read": True,
+        "needs_review": True,
     }
     assert result["review_seed"]["human_confirmed"] is False
     assert result["model_call_counters"]["qwen_external_calls"] == 0
+
+
+def test_gemma_evidence_is_compiled_into_bets_and_unresolved_fragments(
+    tmp_path: Path,
+) -> None:
+    complete = {
+        **_gemma_item(),
+        "raw_text": "05 06 10 28 3/4X1",
+        "numbers": "05 06 10 28",
+        "multiplier_text": "3/4X1",
+        "layout_guess": "normal",
+    }
+    continuation = {
+        **complete,
+        "raw_text": "24 08 16 03",
+        "numbers": "24 08 16 03",
+        "multiplier_text": "none",
+        "continuation": "yes",
+    }
+    multiplier_only = {
+        **complete,
+        "raw_text": "2/3X0.5",
+        "numbers": "none",
+        "multiplier_text": "2/3X0.5",
+    }
+
+    result = _router(_gemma(items=[complete, continuation, multiplier_only])).route(
+        _request(tmp_path)
+    ).to_dict()
+    seed = result["review_seed"]
+
+    assert len(seed["bet_drafts"]) == 1
+    assert seed["draft_items"] == seed["bet_drafts"]
+    assert len(seed["unresolved_machine_fragments"]) == 2
+    assert [item["reason_code"] for item in seed["unresolved_machine_fragments"]] == [
+        "CONTINUATION_FRAGMENT_REQUIRES_REVIEW",
+        "MULTIPLIER_OR_CATEGORY_FRAGMENT_REQUIRES_REVIEW",
+    ]
+    assert seed["partial_machine_read"] is True
+    assert seed["needs_review"] is True
+    assert seed["human_confirmed"] is False
+    assert result["model_call_counters"]["qwen_external_calls"] == 0
+
+
+def test_false_x_is_downgraded_to_normal_and_genuine_column_is_preserved(
+    tmp_path: Path,
+) -> None:
+    false_x = {
+        **_gemma_item(),
+        "raw_text": "06 x 08 2x1\n07 38",
+        "numbers": "06 07 08 38 2 1",
+        "multiplier_text": "2x1",
+        "layout_guess": "normal",
+    }
+    genuine = {
+        **_gemma_item(),
+        "raw_text": "08x16 2x1\n26",
+        "numbers": "08 16 26 2 1",
+        "multiplier_text": "2x1",
+        # The literal operator, not this model guess, is the column authority.
+        "layout_guess": "normal",
+    }
+
+    result = _router(_gemma(items=[false_x, genuine])).route(
+        _request(tmp_path)
+    ).to_dict()
+    seed = result["review_seed"]
+
+    assert len(seed["bet_drafts"]) == 2
+    assert seed["bet_drafts"][0]["layout_suggestion"] == "normal"
+    assert seed["bet_drafts"][0]["number_groups_suggestion"] == [
+        ["06", "07", "08", "38"]
+    ]
+    assert seed["bet_drafts"][0]["operator_conflict_downgraded_to_normal"] is True
+    assert seed["bet_drafts"][1]["layout_suggestion"] == "column"
+    assert seed["bet_drafts"][1]["number_groups_suggestion"] == [
+        ["08"],
+        ["16", "26"],
+    ]
+    assert seed["bet_drafts"][1]["operator_conflict_downgraded_to_normal"] is False
+    assert seed["unresolved_machine_fragments"] == []
+
+
+def test_grouped_raw_item_promotes_only_complete_lines_and_keeps_raw_fragment(
+    tmp_path: Path,
+) -> None:
+    grouped = {
+        **_gemma_item(),
+        "raw_text": "05x08 10\n09x20\n23 29\n23x2",
+        "numbers": "05x08 10 09x20 23 29 23x2",
+        "multiplier_text": "x",
+        "layout_guess": "normal",
+    }
+
+    result = _router(_gemma(items=[grouped])).route(_request(tmp_path)).to_dict()
+    seed = result["review_seed"]
+
+    assert len(seed["bet_drafts"]) == 1
+    assert seed["bet_drafts"][0]["number_groups_suggestion"] == [
+        ["05"],
+        ["08", "10"],
+    ]
+    assert seed["bet_drafts"][0]["source_item_split"] is True
+    assert seed["bet_drafts"][0]["source_line_number"] == 1
+    assert seed["bet_drafts"][0]["source_line_end"] == 1
+    assert seed["unresolved_machine_fragments"] == [
+        {
+            "fragment_id": "gemma-fragment-0001",
+            "source_evidence_id": "GEMMA-0001",
+            "reason_code": "PARTIAL_RECORD_GROUP_REQUIRES_REVIEW",
+            "source_reason_code": "COLUMN_STRUCTURE_AMBIGUOUS",
+            "promoted_draft_ids": ["gemma-bet-0001-01"],
+            "raw_text": grouped["raw_text"],
+            "numbers": grouped["numbers"],
+            "multiplier_text": "x",
+            "layout_guess": "normal",
+            "continuation": "no",
+            "special_text": "none",
+            "cancelled": "no",
+            "uncertain": False,
+            "needs_review": True,
+            "human_confirmed": False,
+        }
+    ]
+
+
+def test_line_compiler_joins_only_bounded_column_continuation_and_multiplier(
+    tmp_path: Path,
+) -> None:
+    grouped = {
+        **_gemma_item(),
+        "raw_text": (
+            "11.19.24.25 3/4x1\n"
+            "08x16\n26 2x1\n"
+            "06\n07 x 08\n38 2x1"
+        ),
+        "numbers": "11.19.24.25 08x16 26 06 07 x 08 38",
+        "multiplier_text": "3/4x1 2x1 2x1",
+        "layout_guess": "normal",
+    }
+
+    result = _router(_gemma(items=[grouped])).route(_request(tmp_path)).to_dict()
+    drafts = result["review_seed"]["bet_drafts"]
+
+    assert [draft["number_groups_suggestion"] for draft in drafts] == [
+        [["11", "19", "24", "25"]],
+        [["08"], ["16", "26"]],
+    ]
+    assert drafts[1]["multiplier_rules_suggestion"] == ["2X1"]
+    assert drafts[1]["source_line_number"] == 2
+    assert drafts[1]["source_line_end"] == 3
+    assert all(
+        "06" not in group
+        for draft in drafts
+        for group in draft["number_groups_suggestion"]
+    )
+    assert result["review_seed"]["unresolved_machine_fragments"][0][
+        "reason_code"
+    ] == "PARTIAL_RECORD_GROUP_REQUIRES_REVIEW"
+
+
+def test_column_with_30_and_cancelled_audit_semantics_are_preserved(
+    tmp_path: Path,
+) -> None:
+    column = {
+        **_gemma_item(),
+        "raw_text": "30x03 2/3X1\n04",
+        "numbers": "30 03 04 2 3 1",
+        "multiplier_text": "2/3X1",
+        "layout_guess": "column",
+    }
+    cancelled = {
+        **_gemma_item(),
+        "raw_text": "11 14",
+        "numbers": "11 14",
+        "multiplier_text": "none",
+        "layout_guess": "normal",
+        "cancelled": "yes",
+    }
+
+    result = _router(_gemma(items=[column, cancelled])).route(
+        _request(tmp_path)
+    ).to_dict()
+    drafts = result["review_seed"]["bet_drafts"]
+
+    assert drafts[0]["number_groups_suggestion"] == [["30"], ["03", "04"]]
+    assert "34" not in drafts[0]["number_groups_raw"]
+    assert drafts[1]["cancelled_suggestion"] == "yes"
+    assert all(draft["promotion_contract"] == "betguard.gemma-bet-promotion.v1" for draft in drafts)
 
 
 def test_gemma_cache_hit_does_not_count_external_call(tmp_path: Path) -> None:

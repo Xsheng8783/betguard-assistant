@@ -18,6 +18,7 @@ from betguard.vision.gemma_shadow import (
     MODEL_VERSION as GEMMA_MODEL_VERSION,
     PROMPT_SHA256,
     PROVIDER_ID as GEMMA_PROVIDER_ID,
+    RAW_READER_PROMPT,
     REQUEST_SCHEMA_VERSION as GEMMA_REQUEST_SCHEMA_VERSION,
     run_gemma_shadow,
 )
@@ -318,3 +319,23 @@ def test_router_import_boundary_excludes_authority_execution_and_codex_runtime()
         assert forbidden not in lowered
     assert "codex_vision_runtime_calls" in source
     assert "codex_vision_runtime_calls\": 0" in source
+
+
+def test_bet_level_compiler_is_generic_and_prompt_does_not_invent_boundaries() -> None:
+    router_source = (
+        REPO / "src" / "betguard" / "vision" / "runtime_reader_router.py"
+    ).read_text(encoding="utf-8").lower()
+    for forbidden in (
+        "sample-007",
+        "sample_007",
+        "84b5133a49da",
+        "ground-truth",
+        "human truth",
+    ):
+        assert forbidden not in router_source
+
+    normalized_prompt = " ".join(RAW_READER_PROMPT.lower().split())
+    assert "one physical betting record" in normalized_prompt
+    assert "do not split those components" in normalized_prompt
+    assert "never combine unrelated" in normalized_prompt
+    assert "do not invent multiplication" in normalized_prompt
