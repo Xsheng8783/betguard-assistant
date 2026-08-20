@@ -37,6 +37,7 @@ from betguard.vision.providers.qwen_dashscope import (
 )
 from betguard.vision.runtime_reader_router import (
     PROVIDER_ID as ROUTER_PROVIDER_ID,
+    QWEN_RUNTIME_TIMEOUT_SECONDS,
     SCHEMA_VERSION,
     VALUE_AUTHORITY,
     ReaderRoutingResult,
@@ -216,6 +217,38 @@ def test_qwen_runtime_provider_override_forces_zero_retries(
     assert result.status.value == "failed"
     assert calls == [1]
     assert client.transport_call_count == 1
+
+
+def test_qwen_runtime_router_caps_transport_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import betguard.vision.runtime_reader_router as router
+
+    image_path = tmp_path / "image.png"
+    Image.new("RGB", (10, 10), "white").save(image_path)
+    observed: dict[str, QwenDashScopeConfig] = {}
+
+    monkeypatch.setattr(
+        router.QwenDashScopeConfig,
+        "from_env",
+        classmethod(
+            lambda _cls: QwenDashScopeConfig(
+                timeout_seconds=240.0,
+                max_retries=9,
+            )
+        ),
+    )
+
+    def stop_after_config(*, config: QwenDashScopeConfig):
+        observed["config"] = config
+        raise RuntimeError("test stop after config")
+
+    monkeypatch.setattr(router, "QwenDashScopeClient", stop_after_config)
+    with pytest.raises(RuntimeError, match="test stop after config"):
+        router._run_qwen_once(_request(image_path))
+
+    assert observed["config"].timeout_seconds == QWEN_RUNTIME_TIMEOUT_SECONDS == 60.0
+    assert observed["config"].max_retries == 0
 
 
 def test_service_exposes_runtime_router_without_changing_candidate_boundary(

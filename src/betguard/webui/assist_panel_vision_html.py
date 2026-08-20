@@ -338,6 +338,33 @@ def render_vision_ui_section() -> str:
       null;
   }
 
+  var RUNTIME_SECOND_OPINION_TIMEOUT_MS = 75000;
+
+  function _runtimeFetchJsonWithTimeout(url, options, timeoutMs) {
+    var controller = typeof AbortController === "function" ? new AbortController() : null;
+    var requestOptions = Object.assign({}, options || {});
+    if (controller) requestOptions.signal = controller.signal;
+    var timer = null;
+    var timeout = new Promise(function(_resolve, reject) {
+      timer = setTimeout(function() {
+        if (controller) controller.abort();
+        var error = new Error("runtime reader request timed out");
+        error.name = "AbortError";
+        reject(error);
+      }, timeoutMs);
+    });
+    var request = fetch(url, requestOptions).then(function(response) {
+      return response.json();
+    });
+    return Promise.race([request, timeout]).then(function(value) {
+      if (timer) clearTimeout(timer);
+      return value;
+    }, function(error) {
+      if (timer) clearTimeout(timer);
+      throw error;
+    });
+  }
+
   // Run job
   window.visionRunJob = function() {
     if (!uploadedImageId) return;
@@ -387,7 +414,7 @@ def render_vision_ui_section() -> str:
     qwenRequestedGame = selectedGame;
     btn.disabled = true;
     btn.textContent = "取得第二意見中...";
-    fetch("/api/vision/v1/jobs", {
+    _runtimeFetchJsonWithTimeout("/api/vision/v1/jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -396,8 +423,7 @@ def render_vision_ui_section() -> str:
         game: selectedGame,
         second_opinion_requested: true
       })
-    }).then(function(r) { return r.json(); })
-    .then(function(data) {
+    }, RUNTIME_SECOND_OPINION_TIMEOUT_MS).then(function(data) {
       btn.disabled = !qwenConfigured;
       btn.textContent = "取得 Qwen 第二意見";
       var routing = _runtimeRoutingFromResponse(data);
@@ -428,10 +454,13 @@ def render_vision_ui_section() -> str:
         return;
       }
       _renderRuntimeReaderSecondOpinion(routing);
-    }).catch(function() {
+    }).catch(function(error) {
       btn.disabled = !qwenConfigured;
       btn.textContent = "取得 Qwen 第二意見";
-      _renderQwenSecondOpinionFailure("Qwen request failed", {});
+      _renderQwenSecondOpinionFailure(
+        error && error.name === "AbortError" ? "Qwen request timed out" : "Qwen request failed",
+        {}
+      );
     });
   };
 

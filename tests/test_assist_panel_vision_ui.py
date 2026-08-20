@@ -36,6 +36,16 @@ class TestVisionUIHtml:
         assert "Qwen 第二意見失敗" in html
         assert "Qwen 辨識失敗" not in html
 
+    def test_qwen_second_opinion_has_finite_client_timeout(self):
+        from betguard.webui.assist_panel_vision_html import render_vision_ui_section
+
+        html = render_vision_ui_section()
+        assert "function _runtimeFetchJsonWithTimeout" in html
+        assert "RUNTIME_SECOND_OPINION_TIMEOUT_MS = 75000" in html
+        assert 'error.name = "AbortError"' in html
+        assert "controller.abort()" in html
+        assert "取得 Qwen 第二意見" in html
+
     def test_document_mode_can_be_supplied_before_paid_recognition(self):
         from betguard.webui.assist_panel_vision_html import render_vision_ui_section
 

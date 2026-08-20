@@ -41,6 +41,7 @@ PROVIDER_ID = "runtime-reader-router"
 SCHEMA_VERSION = "betguard.vision.reader-routing-result.v1"
 REVIEW_SEED_SCHEMA_VERSION = "betguard.vision.human-review-seed.v1"
 QWEN_EVIDENCE_SCHEMA_VERSION = "betguard.vision.qwen-machine-evidence.v1"
+QWEN_RUNTIME_TIMEOUT_SECONDS = 60.0
 VALUE_AUTHORITY = "human_confirmed_answer"
 
 ROUTING_GEMMA_PRIMARY = "GEMMA_PRIMARY"
@@ -359,7 +360,15 @@ def _run_local_ppocr(request: RecognitionRequest) -> dict[str, Any]:
 
 
 def _run_qwen_once(request: RecognitionRequest) -> dict[str, Any]:
-    config = replace(QwenDashScopeConfig.from_env(), max_retries=0)
+    configured = QwenDashScopeConfig.from_env()
+    config = replace(
+        configured,
+        timeout_seconds=min(
+            configured.timeout_seconds,
+            QWEN_RUNTIME_TIMEOUT_SECONDS,
+        ),
+        max_retries=0,
+    )
     client = QwenDashScopeClient(config=config)
     result = QwenDashScopeProvider(client=client, retries=0).recognize(request)
     result_dict = result.to_dict()

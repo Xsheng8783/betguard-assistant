@@ -763,6 +763,42 @@ def test_explicit_qwen_second_opinion_uses_nested_helper_and_preserves_human_ans
     ) == 1
 
 
+def test_qwen_second_opinion_timeout_restores_button_and_preserves_human_answer(
+    page,
+) -> None:
+    _mount(page, runtime_routing=_runtime_sample008_routing())
+    _run_runtime_reader(page)
+    before = page.evaluate("qwenGetReviewSession().structures")
+    page.evaluate(
+        """
+        (() => {
+        const originalFetch = window.fetch;
+        window.fetch = function(url, options) {
+          if (String(url).endsWith('/api/vision/v1/jobs') &&
+              JSON.parse(options.body).second_opinion_requested === true) {
+            const timeout = new Error('mock timeout');
+            timeout.name = 'AbortError';
+            return Promise.reject(timeout);
+          }
+          return originalFetch.call(window, url, options);
+        };
+        return true;
+        })()
+        """
+    )
+
+    page.click("#vision-qwen-run-btn")
+    page.wait_for_function(
+        "document.getElementById('vision-qwen-run-btn').textContent === '取得 Qwen 第二意見'"
+    )
+
+    assert page.is_enabled("#vision-qwen-run-btn")
+    assert page.text_content("#runtime-second-opinion-status") == (
+        "Qwen 第二意見失敗；既有 Human Answer 未變更。"
+    )
+    assert page.evaluate("qwenGetReviewSession().structures") == before
+
+
 def _sample011_s02_result() -> dict:
     line_id = "S02-L01"
     token_specs = [
