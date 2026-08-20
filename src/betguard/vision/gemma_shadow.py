@@ -31,7 +31,7 @@ MODEL_VERSION = MODEL_NAME
 ADAPTER_VERSION = "betguard.gemma-shadow.v2"
 EVIDENCE_SCHEMA_VERSION = "betguard.vision.gemma-shadow-evidence.v2"
 CACHE_SCHEMA_VERSION = "betguard.vision.gemma-shadow-cache.v2"
-REQUEST_SCHEMA_VERSION = "betguard.vision.gemma-raw-reader-request.v2"
+REQUEST_SCHEMA_VERSION = "betguard.vision.gemma-raw-reader-request.v3"
 ENABLED_ENV = "BETGUARD_GEMMA_SHADOW_ENABLED"
 API_KEY_ENV = "GEMINI_API_KEY"
 TIMEOUT_ENV = "BETGUARD_GEMMA_SHADOW_TIMEOUT_SECONDS"
@@ -50,9 +50,82 @@ Return ONLY one JSON object with this exact shape:
 This is evidence only. Never claim that an item is confirmed, executable, exportable, or safe to submit."""
 PROMPT_SHA256 = hashlib.sha256(RAW_READER_PROMPT.encode("utf-8")).hexdigest()
 
+_RAW_ITEM_KEYS = frozenset(
+    {
+        "raw_text",
+        "numbers",
+        "multiplier_text",
+        "layout_guess",
+        "continuation",
+        "special_text",
+        "cancelled",
+        "uncertain",
+        "uncertain_reason",
+    }
+)
+_ITEM_REJECTION_CODES = frozenset(
+    {
+        "GEMMA_ITEM_NOT_OBJECT",
+        "GEMMA_ITEM_SCHEMA_KEYS_INVALID",
+        "GEMMA_ITEM_RAW_TEXT_INVALID",
+        "GEMMA_ITEM_LITERAL_FIELDS_INVALID",
+        "GEMMA_ITEM_LAYOUT_INVALID",
+        "GEMMA_ITEM_CONTINUATION_INVALID",
+        "GEMMA_ITEM_SPECIAL_TEXT_INVALID",
+        "GEMMA_ITEM_CANCELLED_INVALID",
+        "GEMMA_ITEM_UNCERTAIN_INVALID",
+        "GEMMA_ITEM_UNCERTAIN_REASON_INVALID",
+    }
+)
+
+RAW_READER_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "version": {"type": "string", "enum": ["gemma-raw-reader-v2"]},
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "raw_text": {"type": "string"},
+                    "numbers": {"type": "string"},
+                    "multiplier_text": {"type": "string"},
+                    "layout_guess": {
+                        "type": "string",
+                        "enum": ["normal", "column", "unclear"],
+                    },
+                    "continuation": {
+                        "type": "string",
+                        "enum": ["yes", "no", "unclear"],
+                    },
+                    "special_text": {"type": "string"},
+                    "cancelled": {
+                        "type": "string",
+                        "enum": ["yes", "no", "unclear"],
+                    },
+                    "uncertain": {"type": "boolean"},
+                    "uncertain_reason": {"type": "string"},
+                },
+                "required": sorted(_RAW_ITEM_KEYS),
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["version", "items"],
+    "additionalProperties": False,
+}
+
 
 class GemmaFinishError(ValueError):
     """The provider returned a candidate that did not finish completely."""
+
+
+class GemmaItemValidationError(ValueError):
+    """One raw-reader item failed the strict suggestion-only contract."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -299,37 +372,68 @@ def validate_gemma_evidence(value: Any) -> dict[str, Any]:
     if any(value.get(key) != expected for key, expected in required_safety.items()):
         raise ValueError("Gemma evidence safety flags are invalid")
     items: list[dict[str, Any]] = []
-    for index, item in enumerate(value["items"], 1):
-        if not isinstance(item, dict):
-            raise ValueError("Gemma evidence item must be an object")
-        raw_text = item.get("raw_text")
-        if not isinstance(raw_text, str) or not raw_text.strip():
-            raise ValueError("Gemma raw_text must be non-empty")
-        numbers = item.get("numbers")
-        multiplier_text = item.get("multiplier_text")
-        if not isinstance(numbers, str) or not isinstance(multiplier_text, str):
-            raise ValueError("Gemma literal evidence fields must be strings")
-        layout = item.get("layout_guess")
-        if layout not in {"normal", "column", "unclear"}:
-            raise ValueError("Gemma layout must fail closed")
-        continuation = item.get("continuation")
-        cancelled = item.get("cancelled")
-        if continuation not in {"yes", "no", "unclear"} or cancelled not in {"yes", "no", "unclear"}:
-            raise ValueError("Gemma evidence enum is invalid")
-        if not isinstance(item.get("uncertain"), bool):
-            raise ValueError("Gemma uncertainty must be explicit")
-        items.append({
-            "evidence_id": f"GEMMA-{index:04d}",
-            "raw_text": raw_text,
-            "numbers": numbers,
-            "multiplier_text": multiplier_text,
-            "layout_guess": layout,
-            "continuation": continuation,
-            "special_text": str(item.get("special_text") or "none"),
-            "cancelled": cancelled,
-            "uncertain": item["uncertain"],
-            "uncertain_reason": str(item.get("uncertain_reason") or "none"),
-        })
+    accepted_indexes: set[int] = set()
+    for position, item in enumerate(value["items"], 1):
+        try:
+            normalized = _validated_item(item, position)
+        except GemmaItemValidationError as exc:
+            raise ValueError(exc.code) from exc
+        evidence_index = int(normalized["evidence_id"].split("-")[1])
+        if evidence_index in accepted_indexes:
+            raise ValueError("Gemma evidence IDs must be unique")
+        accepted_indexes.add(evidence_index)
+        items.append(normalized)
+
+    rejected_items_value = value.get("rejected_items", [])
+    if not isinstance(rejected_items_value, list):
+        raise ValueError("Gemma rejected_items must be a list")
+    rejected_items: list[dict[str, Any]] = []
+    rejected_indexes: set[int] = set()
+    for rejected in rejected_items_value:
+        if not isinstance(rejected, dict) or set(rejected) != {
+            "item_index",
+            "reason_code",
+        }:
+            raise ValueError("Gemma rejected item diagnostic is invalid")
+        item_index = rejected.get("item_index")
+        reason_code = rejected.get("reason_code")
+        if (
+            isinstance(item_index, bool)
+            or not isinstance(item_index, int)
+            or item_index < 1
+            or reason_code not in _ITEM_REJECTION_CODES
+            or item_index in rejected_indexes
+            or item_index in accepted_indexes
+        ):
+            raise ValueError("Gemma rejected item diagnostic is invalid")
+        rejected_indexes.add(item_index)
+        rejected_items.append(
+            {"item_index": item_index, "reason_code": str(reason_code)}
+        )
+
+    raw_item_count = value.get("raw_item_count", len(items) + len(rejected_items))
+    accepted_item_count = value.get("accepted_item_count", len(items))
+    rejected_item_count = value.get("rejected_item_count", len(rejected_items))
+    counts = (raw_item_count, accepted_item_count, rejected_item_count)
+    if any(isinstance(count, bool) or not isinstance(count, int) or count < 0 for count in counts):
+        raise ValueError("Gemma item diagnostics counts are invalid")
+    if (
+        accepted_item_count != len(items)
+        or rejected_item_count != len(rejected_items)
+        or raw_item_count != accepted_item_count + rejected_item_count
+        or any(index > raw_item_count for index in accepted_indexes | rejected_indexes)
+    ):
+        raise ValueError("Gemma item diagnostics counts are inconsistent")
+    reason_codes = list(dict.fromkeys(item["reason_code"] for item in rejected_items))
+    supplied_reason_codes = value.get("rejected_reason_codes", reason_codes)
+    if supplied_reason_codes != reason_codes:
+        raise ValueError("Gemma rejected reason codes are inconsistent")
+    partial_machine_read = accepted_item_count > 0 and rejected_item_count > 0
+    if value.get("partial_machine_read", partial_machine_read) is not partial_machine_read:
+        raise ValueError("Gemma partial read flag is inconsistent")
+    needs_review = rejected_item_count > 0
+    if value.get("needs_review", needs_review) is not needs_review:
+        raise ValueError("Gemma needs_review flag is inconsistent")
     provider = value.get("provider")
     if not isinstance(provider, dict) or provider.get("id") != PROVIDER_ID:
         raise ValueError("Gemma provider provenance is invalid")
@@ -339,7 +443,62 @@ def validate_gemma_evidence(value: Any) -> dict[str, Any]:
         **value,
         "provider": dict(provider),
         "items": items,
+        "raw_item_count": raw_item_count,
+        "accepted_item_count": accepted_item_count,
+        "rejected_item_count": rejected_item_count,
+        "rejected_items": rejected_items,
+        "rejected_reason_codes": reason_codes,
+        "partial_machine_read": partial_machine_read,
+        "needs_review": needs_review,
         **required_safety,
+    }
+
+
+def _validated_item(item: Any, item_index: int) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        raise GemmaItemValidationError("GEMMA_ITEM_NOT_OBJECT")
+    item_keys = set(item)
+    allowed_keys = set(_RAW_ITEM_KEYS) | {"evidence_id"}
+    if not _RAW_ITEM_KEYS.issubset(item_keys) or not item_keys.issubset(allowed_keys):
+        raise GemmaItemValidationError("GEMMA_ITEM_SCHEMA_KEYS_INVALID")
+    raw_text = item.get("raw_text")
+    if not isinstance(raw_text, str) or not raw_text.strip():
+        raise GemmaItemValidationError("GEMMA_ITEM_RAW_TEXT_INVALID")
+    numbers = item.get("numbers")
+    multiplier_text = item.get("multiplier_text")
+    if not isinstance(numbers, str) or not isinstance(multiplier_text, str):
+        raise GemmaItemValidationError("GEMMA_ITEM_LITERAL_FIELDS_INVALID")
+    layout = item.get("layout_guess")
+    if layout not in {"normal", "column", "unclear"}:
+        raise GemmaItemValidationError("GEMMA_ITEM_LAYOUT_INVALID")
+    continuation = item.get("continuation")
+    if continuation not in {"yes", "no", "unclear"}:
+        raise GemmaItemValidationError("GEMMA_ITEM_CONTINUATION_INVALID")
+    special_text = item.get("special_text")
+    if not isinstance(special_text, str):
+        raise GemmaItemValidationError("GEMMA_ITEM_SPECIAL_TEXT_INVALID")
+    cancelled = item.get("cancelled")
+    if cancelled not in {"yes", "no", "unclear"}:
+        raise GemmaItemValidationError("GEMMA_ITEM_CANCELLED_INVALID")
+    if not isinstance(item.get("uncertain"), bool):
+        raise GemmaItemValidationError("GEMMA_ITEM_UNCERTAIN_INVALID")
+    uncertain_reason = item.get("uncertain_reason")
+    if not isinstance(uncertain_reason, str):
+        raise GemmaItemValidationError("GEMMA_ITEM_UNCERTAIN_REASON_INVALID")
+    evidence_id = item.get("evidence_id", f"GEMMA-{item_index:04d}")
+    if not isinstance(evidence_id, str) or re.fullmatch(r"GEMMA-\d{4}", evidence_id) is None:
+        raise GemmaItemValidationError("GEMMA_ITEM_SCHEMA_KEYS_INVALID")
+    return {
+        "evidence_id": evidence_id,
+        "raw_text": raw_text,
+        "numbers": numbers,
+        "multiplier_text": multiplier_text,
+        "layout_guess": layout,
+        "continuation": continuation,
+        "special_text": special_text,
+        "cancelled": cancelled,
+        "uncertain": item["uncertain"],
+        "uncertain_reason": uncertain_reason,
     }
 
 
@@ -449,6 +608,7 @@ def _request_payload(
             "temperature": config.temperature,
             "maxOutputTokens": config.max_output_tokens,
             "responseMimeType": "application/json",
+            "responseJsonSchema": RAW_READER_RESPONSE_SCHEMA,
             "thinkingConfig": {"thinkingLevel": "minimal"},
         },
     }
@@ -491,13 +651,32 @@ def _validated_response(envelope: Any, base: dict[str, Any]) -> dict[str, Any]:
     decoded = json.loads(texts[0])
     if not isinstance(decoded, dict) or decoded.get("version") != "gemma-raw-reader-v2":
         raise ValueError("Gemma raw-reader root is invalid")
-    items = decoded.get("items")
-    if not isinstance(items, list):
+    raw_items = decoded.get("items")
+    if not isinstance(raw_items, list):
         raise ValueError("Gemma raw-reader items are invalid")
+    items: list[dict[str, Any]] = []
+    rejected_items: list[dict[str, Any]] = []
+    for item_index, item in enumerate(raw_items, 1):
+        try:
+            items.append(_validated_item(item, item_index))
+        except GemmaItemValidationError as exc:
+            rejected_items.append(
+                {"item_index": item_index, "reason_code": exc.code}
+            )
+    rejected_reason_codes = list(
+        dict.fromkeys(item["reason_code"] for item in rejected_items)
+    )
     evidence = {
         **base,
         "status": "completed",
         "items": items,
+        "raw_item_count": len(raw_items),
+        "accepted_item_count": len(items),
+        "rejected_item_count": len(rejected_items),
+        "rejected_items": rejected_items,
+        "rejected_reason_codes": rejected_reason_codes,
+        "partial_machine_read": bool(items and rejected_items),
+        "needs_review": bool(rejected_items),
         "raw_response_text": texts[0],
         "provider_request_id": str(envelope.get("responseId") or ""),
         "finish_reason": "STOP",

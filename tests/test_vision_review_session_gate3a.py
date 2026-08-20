@@ -723,6 +723,78 @@ def test_runtime_router_top_level_and_legacy_nested_seed_sample008_review(
     assert calls["jobs"][-1]["second_opinion_requested"] is False
 
 
+def test_dense_partial_gemma_seed_creates_cards_and_shows_folded_diagnostics(
+    page,
+) -> None:
+    routing = _runtime_sample008_routing()
+    routing["gemma_evidence"].update(
+        raw_item_count=4,
+        accepted_item_count=3,
+        rejected_item_count=1,
+        rejected_items=[
+            {"item_index": 2, "reason_code": "GEMMA_ITEM_LAYOUT_INVALID"}
+        ],
+        rejected_reason_codes=["GEMMA_ITEM_LAYOUT_INVALID"],
+        partial_machine_read=True,
+        needs_review=True,
+    )
+    routing["review_seed"].update(
+        needs_review=True,
+        partial_machine_read=True,
+        machine_read_diagnostics={
+            "raw_item_count": 4,
+            "accepted_item_count": 3,
+            "rejected_item_count": 1,
+            "rejected_reason_codes": ["GEMMA_ITEM_LAYOUT_INVALID"],
+        },
+    )
+    _mount(page, runtime_routing=routing)
+    _run_runtime_reader(page)
+
+    session = page.evaluate("qwenGetReviewSession()")
+    assert len(session["structures"]) == 3
+    assert all(card["human_confirmed"] is False for card in session["structures"])
+    assert page.text_content("#runtime-reader-status") == (
+        "AI 已讀到部分投注，仍有內容需要人工補充。"
+    )
+    assert page.get_attribute("#runtime-reader-advanced", "open") is None
+    advanced = page.text_content("#runtime-reader-advanced")
+    assert '"raw_item_count": 4' in advanced
+    assert '"accepted_item_count": 3' in advanced
+    assert '"rejected_item_count": 1' in advanced
+    assert "GEMMA_ITEM_LAYOUT_INVALID" in advanced
+    assert page.locator("#qwen-add-manual-structure").count() == 1
+    assert session["runtime_routing"]["model_call_counters"]["qwen_external_calls"] == 0
+
+
+def test_spacing_only_dense_numbers_do_not_invent_a_column_separator(page) -> None:
+    routing = _runtime_sample008_routing()
+    item = routing["gemma_evidence"]["items"][0]
+    item.update(
+        raw_text="06 07 08 38",
+        numbers="06 07 08 38",
+        layout_guess="column",
+        continuation="no",
+    )
+    routing["gemma_evidence"]["items"] = [item]
+    draft = routing["review_seed"]["draft_items"][0]
+    draft.update(
+        raw_text="06 07 08 38",
+        number_groups_raw="06 07 08 38",
+        layout_suggestion="column",
+        continuation_suggestion="no",
+    )
+    routing["review_seed"]["draft_items"] = [draft]
+    _mount(page, runtime_routing=routing)
+    _run_runtime_reader(page)
+
+    staged = page.evaluate(
+        "qwenGetReviewSession().structures[0].staged_structure.number_groups"
+    )
+    assert staged == []
+    assert page.evaluate("qwenGetReviewSession().structures[0].human_confirmed") is False
+
+
 def test_runtime_manual_only_keeps_manual_review_available_and_unconfirmed(page) -> None:
     _mount(page, runtime_routing=_runtime_manual_only_routing())
     page.click("#vision-run-btn")

@@ -614,7 +614,25 @@ def _review_seed(
     qwen_evidence: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     draft_items: list[dict[str, Any]] = []
+    machine_read_diagnostics = {
+        "raw_item_count": 0,
+        "accepted_item_count": 0,
+        "rejected_item_count": 0,
+        "rejected_reason_codes": [],
+    }
     if selected_source == GEMMA_PROVIDER_ID:
+        machine_read_diagnostics = {
+            "raw_item_count": int(gemma_evidence.get("raw_item_count") or 0),
+            "accepted_item_count": int(
+                gemma_evidence.get("accepted_item_count") or 0
+            ),
+            "rejected_item_count": int(
+                gemma_evidence.get("rejected_item_count") or 0
+            ),
+            "rejected_reason_codes": list(
+                gemma_evidence.get("rejected_reason_codes") or []
+            ),
+        }
         for index, item in enumerate(gemma_evidence.get("items") or [], 1):
             if not isinstance(item, Mapping):
                 continue
@@ -654,11 +672,19 @@ def _review_seed(
                         "uncertain": True,
                     }
                 )
+    partial_machine_read = bool(
+        selected_source == GEMMA_PROVIDER_ID
+        and machine_read_diagnostics["accepted_item_count"] > 0
+        and machine_read_diagnostics["rejected_item_count"] > 0
+    )
     return {
         "schema_version": REVIEW_SEED_SCHEMA_VERSION,
         "status": "machine_prefill_available" if draft_items else "manual_entry_required",
         "selected_machine_source": selected_source,
         "draft_items": draft_items,
+        "needs_review": bool(partial_machine_read or not draft_items),
+        "partial_machine_read": partial_machine_read,
+        "machine_read_diagnostics": machine_read_diagnostics,
         "structured_human_answer_required": True,
         "human_confirmed": False,
         "human_confirmation_required": True,

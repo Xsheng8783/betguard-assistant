@@ -15,6 +15,7 @@ from betguard.vision.gemma_shadow import (
     MODEL_NAME as GEMMA_MODEL,
     MODEL_VERSION as GEMMA_MODEL_VERSION,
     PROVIDER_ID as GEMMA_PROVIDER_ID,
+    REQUEST_SCHEMA_VERSION as GEMMA_REQUEST_SCHEMA_VERSION,
 )
 from betguard.vision.runtime_reader_router import (
     FALLBACK_GEMMA_API_FAILURE,
@@ -86,7 +87,7 @@ def _gemma(
         "model": GEMMA_MODEL,
         "image_sha256": IMAGE_SHA,
         "prompt_sha256": "b" * 64,
-        "request_schema_version": "betguard.vision.gemma-raw-reader-request.v2",
+        "request_schema_version": GEMMA_REQUEST_SCHEMA_VERSION,
         "status": "completed",
         "items": [_gemma_item()] if items is None else items,
         "raw_response_text": "{}",
@@ -101,7 +102,7 @@ def _gemma(
             "model_version": GEMMA_MODEL_VERSION,
             "adapter_version": GEMMA_ADAPTER_VERSION,
             "prompt_sha256": "b" * 64,
-            "request_schema_version": "betguard.vision.gemma-raw-reader-request.v2",
+            "request_schema_version": GEMMA_REQUEST_SCHEMA_VERSION,
         },
         "external_call_count": external_calls,
         "retry_count": 0,
@@ -229,6 +230,42 @@ def test_gemma_success_is_primary_and_qwen_external_calls_zero(tmp_path: Path) -
     assert result["model_call_counters"]["qwen_attempts"] == 0
     assert result["model_call_counters"]["qwen_external_calls"] == 0
     assert result["review_seed"]["draft_items"][0]["number_groups_raw"] == "08 01 04"
+
+
+def test_partial_gemma_read_keeps_valid_items_and_never_calls_qwen(
+    tmp_path: Path,
+) -> None:
+    calls: list[int] = []
+    gemma = _gemma()
+    gemma.update(
+        raw_item_count=2,
+        accepted_item_count=1,
+        rejected_item_count=1,
+        rejected_items=[
+            {"item_index": 2, "reason_code": "GEMMA_ITEM_LAYOUT_INVALID"}
+        ],
+        rejected_reason_codes=["GEMMA_ITEM_LAYOUT_INVALID"],
+        partial_machine_read=True,
+        needs_review=True,
+    )
+
+    result = _router(gemma, qwen_calls=calls).route(_request(tmp_path)).to_dict()
+
+    assert calls == []
+    assert result["routing_decision"] == ROUTING_GEMMA_PRIMARY
+    assert result["fallback_reason"] is None
+    assert result["selected_prefill_source"] == GEMMA_PROVIDER_ID
+    assert len(result["review_seed"]["draft_items"]) == 1
+    assert result["review_seed"]["partial_machine_read"] is True
+    assert result["review_seed"]["needs_review"] is True
+    assert result["review_seed"]["machine_read_diagnostics"] == {
+        "raw_item_count": 2,
+        "accepted_item_count": 1,
+        "rejected_item_count": 1,
+        "rejected_reason_codes": ["GEMMA_ITEM_LAYOUT_INVALID"],
+    }
+    assert result["review_seed"]["human_confirmed"] is False
+    assert result["model_call_counters"]["qwen_external_calls"] == 0
 
 
 def test_gemma_cache_hit_does_not_count_external_call(tmp_path: Path) -> None:

@@ -191,6 +191,82 @@ def test_success_preserves_exact_raw_response_and_contract(tmp_path, monkeypatch
     serialized = json.dumps(evidence).lower()
     assert "runtime-secret" not in serialized
     assert "inline_data" in captured["contents"][0]["parts"][1]
+    response_schema = captured["generationConfig"]["responseJsonSchema"]
+    assert response_schema["type"] == "object"
+    assert response_schema["properties"]["version"]["enum"] == [
+        "gemma-raw-reader-v2"
+    ]
+    assert response_schema["required"] == ["version", "items"]
+
+
+def test_page_contract_stays_strict_but_invalid_items_are_rejected_individually(
+    tmp_path, monkeypatch
+) -> None:
+    image = tmp_path / "image.png"
+    image.write_bytes(b"png")
+    monkeypatch.setenv("GEMINI_API_KEY", "runtime-secret")
+    invalid = {**_wire_item(), "special_text": ["not", "a", "string"]}
+    raw = json.dumps(
+        {
+            "version": "gemma-raw-reader-v2",
+            "items": [_wire_item(), invalid, {**_wire_item(), "raw_text": "08 04 26 09"}],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    envelope = _envelope()
+    envelope["candidates"][0]["content"]["parts"][0]["text"] = raw
+
+    evidence = run_gemma_shadow(
+        _request(image),
+        config=_config(tmp_path),
+        transport=lambda *_args: envelope,
+    )
+
+    assert evidence["status"] == "completed"
+    assert evidence["raw_response_text"] == raw
+    assert evidence["raw_item_count"] == 3
+    assert evidence["accepted_item_count"] == 2
+    assert evidence["rejected_item_count"] == 1
+    assert [item["evidence_id"] for item in evidence["items"]] == [
+        "GEMMA-0001",
+        "GEMMA-0003",
+    ]
+    assert evidence["rejected_items"] == [
+        {
+            "item_index": 2,
+            "reason_code": "GEMMA_ITEM_SPECIAL_TEXT_INVALID",
+        }
+    ]
+    assert evidence["rejected_reason_codes"] == [
+        "GEMMA_ITEM_SPECIAL_TEXT_INVALID"
+    ]
+    assert evidence["partial_machine_read"] is True
+    assert evidence["needs_review"] is True
+    assert evidence["human_confirmed"] is False
+
+
+def test_bare_json_array_still_fails_the_versioned_page_contract(
+    tmp_path, monkeypatch
+) -> None:
+    image = tmp_path / "image.png"
+    image.write_bytes(b"png")
+    monkeypatch.setenv("GEMINI_API_KEY", "runtime-secret")
+    envelope = _envelope()
+    envelope["candidates"][0]["content"]["parts"][0]["text"] = json.dumps(
+        [_wire_item()], separators=(",", ":")
+    )
+
+    evidence = run_gemma_shadow(
+        _request(image),
+        config=_config(tmp_path),
+        transport=lambda *_args: envelope,
+    )
+
+    assert evidence["status"] == "failed"
+    assert evidence["error"]["code"] == "GEMMA_SHADOW_INVALID_RESPONSE"
+    assert evidence["external_call_count"] == 1
+    assert evidence["retry_count"] == 0
 
 
 def test_cache_is_atomic_validated_separate_and_does_not_store_secrets(tmp_path) -> None:

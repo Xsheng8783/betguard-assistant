@@ -36,6 +36,15 @@ class TestVisionUIHtml:
         assert "Qwen 第二意見失敗" in html
         assert "Qwen 辨識失敗" not in html
 
+    def test_dense_partial_reader_ux_is_folded_and_keeps_manual_add(self):
+        from betguard.webui.assist_panel_vision_html import render_vision_ui_section
+
+        html = render_vision_ui_section()
+        assert "AI 已讀到部分投注，仍有內容需要人工補充。" in html
+        assert "machine_read_diagnostics:seed.machine_read_diagnostics || {}" in html
+        assert '<details id="runtime-reader-advanced"' in html
+        assert "qwen-add-manual-structure" in html
+
     def test_qwen_second_opinion_has_finite_client_timeout(self):
         from betguard.webui.assist_panel_vision_html import render_vision_ui_section
 

@@ -576,12 +576,14 @@ def render_vision_ui_section() -> str:
       safety:{human_confirmation_required:true,auto_apply:false,auto_confirm:false,auto_submit:false}
     };
     var status = routing.selected_prefill_source
-      ? "AI 建議已預填；每一筆仍需人工確認。"
+      ? (seed.partial_machine_read
+          ? "AI 已讀到部分投注，仍有內容需要人工補充。"
+          : "AI 建議已預填；每一筆仍需人工確認。")
       : "AI建議不可用，仍可手動輸入。";
     document.getElementById("vision-results-body").innerHTML =
       '<div id="runtime-reader-status" style="padding:7px;background:#eff6ff;color:#1e40af;font-weight:700">' + esc(status) + '</div>' +
       '<div id="qwen-review-session"></div><details id="runtime-reader-advanced" style="margin-top:8px"><summary>進階資訊</summary><pre style="white-space:pre-wrap">' +
-      esc(JSON.stringify({routing_decision:routing.routing_decision, fallback_reason:routing.fallback_reason, counters:routing.model_call_counters, cache:routing.cache_status}, null, 2)) +
+      esc(JSON.stringify({routing_decision:routing.routing_decision, fallback_reason:routing.fallback_reason, counters:routing.model_call_counters, cache:routing.cache_status, machine_read_diagnostics:seed.machine_read_diagnostics || {}}, null, 2)) +
       '</pre>' + _renderPpocrShadowEvidence() + _renderGemmaShadowEvidence() + '</details>';
     document.getElementById("vision-results").style.display = "block";
     _mvpSetStep(2);
