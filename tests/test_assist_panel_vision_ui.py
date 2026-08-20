@@ -24,6 +24,18 @@ class TestVisionUIHtml:
         assert "human_confirmation_required:true" in html
         assert "逐筆確認" in html
 
+    def test_runtime_router_response_helper_and_failure_labels(self):
+        from betguard.webui.assist_panel_vision_html import render_vision_ui_section
+
+        html = render_vision_ui_section()
+        assert "function _runtimeRoutingFromResponse(data)" in html
+        assert "data.routing_result" in html
+        assert "data.result && data.result.routing_result" in html
+        assert html.count("_runtimeRoutingFromResponse(data)") >= 3
+        assert "AI 辨識失敗" in html
+        assert "Qwen 第二意見失敗" in html
+        assert "Qwen 辨識失敗" not in html
+
     def test_document_mode_can_be_supplied_before_paid_recognition(self):
         from betguard.webui.assist_panel_vision_html import render_vision_ui_section
 

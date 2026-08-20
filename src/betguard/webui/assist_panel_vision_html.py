@@ -331,6 +331,13 @@ def render_vision_ui_section() -> str:
       });
   };
 
+  function _runtimeRoutingFromResponse(data) {
+    if (!data || typeof data !== "object") return null;
+    return data.routing_result ||
+      (data.result && data.result.routing_result) ||
+      null;
+  }
+
   // Run job
   window.visionRunJob = function() {
     if (!uploadedImageId) return;
@@ -353,18 +360,16 @@ def render_vision_ui_section() -> str:
       btn.disabled = false;
       btn.textContent = "開始 AI 辨識";
       if (!data.ok) {
-        document.getElementById("vision-results-body").innerHTML = "<div style='color:#ef4444'>錯誤：" + esc((data.error && data.error.message) || "未知") + "</div>";
-        document.getElementById("vision-results").style.display = "block";
+        _renderRuntimeReaderFailure();
         return;
       }
-      var routing = data.result && data.result.routing_result;
+      var routing = _runtimeRoutingFromResponse(data);
       if (!routing) { _renderRuntimeReaderFailure(); return; }
       _renderRuntimeReaderRouting(routing);
     }).catch(function() {
       btn.disabled = false;
       btn.textContent = "開始 AI 辨識";
-      document.getElementById("vision-results-body").innerHTML = "<div style='color:#ef4444'>辨識失敗，請稍後重試。</div>";
-      document.getElementById("vision-results").style.display = "block";
+      _renderRuntimeReaderFailure();
     });
   };
 
@@ -379,7 +384,6 @@ def render_vision_ui_section() -> str:
       _renderQwenFailure("請先明確選擇 539 或六合彩");
       return;
     }
-    _resetQwenReviewSession();
     qwenRequestedGame = selectedGame;
     btn.disabled = true;
     btn.textContent = "取得第二意見中...";
@@ -396,28 +400,38 @@ def render_vision_ui_section() -> str:
     .then(function(data) {
       btn.disabled = !qwenConfigured;
       btn.textContent = "取得 Qwen 第二意見";
-      var routing = data.result && data.result.routing_result;
+      var routing = _runtimeRoutingFromResponse(data);
       // Backward-compatible rendering is retained for deterministic Gate 3A
       // fixtures. Production sends the runtime-router envelope above.
       if (data.ok && !routing && data.result && data.result.status === "completed") {
         qwenStructureEvidence = Array.isArray(data.structure_evidence) ? data.structure_evidence : [];
         gemmaShadowEvidence = data.gemma_shadow_evidence || null;
         ppocrShadowEvidence = data.shadow_evidence || null;
-        _renderQwenEvidence(data.result);
+        if (qwenReviewSession && Array.isArray(qwenReviewSession.structures) && qwenReviewSession.structures.length) {
+          qwenEvidenceResult = _cloneJson(data.result);
+          qwenReviewSession.second_opinion_evidence = _cloneJson(data.result);
+          _renderQwenReviewSession();
+          _renderRuntimeSecondOpinionBanner(true);
+        } else {
+          _renderQwenEvidence(data.result);
+        }
         return;
       }
       if (data.ok && !routing && data.result && data.result.status === "failed") {
         gemmaShadowEvidence = data.gemma_shadow_evidence || null;
         ppocrShadowEvidence = data.shadow_evidence || null;
-        _renderQwenFailure("Qwen response unavailable", "AI建議不可用，仍可手動輸入。", data);
+        _renderQwenSecondOpinionFailure("Qwen response unavailable", data);
         return;
       }
-      if (!data.ok || !routing) { _renderRuntimeReaderFailure(); return; }
-      _renderRuntimeReaderRouting(routing);
+      if (!data.ok || !routing) {
+        _renderQwenSecondOpinionFailure("Qwen response unavailable", data);
+        return;
+      }
+      _renderRuntimeReaderSecondOpinion(routing);
     }).catch(function() {
       btn.disabled = !qwenConfigured;
       btn.textContent = "取得 Qwen 第二意見";
-      _renderRuntimeReaderFailure();
+      _renderQwenSecondOpinionFailure("Qwen request failed", {});
     });
   };
 
@@ -436,16 +450,49 @@ def render_vision_ui_section() -> str:
     ppocrShadowEvidence = null;
     _renderQwenFailure(
       "runtime readers unavailable",
-      "AI建議不可用，仍可手動輸入。"
+      "AI建議不可用，仍可手動輸入。",
+      {},
+      "AI 辨識失敗"
     );
     _mvpSetStep(2);
+  }
+
+  function _renderRuntimeSecondOpinionBanner(success) {
+    var host = document.getElementById("qwen-review-session");
+    if (!host || !host.parentNode) return;
+    var previous = document.getElementById("runtime-second-opinion-status");
+    if (previous && previous.parentNode) previous.parentNode.removeChild(previous);
+    var banner = document.createElement("div");
+    banner.id = "runtime-second-opinion-status";
+    banner.style.cssText = success
+      ? "padding:7px;background:#eff6ff;color:#1e40af;font-weight:700"
+      : "padding:7px;background:#fef2f2;color:#991b1b;font-weight:700";
+    banner.textContent = success
+      ? "Qwen 第二意見已加入進階資訊；Human Answer 未變更。"
+      : "Qwen 第二意見失敗；既有 Human Answer 未變更。";
+    host.parentNode.insertBefore(banner, host);
+  }
+
+  function _renderQwenSecondOpinionFailure(message, payload) {
+    if (qwenReviewSession && Array.isArray(qwenReviewSession.structures) && qwenReviewSession.structures.length) {
+      qwenReviewSession.second_opinion_error = String(message || "Qwen response unavailable");
+      _renderQwenReviewSession();
+      _renderRuntimeSecondOpinionBanner(false);
+      return;
+    }
+    _renderQwenFailure(
+      message || "Qwen response unavailable",
+      "AI建議不可用，仍可手動輸入。",
+      payload || {},
+      "Qwen 第二意見失敗"
+    );
   }
 
   function _runtimeCard(draft, item, index, source, qwenEvidence) {
     var layout = String((item && item.layout_guess) || draft.layout_suggestion || "unclear");
     var staged = {
-      number_groups: source === "gemma-4-26b-shadow" ? _gemmaNumberGroups(item || {}, {staged_structure:{layout:layout}}) : [],
-      multiplier_rules: source === "gemma-4-26b-shadow" ? _gemmaMultiplierRules(item || {}) : [],
+      number_groups: source === "gemma4-26b-shadow" ? _gemmaNumberGroups(item || {}, {staged_structure:{layout:layout}}) : [],
+      multiplier_rules: source === "gemma4-26b-shadow" ? _gemmaMultiplierRules(item || {}) : [],
       layout: layout === "column" ? "column_bet" : (layout === "normal" ? "normal_row" : "unknown"),
       continuation: String(draft.continuation_suggestion || "").toLowerCase() === "yes",
       special_text: draft.special_play_raw === "none" ? "" : String(draft.special_play_raw || ""),
@@ -468,9 +515,9 @@ def render_vision_ui_section() -> str:
         human_answer: {source:"Human Answer", human_confirmed:false, staged_structure:_cloneJson(staged)}
       },
       field_sources: {
-        numbers:{source:source === "gemma-4-26b-shadow" ? "Gemma suggestion" : "Human Answer",human_confirmed:false},
-        multiplier:{source:source === "gemma-4-26b-shadow" ? "Gemma suggestion" : "Human Answer",human_confirmed:false},
-        layout:{source:source === "gemma-4-26b-shadow" ? "Gemma suggestion" : "Human Answer",human_confirmed:false}
+        numbers:{source:source === "gemma4-26b-shadow" ? "Gemma suggestion" : "Human Answer",human_confirmed:false},
+        multiplier:{source:source === "gemma4-26b-shadow" ? "Gemma suggestion" : "Human Answer",human_confirmed:false},
+        layout:{source:source === "gemma4-26b-shadow" ? "Gemma suggestion" : "Human Answer",human_confirmed:false}
       },
       suggestion_adoptions: [], blocking_resolved_by_human: sourceStatus === "consistent", human_confirmed:false
     };
@@ -513,6 +560,26 @@ def render_vision_ui_section() -> str:
     _renderQwenReviewSession();
   }
 
+  function _renderRuntimeReaderSecondOpinion(routing) {
+    var hasExistingHumanAnswer = qwenReviewSession &&
+      Array.isArray(qwenReviewSession.structures) &&
+      qwenReviewSession.structures.length > 0;
+    if (!hasExistingHumanAnswer) {
+      _renderRuntimeReaderRouting(routing);
+    } else {
+      runtimeRoutingResult = _cloneJson(routing);
+      gemmaShadowEvidence = routing.gemma_evidence || gemmaShadowEvidence || null;
+      ppocrShadowEvidence = routing.pp_evidence || ppocrShadowEvidence || null;
+      qwenEvidenceResult = routing.qwen_evidence && routing.qwen_evidence.recognition_result || null;
+      qwenReviewSession.runtime_routing = _cloneJson(routing);
+      qwenReviewSession.second_opinion_evidence = _cloneJson(routing.qwen_evidence || null);
+      qwenReviewSession.field_conflicts = _cloneJson(routing.field_conflicts || []);
+      _renderQwenReviewSession();
+    }
+    var qwenEvidence = routing.qwen_evidence || null;
+    _renderRuntimeSecondOpinionBanner(!!qwenEvidence && qwenEvidence.status === "completed");
+  }
+
   function _renderQwenFailure(message) {
     var payload = arguments.length > 2 && arguments[2] ? arguments[2] : {};
     var preservedPp = payload.shadow_evidence || ppocrShadowEvidence || null;
@@ -531,8 +598,10 @@ def render_vision_ui_section() -> str:
     var userMessage = arguments.length > 1 ? arguments[1] : "";
     var safeUserMessage = userMessage ||
       "AI 未能完整讀取這張圖片。\\n可以重新辨識或改用手動輸入。";
+    var failureTitle = arguments.length > 3 && arguments[3]
+      ? String(arguments[3]) : "Qwen 第二意見失敗";
     document.getElementById("vision-results-body").innerHTML =
-      '<div id="qwen-evidence-status" style="color:#b91c1c;font-weight:700">Qwen 辨識失敗</div>' +
+      '<div id="qwen-evidence-status" style="color:#b91c1c;font-weight:700">' + esc(failureTitle) + '</div>' +
       '<div id="qwen-failure-message" style="color:#991b1b;margin-top:6px">' +
         esc(safeUserMessage).replace(/\\n/g, '<br>') + '</div>' +
       '<details class="qwen-failure-details" style="font-size:11px;color:#64748b;margin-top:6px"><summary>進階資訊</summary><pre style="white-space:pre-wrap">' +

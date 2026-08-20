@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+from copy import deepcopy
 
 import pytest
 from PIL import Image
@@ -212,6 +213,174 @@ def _manual_result() -> dict:
     }
 
 
+def _runtime_sample008_routing() -> dict:
+    items = [
+        {
+            "evidence_id": "GEMMA-0004",
+            "raw_text": "08x01\n04 2x5",
+            "numbers": "08 01 04",
+            "multiplier_text": "2x5",
+            "layout_guess": "column",
+            "continuation": "yes",
+            "special_text": "none",
+            "cancelled": "no",
+            "uncertain": False,
+        },
+        {
+            "evidence_id": "GEMMA-0005",
+            "raw_text": "08x16\n26 2x1",
+            "numbers": "08 16 26",
+            "multiplier_text": "2x1",
+            "layout_guess": "column",
+            "continuation": "yes",
+            "special_text": "none",
+            "cancelled": "no",
+            "uncertain": False,
+        },
+        {
+            "evidence_id": "GEMMA-0007",
+            "raw_text": "25x26x28x07\n09 3x1",
+            "numbers": "25 26 28 07 09",
+            "multiplier_text": "3x1",
+            "layout_guess": "column",
+            "continuation": "yes",
+            "special_text": "none",
+            "cancelled": "no",
+            "uncertain": False,
+        },
+    ]
+    drafts = []
+    for index, item in enumerate(items, 1):
+        drafts.append({
+            "draft_id": f"gemma-raw-{index:04d}",
+            "source_evidence_id": item["evidence_id"],
+            "raw_text": item["raw_text"],
+            "number_groups_raw": item["numbers"],
+            "multiplier_raw": item["multiplier_text"],
+            "layout_suggestion": item["layout_guess"],
+            "continuation_suggestion": item["continuation"],
+            "special_play_raw": item["special_text"],
+            "cancelled_suggestion": item["cancelled"],
+            "uncertain": item["uncertain"],
+        })
+    return {
+        "schema_version": "betguard.vision.reader-routing-result.v1",
+        "image_sha256": "8" * 64,
+        "routing_decision": "GEMMA_PRIMARY",
+        "primary_machine_source": "gemma4-26b-shadow",
+        "fallback_reason": None,
+        "gemma_evidence": {
+            "status": "completed",
+            "provider": {"id": "gemma4-26b-shadow"},
+            "items": items,
+            "cache_hit": True,
+            "external_call_count": 0,
+            "evidence_only": True,
+            "human_confirmed": False,
+        },
+        "pp_evidence": {
+            "status": "completed",
+            "provider": {"id": "ppocrv6-shadow"},
+            "regions": [],
+            "cache_hit": True,
+            "local_inference_calls": 0,
+            "evidence_only": True,
+        },
+        "qwen_evidence": None,
+        "selected_prefill_source": "gemma4-26b-shadow",
+        "review_seed": {
+            "schema_version": "betguard.vision.human-review-seed.v1",
+            "status": "machine_prefill_available",
+            "selected_machine_source": "gemma4-26b-shadow",
+            "draft_items": drafts,
+            "structured_human_answer_required": True,
+            "human_confirmed": False,
+            "human_confirmation_required": True,
+            "value_authority": "human_confirmed_answer",
+            "candidate_created": False,
+            "auto_confirm": False,
+            "auto_submit": False,
+        },
+        "field_conflicts": [],
+        "cache_status": {
+            "gemma": {"checked": True, "cache_hit": True, "identity": {"image_sha256": "8" * 64}},
+            "ppocr": {"checked": True, "cache_hit": True, "identity": {"image_sha256": "8" * 64}},
+            "qwen": {"checked": False, "cache_hit": False, "identity": None},
+        },
+        "latency": {
+            "gemma_latency_ms": 1.0,
+            "pp_latency_ms": 1.0,
+            "qwen_latency_ms": 0.0,
+            "total_routing_latency_ms": 1.5,
+            "gemma_pp_parallel": True,
+            "qwen_conditional_after_gemma": False,
+        },
+        "model_call_counters": {
+            "gemma_attempts": 1,
+            "gemma_external_calls": 0,
+            "gemma_cache_hits": 1,
+            "gemma_retries": 0,
+            "pp_local_inference_calls": 0,
+            "pp_cache_hits": 1,
+            "qwen_attempts": 0,
+            "qwen_external_calls": 0,
+            "qwen_cache_hits": 0,
+            "qwen_retries": 0,
+            "codex_vision_runtime_calls": 0,
+        },
+        "human_confirmation_required": True,
+        "value_authority": "human_confirmed_answer",
+        "auto_confirm": False,
+        "auto_submit": False,
+    }
+
+
+def _runtime_manual_only_routing() -> dict:
+    routing = _runtime_sample008_routing()
+    routing["routing_decision"] = "MANUAL_REVIEW_ONLY"
+    routing["fallback_reason"] = "GEMMA_SCHEMA_INVALID"
+    routing["selected_prefill_source"] = None
+    routing["gemma_evidence"] = {
+        "status": "failed",
+        "provider": {"id": "gemma4-26b-shadow"},
+        "items": [],
+        "cache_hit": False,
+        "external_call_count": 0,
+        "evidence_only": True,
+        "human_confirmed": False,
+    }
+    routing["review_seed"] = {
+        **routing["review_seed"],
+        "status": "manual_entry_required",
+        "selected_machine_source": None,
+        "draft_items": [],
+    }
+    return routing
+
+
+def _runtime_second_opinion_failure() -> dict:
+    routing = _runtime_sample008_routing()
+    routing["routing_decision"] = "GEMMA_PRIMARY_WITH_SECOND_OPINION"
+    routing["fallback_reason"] = "SECOND_OPINION_REQUESTED"
+    routing["qwen_evidence"] = {
+        "schema_version": "betguard.vision.qwen-machine-evidence.v1",
+        "status": "failed",
+        "provider": "qwen-dashscope",
+        "recognition_result": {"status": "failed", "lines": []},
+        "cache_hit": False,
+        "external_call_count": 1,
+        "retry_count": 0,
+        "evidence_only": True,
+        "human_confirmed": False,
+    }
+    routing["model_call_counters"] = {
+        **routing["model_call_counters"],
+        "qwen_attempts": 1,
+        "qwen_external_calls": 1,
+    }
+    return routing
+
+
 def _mount(
     page,
     *,
@@ -219,6 +388,10 @@ def _mount(
     job_result: dict | None = None,
     structure_evidence: list[dict] | None = None,
     gemma_evidence: dict | None = None,
+    runtime_routing: dict | None = None,
+    runtime_nested: bool = False,
+    second_opinion_routing: dict | None = None,
+    second_opinion_nested: bool = False,
 ):
     calls: dict[str, list] = {
         "jobs": [], "manual": [], "urls": [], "uploads": [],
@@ -411,7 +584,27 @@ def _mount(
             route.fulfill(status=200, content_type="image/png", body=first)
             return
         if request.url.endswith("/api/vision/v1/jobs"):
-            calls["jobs"].append(request.post_data_json)
+            job_payload = request.post_data_json
+            calls["jobs"].append(job_payload)
+            is_second_opinion = bool(job_payload.get("second_opinion_requested"))
+            selected_routing = (
+                second_opinion_routing
+                if is_second_opinion and second_opinion_routing is not None
+                else runtime_routing
+            )
+            if selected_routing is not None:
+                nested = second_opinion_nested if is_second_opinion else runtime_nested
+                body = {"ok": True}
+                if nested:
+                    body["result"] = {"routing_result": deepcopy(selected_routing)}
+                else:
+                    body["routing_result"] = deepcopy(selected_routing)
+                route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps(body),
+                )
+                return
             if failed:
                 body = {
                     "ok": True,
@@ -494,6 +687,80 @@ def _create_candidate(page) -> dict:
 def _run_qwen(page) -> None:
     page.click("#vision-qwen-run-btn")
     page.wait_for_selector("#qwen-review-session .qwen-review-card")
+
+
+def _run_runtime_reader(page) -> None:
+    page.click("#vision-run-btn")
+    page.wait_for_selector("#qwen-review-session .qwen-review-card")
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_runtime_router_top_level_and_legacy_nested_seed_sample008_review(
+    page, nested: bool
+) -> None:
+    calls = _mount(
+        page,
+        runtime_routing=_runtime_sample008_routing(),
+        runtime_nested=nested,
+    )
+    _run_runtime_reader(page)
+
+    session = page.evaluate("qwenGetReviewSession()")
+    assert len(session["structures"]) == 3
+    assert session["runtime_routing"]["selected_prefill_source"] == "gemma4-26b-shadow"
+    assert [card["staged_structure"]["number_groups"] for card in session["structures"]] == [
+        [["08"], ["01", "04"]],
+        [["08"], ["16", "26"]],
+        [["25"], ["26"], ["28"], ["07", "09"]],
+    ]
+    assert all(card["human_confirmed"] is False for card in session["structures"])
+    assert "Qwen 辨識失敗" not in page.text_content("#vision-results-body")
+    counters = session["runtime_routing"]["model_call_counters"]
+    assert counters["gemma_external_calls"] == 0
+    assert counters["gemma_cache_hits"] == 1
+    assert counters["qwen_external_calls"] == 0
+    assert counters["codex_vision_runtime_calls"] == 0
+    assert calls["jobs"][-1]["second_opinion_requested"] is False
+
+
+def test_runtime_manual_only_keeps_manual_review_available_and_unconfirmed(page) -> None:
+    _mount(page, runtime_routing=_runtime_manual_only_routing())
+    page.click("#vision-run-btn")
+    page.wait_for_selector("#qwen-add-manual-structure")
+
+    assert "AI建議不可用，仍可手動輸入。" in page.text_content("#vision-results-body")
+    assert "Qwen 辨識失敗" not in page.text_content("#vision-results-body")
+    assert page.evaluate("qwenGetReviewSession().structures.length") == 0
+    _wait_authority_ready(page)
+    page.click("#qwen-add-manual-structure")
+    page.wait_for_function("qwenGetReviewSession().structures.length === 1")
+    assert page.evaluate("qwenGetReviewSession().structures[0].human_confirmed") is False
+
+
+def test_explicit_qwen_second_opinion_uses_nested_helper_and_preserves_human_answer(
+    page,
+) -> None:
+    calls = _mount(
+        page,
+        runtime_routing=_runtime_sample008_routing(),
+        second_opinion_routing=_runtime_second_opinion_failure(),
+        second_opinion_nested=True,
+    )
+    _run_runtime_reader(page)
+    before = page.evaluate("qwenGetReviewSession().structures")
+
+    page.click("#vision-qwen-run-btn")
+    page.wait_for_selector("#runtime-second-opinion-status")
+
+    assert page.text_content("#runtime-second-opinion-status") == (
+        "Qwen 第二意見失敗；既有 Human Answer 未變更。"
+    )
+    assert "Qwen 辨識失敗" not in page.text_content("#vision-results-body")
+    assert page.evaluate("qwenGetReviewSession().structures") == before
+    assert calls["jobs"][-1]["second_opinion_requested"] is True
+    assert page.evaluate(
+        "qwenGetReviewSession().runtime_routing.model_call_counters.qwen_external_calls"
+    ) == 1
 
 
 def _sample011_s02_result() -> dict:
