@@ -839,6 +839,93 @@ def test_bet_level_seed_renders_only_promoted_drafts_and_keeps_fragments_advance
     assert page.evaluate("qwenGetReviewSession().structures[1].human_confirmed") is False
 
 
+def test_review_seed_v2_prefers_review_cards_and_labels_provisional_cards(page) -> None:
+    routing = _runtime_sample008_routing()
+    safe = deepcopy(routing["review_seed"]["draft_items"][0])
+    safe.update(draft_classification="SAFE_DRAFT", provisional=False)
+    provisional = deepcopy(routing["review_seed"]["draft_items"][1])
+    provisional.update(
+        draft_id="gemma-provisional-0002-01",
+        draft_classification="AI_UNCERTAIN",
+        provisional=True,
+        needs_review=True,
+        layout_suggestion="unclear",
+        number_groups_suggestion=[["06", "07", "08", "38"]],
+        human_confirmed=False,
+    )
+    routing["review_seed"].update(
+        schema_version="betguard.vision.human-review-seed.v2",
+        safe_bet_drafts=[safe],
+        provisional_bet_drafts=[provisional],
+        review_cards=[safe, provisional],
+        # A stale v1 alias must not suppress the provisional review card.
+        bet_drafts=[safe],
+        draft_items=[safe],
+        needs_review=True,
+        partial_machine_read=True,
+    )
+    _mount(page, runtime_routing=routing)
+    _run_runtime_reader(page)
+
+    session = page.evaluate("qwenGetReviewSession()")
+    assert len(session["structures"]) == 2
+    assert [card["draft_classification"] for card in session["structures"]] == [
+        "SAFE_DRAFT",
+        "AI_UNCERTAIN",
+    ]
+    assert all(card["human_confirmed"] is False for card in session["structures"])
+    assert session["structures"][1]["staged_structure"]["layout"] == "unknown"
+    assert session["structures"][1]["staged_structure"]["number_groups"] == [
+        ["06", "07", "08", "38"]
+    ]
+    assert page.locator(".runtime-draft-safe").count() == 1
+    page.evaluate("qwenReviewSelect(1)")
+    assert "AI 對這筆分組不確定，請檢查。" in page.text_content(
+        "#qwen-review-cards"
+    )
+    assert page.locator(".runtime-draft-provisional").count() == 1
+    _wait_authority_ready(page)
+    assert page.locator("#qwen-create-candidate").count() == 0
+
+
+def test_provisional_cancelled_card_does_not_break_server_review_creation(page) -> None:
+    routing = _runtime_sample008_routing()
+    active = deepcopy(routing["review_seed"]["draft_items"][0])
+    active.update(draft_classification="SAFE_DRAFT", provisional=False)
+    cancelled = deepcopy(routing["review_seed"]["draft_items"][1])
+    cancelled.update(
+        draft_id="gemma-provisional-cancelled-0002",
+        draft_classification="AI_UNCERTAIN",
+        provisional=True,
+        needs_review=True,
+        layout_suggestion="unclear",
+        number_groups_suggestion=[["11", "14"]],
+        multiplier_rules_suggestion=[],
+        cancelled_suggestion="yes",
+        human_confirmed=False,
+    )
+    routing["review_seed"].update(
+        schema_version="betguard.vision.human-review-seed.v2",
+        safe_bet_drafts=[active],
+        provisional_bet_drafts=[cancelled],
+        review_cards=[active, cancelled],
+        bet_drafts=[active, cancelled],
+        draft_items=[active, cancelled],
+        needs_review=True,
+        partial_machine_read=True,
+    )
+    _mount(page, runtime_routing=routing)
+    _run_runtime_reader(page)
+    _wait_authority_ready(page)
+
+    session = page.evaluate("qwenGetReviewSession()")
+    assert session["server_state"] == "ready"
+    assert len(session["structures"]) == 2
+    assert session["structures"][1]["staged_structure"]["cancelled"] is True
+    assert all(card["human_confirmed"] is False for card in session["structures"])
+    assert page.locator("#qwen-create-candidate").count() == 0
+
+
 def test_spacing_only_dense_numbers_do_not_invent_a_column_separator(page) -> None:
     routing = _runtime_sample008_routing()
     item = routing["gemma_evidence"]["items"][0]

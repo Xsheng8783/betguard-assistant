@@ -39,7 +39,7 @@ from betguard.vision.qwen_prompts import PROMPT, PROMPT_VERSION, prompt_sha256
 
 PROVIDER_ID = "runtime-reader-router"
 SCHEMA_VERSION = "betguard.vision.reader-routing-result.v1"
-REVIEW_SEED_SCHEMA_VERSION = "betguard.vision.human-review-seed.v1"
+REVIEW_SEED_SCHEMA_VERSION = "betguard.vision.human-review-seed.v2"
 QWEN_EVIDENCE_SCHEMA_VERSION = "betguard.vision.qwen-machine-evidence.v1"
 QWEN_RUNTIME_TIMEOUT_SECONDS = 60.0
 VALUE_AUTHORITY = "human_confirmed_answer"
@@ -94,6 +94,10 @@ _MULTIPLIER_RULE_RE = re.compile(
     r"\d+(?:\.\d+)?(?![\d.])"
 )
 _COLUMN_OPERATOR_RE = re.compile(r"[xX×]")
+_SPECIAL_PLAY_LITERAL_RE = re.compile(r"(?:半車|尾|車|各)")
+
+SAFE_DRAFT = "SAFE_DRAFT"
+AI_UNCERTAIN = "AI_UNCERTAIN"
 
 GemmaReader = Callable[[RecognitionRequest], dict[str, Any]]
 PPReader = Callable[[RecognitionRequest], dict[str, Any]]
@@ -620,7 +624,9 @@ def _review_seed(
     gemma_evidence: Mapping[str, Any],
     qwen_evidence: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
-    bet_drafts: list[dict[str, Any]] = []
+    safe_bet_drafts: list[dict[str, Any]] = []
+    provisional_bet_drafts: list[dict[str, Any]] = []
+    review_cards: list[dict[str, Any]] = []
     unresolved_machine_fragments: list[dict[str, Any]] = []
     machine_read_diagnostics = {
         "raw_item_count": 0,
@@ -646,28 +652,64 @@ def _review_seed(
                 continue
             promoted, reason = _promote_gemma_item(item, index)
             if promoted is not None:
-                bet_drafts.append(promoted)
+                safe = _safe_review_draft(promoted)
+                safe_bet_drafts.append(safe)
+                review_cards.append(safe)
             else:
-                line_drafts = _promote_gemma_line_candidates(item, index)
-                bet_drafts.extend(line_drafts)
-                fragment = _unresolved_gemma_fragment(item, index, reason)
-                if line_drafts:
-                    fragment.update(
-                        reason_code="PARTIAL_RECORD_GROUP_REQUIRES_REVIEW",
-                        source_reason_code=reason,
-                        promoted_draft_ids=[
-                            draft["draft_id"] for draft in line_drafts
-                        ],
+                line_drafts: list[dict[str, Any]] = []
+                provisional_line_drafts: list[dict[str, Any]] = []
+                for draft in _promote_gemma_line_candidates(item, index):
+                    if draft.get("layout_suggestion") == "column":
+                        provisional_line_drafts.append(
+                            _provisionalize_split_column_draft(draft)
+                        )
+                    else:
+                        line_drafts.append(_safe_review_draft(draft))
+                consumed_lines = {
+                    line_number
+                    for draft in [*line_drafts, *provisional_line_drafts]
+                    for line_number in range(
+                        int(draft.get("source_line_number") or 0),
+                        int(
+                            draft.get("source_line_end")
+                            or draft.get("source_line_number")
+                            or 0
+                        )
+                        + 1,
                     )
-                unresolved_machine_fragments.append(fragment)
+                    if line_number > 0
+                }
+                provisional_drafts, line_fragments = (
+                    _provisional_gemma_line_candidates(
+                        item,
+                        index,
+                        consumed_line_numbers=consumed_lines,
+                    )
+                )
+                provisional_drafts = [
+                    *provisional_line_drafts,
+                    *provisional_drafts,
+                ]
+                item_cards = sorted(
+                    [*line_drafts, *provisional_drafts],
+                    key=lambda draft: int(draft.get("source_line_number") or 0),
+                )
+                safe_bet_drafts.extend(line_drafts)
+                provisional_bet_drafts.extend(provisional_drafts)
+                review_cards.extend(item_cards)
+                if line_fragments:
+                    unresolved_machine_fragments.extend(line_fragments)
+                elif not item_cards:
+                    unresolved_machine_fragments.append(
+                        _unresolved_gemma_fragment(item, index, reason)
+                    )
     elif selected_source == QWEN_PROVIDER_ID and isinstance(qwen_evidence, Mapping):
         recognition = qwen_evidence.get("recognition_result")
         if isinstance(recognition, Mapping):
             for index, line in enumerate(recognition.get("lines") or [], 1):
                 if not isinstance(line, Mapping):
                     continue
-                bet_drafts.append(
-                    {
+                provisional = {
                         "draft_id": f"qwen-line-{index:04d}",
                         "source_evidence_id": line.get("line_id"),
                         "raw_text": str(line.get("text") or ""),
@@ -678,33 +720,45 @@ def _review_seed(
                         "special_play_raw": "none",
                         "cancelled_suggestion": "unclear",
                         "uncertain": True,
+                        "draft_classification": AI_UNCERTAIN,
+                        "provisional": True,
+                        "needs_review": True,
+                        "human_confirmed": False,
                     }
-                )
+                provisional_bet_drafts.append(provisional)
+                review_cards.append(provisional)
     machine_read_diagnostics.update(
-        bet_draft_count=len(bet_drafts),
+        safe_bet_draft_count=len(safe_bet_drafts),
+        provisional_bet_draft_count=len(provisional_bet_drafts),
+        review_card_count=len(review_cards),
+        bet_draft_count=len(review_cards),
         unresolved_fragment_count=len(unresolved_machine_fragments),
     )
     partial_machine_read = bool(
         selected_source == GEMMA_PROVIDER_ID
         and (
             machine_read_diagnostics["rejected_item_count"] > 0
+            or provisional_bet_drafts
             or unresolved_machine_fragments
         )
     )
     machine_read_diagnostics.update(
         partial_machine_read=partial_machine_read,
-        needs_review=bool(partial_machine_read or not bet_drafts),
+        needs_review=bool(partial_machine_read or provisional_bet_drafts or not review_cards),
     )
     return {
         "schema_version": REVIEW_SEED_SCHEMA_VERSION,
-        "status": "machine_prefill_available" if bet_drafts else "manual_entry_required",
+        "status": "machine_prefill_available" if review_cards else "manual_entry_required",
         "selected_machine_source": selected_source,
-        "bet_drafts": bet_drafts,
-        # Kept as a value-identical compatibility alias for older clients. New
-        # clients must render only bet_drafts and treat raw evidence separately.
-        "draft_items": copy.deepcopy(bet_drafts),
+        "safe_bet_drafts": safe_bet_drafts,
+        "provisional_bet_drafts": provisional_bet_drafts,
+        "review_cards": review_cards,
+        # Value-identical compatibility aliases for older clients. New clients
+        # render review_cards and keep unresolved evidence out of Human Answer.
+        "bet_drafts": copy.deepcopy(review_cards),
+        "draft_items": copy.deepcopy(review_cards),
         "unresolved_machine_fragments": unresolved_machine_fragments,
-        "needs_review": bool(partial_machine_read or not bet_drafts),
+        "needs_review": bool(partial_machine_read or provisional_bet_drafts or not review_cards),
         "partial_machine_read": partial_machine_read,
         "machine_read_diagnostics": machine_read_diagnostics,
         "structured_human_answer_required": True,
@@ -715,6 +769,41 @@ def _review_seed(
         "auto_confirm": False,
         "auto_submit": False,
     }
+
+
+def _safe_review_draft(draft: Mapping[str, Any]) -> dict[str, Any]:
+    value = copy.deepcopy(dict(draft))
+    value.update(
+        draft_classification=SAFE_DRAFT,
+        provisional=False,
+        needs_review=False,
+        human_confirmed=False,
+    )
+    return value
+
+
+def _provisionalize_split_column_draft(
+    draft: Mapping[str, Any],
+) -> dict[str, Any]:
+    value = copy.deepcopy(dict(draft))
+    groups = value.get("number_groups_suggestion")
+    flattened = [
+        number
+        for group in groups if isinstance(group, list)
+        for number in group if isinstance(number, str)
+    ] if isinstance(groups, list) else []
+    value.update(
+        number_groups_suggestion=[flattened] if flattened else [],
+        layout_suggestion="unclear",
+        uncertain=True,
+        draft_classification=AI_UNCERTAIN,
+        provisional=True,
+        needs_review=True,
+        human_confirmed=False,
+        operator_evidence_preserved_as_raw_only=True,
+        promotion_contract="betguard.gemma-provisional-review.v1",
+    )
+    return value
 
 
 def _promote_gemma_item(
@@ -751,6 +840,8 @@ def _promote_gemma_item(
         if multiplier_rules:
             return None, "MULTIPLIER_OR_CATEGORY_FRAGMENT_REQUIRES_REVIEW"
         return None, "NO_VALID_NUMBER_EVIDENCE"
+    if len(raw_numbers) != len(set(raw_numbers)):
+        return None, "NUMBER_LITERAL_DUPLICATE"
     number_order_matches = number_field_literals[: len(raw_numbers)] == raw_numbers
 
     has_column_operator = _COLUMN_OPERATOR_RE.search(body) is not None
@@ -772,7 +863,13 @@ def _promote_gemma_item(
         else:
             flattened = [number for group in number_groups for number in group]
             if number_field_literals[: len(flattened)] != flattened:
-                if (
+                if layout == "column" and number_order_matches:
+                    # Multi-row columns are read row-major in raw evidence but
+                    # stored column-major in nested number_groups.  Accept this
+                    # only when the model explicitly marked the record column
+                    # and both independent literal orders agree row-major.
+                    promoted_layout = "column"
+                elif (
                     layout == "normal"
                     and not number_order_matches
                     and len(number_field_literals) >= 3
@@ -908,6 +1005,175 @@ def _promote_gemma_line_candidates(
         drafts.append(promoted)
         offset += source_line_end - line_index + 1
     return drafts
+
+
+def _provisional_gemma_line_candidates(
+    item: Mapping[str, Any],
+    item_index: int,
+    *,
+    consumed_line_numbers: set[int],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Compile review-only cards from explicit model line boundaries.
+
+    This compiler is deliberately weaker than the safe structured compiler:
+    it preserves independent 01-39 literals for a human to edit, but never
+    promotes an uncertain multiplication mark into column structure.  It does
+    not use image geometry, annotations, sample identity, or cross-item order.
+    """
+
+    raw_text = str(item.get("raw_text") or "")
+    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+    continuation = str(item.get("continuation") or "unclear")
+    cancelled = str(item.get("cancelled") or "unclear")
+    if continuation != "no" or cancelled not in {"yes", "no"}:
+        return [], []
+
+    # A crossed-out source is one audit entity.  Never line-split it into
+    # multiple active-looking cards; retain one explicitly cancelled draft.
+    if cancelled == "yes":
+        whole = _provisional_gemma_candidate(
+            item,
+            item_index,
+            raw_text,
+            source_line_number=1,
+            source_line_end=max(1, len(lines)),
+            cancelled=cancelled,
+            whole_item=True,
+        )
+        return ([whole] if whole is not None else []), []
+
+    drafts: list[dict[str, Any]] = []
+    fragments: list[dict[str, Any]] = []
+    for line_number, line in enumerate(lines, 1):
+        if line_number in consumed_line_numbers:
+            continue
+        provisional = _provisional_gemma_candidate(
+            item,
+            item_index,
+            line,
+            source_line_number=line_number,
+            source_line_end=line_number,
+            cancelled=cancelled,
+            whole_item=False,
+        )
+        if provisional is not None:
+            drafts.append(provisional)
+        else:
+            fragments.append(
+                _unresolved_gemma_line_fragment(
+                    item,
+                    item_index,
+                    line_number,
+                    line,
+                    _provisional_rejection_reason(line),
+                )
+            )
+
+    # A multi-line model item can still be a single uncertain bet record when
+    # no explicit line is independently safe enough.  Preserve it as one flat,
+    # unknown-layout review card instead of merging lines into guessed columns.
+    if not drafts and not consumed_line_numbers and len(lines) > 1:
+        whole = _provisional_gemma_candidate(
+            item,
+            item_index,
+            raw_text,
+            source_line_number=1,
+            source_line_end=len(lines),
+            cancelled=cancelled,
+            whole_item=True,
+        )
+        if whole is not None:
+            return [whole], []
+    return drafts, fragments
+
+
+def _provisional_gemma_candidate(
+    item: Mapping[str, Any],
+    item_index: int,
+    raw_text: str,
+    *,
+    source_line_number: int,
+    source_line_end: int,
+    cancelled: str,
+    whole_item: bool,
+) -> dict[str, Any] | None:
+    multiplier_rules, body = _literal_multiplier_rules_and_body(raw_text)
+    if _INVALID_NUMBER_LITERAL_RE.search(body):
+        return None
+    numbers = _number_literals(body)
+    if len(numbers) != len(set(numbers)):
+        return None
+    operator_count = len(_COLUMN_OPERATOR_RE.findall(body))
+    has_special = _SPECIAL_PLAY_LITERAL_RE.search(raw_text) is not None
+    is_bet_like = len(numbers) >= 3 or (
+        len(numbers) == 2
+        and (operator_count == 0 or operator_count >= 2 or has_special)
+    )
+    if not is_bet_like:
+        return None
+
+    special_match = _SPECIAL_PLAY_LITERAL_RE.search(raw_text)
+    return {
+        "draft_id": (
+            f"gemma-provisional-{item_index:04d}-{source_line_number:02d}"
+        ),
+        "source_evidence_id": item.get("evidence_id"),
+        "raw_text": raw_text,
+        "number_groups_raw": raw_text,
+        # Flat literals are a provisional editing aid, not a geometry claim.
+        "number_groups_suggestion": [numbers],
+        "multiplier_raw": str(item.get("multiplier_text") or ""),
+        "multiplier_rules_suggestion": multiplier_rules,
+        "layout_suggestion": "unclear" if operator_count else "normal",
+        "continuation_suggestion": "no",
+        "special_play_raw": special_match.group(0) if special_match else "none",
+        "cancelled_suggestion": cancelled,
+        "uncertain": True,
+        "draft_classification": AI_UNCERTAIN,
+        "provisional": True,
+        "needs_review": True,
+        "human_confirmed": False,
+        "source_line_number": source_line_number,
+        "source_line_end": source_line_end,
+        "source_item_split": not whole_item,
+        "operator_evidence_preserved_as_raw_only": bool(operator_count),
+        "promotion_contract": "betguard.gemma-provisional-review.v1",
+    }
+
+
+def _provisional_rejection_reason(raw_text: str) -> str:
+    multiplier_rules, body = _literal_multiplier_rules_and_body(raw_text)
+    if _INVALID_NUMBER_LITERAL_RE.search(body):
+        return "NUMBER_LITERAL_OUT_OF_RANGE"
+    numbers = _number_literals(body)
+    if len(numbers) != len(set(numbers)):
+        return "NUMBER_LITERAL_DUPLICATE"
+    if not numbers:
+        return (
+            "MULTIPLIER_OR_CATEGORY_FRAGMENT_REQUIRES_REVIEW"
+            if multiplier_rules or _COLUMN_OPERATOR_RE.search(body)
+            else "NO_VALID_NUMBER_EVIDENCE"
+        )
+    if len(numbers) == 1:
+        return "INSUFFICIENT_BET_NUMBER_EVIDENCE"
+    return "MULTIPLIER_OR_COLUMN_SCOPE_AMBIGUOUS"
+
+
+def _unresolved_gemma_line_fragment(
+    item: Mapping[str, Any],
+    item_index: int,
+    line_number: int,
+    raw_text: str,
+    reason: str,
+) -> dict[str, Any]:
+    fragment = _unresolved_gemma_fragment(item, item_index, reason)
+    fragment.update(
+        fragment_id=f"gemma-fragment-{item_index:04d}-{line_number:02d}",
+        raw_text=raw_text,
+        source_line_number=line_number,
+        source_line_end=line_number,
+    )
+    return fragment
 
 
 def _unresolved_gemma_fragment(

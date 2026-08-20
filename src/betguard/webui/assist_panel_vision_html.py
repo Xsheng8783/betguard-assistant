@@ -518,6 +518,9 @@ def render_vision_ui_section() -> str:
   }
 
   function _runtimeCard(draft, item, index, source, qwenEvidence) {
+    var draftClassification = String(draft.draft_classification ||
+      (draft.provisional ? "AI_UNCERTAIN" : "SAFE_DRAFT"));
+    var provisional = draftClassification === "AI_UNCERTAIN";
     var layout = String(draft.layout_suggestion || (item && item.layout_guess) || "unclear");
     var suggestedGroups = Array.isArray(draft.number_groups_suggestion)
       ? _cloneJson(draft.number_groups_suggestion) : null;
@@ -531,13 +534,17 @@ def render_vision_ui_section() -> str:
       special_text: draft.special_play_raw === "none" ? "" : String(draft.special_play_raw || ""),
       cancelled: String(draft.cancelled_suggestion || "").toLowerCase() === "yes"
     };
-    var sourceStatus = staged.number_groups.length && staged.multiplier_rules.length && !draft.uncertain ? "consistent" : "incomplete";
+    var sourceStatus = provisional ? "incomplete" :
+      (staged.number_groups.length && staged.multiplier_rules.length && !draft.uncertain ? "consistent" : "incomplete");
     return {
       human_bet_id: _qwenHumanBetId(index),
       structure_id: "RUNTIME-" + String(index + 1).padStart(3, "0"),
       primary_line_id: "", source_line_ids: [], source_status: sourceStatus,
       review_state: "pending", model_candidate: {}, original_structure: _cloneJson(staged),
-      staged_structure: _cloneJson(staged), warnings: draft.uncertain ? ["machine_suggestion_uncertain"] : [],
+      staged_structure: _cloneJson(staged),
+      draft_classification: draftClassification, provisional_review: provisional,
+      needs_review: provisional || draft.needs_review === true,
+      warnings: (draft.uncertain || provisional) ? ["machine_suggestion_uncertain"] : [],
       evidence: {raw_text: draft.raw_text || ""}, edit_text: draft.raw_text || "", reparse_preview: null,
       preview_error: "", manual_edits: [], field_corrections: [],
       evidence_sources: {
@@ -562,8 +569,9 @@ def render_vision_ui_section() -> str:
     ppocrShadowEvidence = routing.pp_evidence || null;
     qwenEvidenceResult = routing.qwen_evidence && routing.qwen_evidence.recognition_result || null;
     var seed = routing.review_seed || {};
-    var drafts = Array.isArray(seed.bet_drafts) ? seed.bet_drafts :
-      (Array.isArray(seed.draft_items) ? seed.draft_items : []);
+    var drafts = Array.isArray(seed.review_cards) ? seed.review_cards :
+      (Array.isArray(seed.bet_drafts) ? seed.bet_drafts :
+      (Array.isArray(seed.draft_items) ? seed.draft_items : []));
     var gemmaItems = gemmaShadowEvidence && Array.isArray(gemmaShadowEvidence.items) ? gemmaShadowEvidence.items : [];
     var gemmaByEvidenceId = Object.create(null);
     gemmaItems.forEach(function(item) {
@@ -950,7 +958,10 @@ def render_vision_ui_section() -> str:
       if ((bet.multiplier || {}).scope != null || Object.prototype.hasOwnProperty.call(structure, "multiplier_scope")) {
         structure.multiplier_scope = (bet.multiplier || {}).scope == null ? null : (bet.multiplier || {}).scope;
       }
-      structure.layout = bet.bet_type === "column" ? "column_bet" : "normal_row";
+      var preserveProvisionalUnknown = card.provisional_review === true &&
+        bet.human_confirmed !== true && _qwenCanonicalLayout(structure.layout) === "unknown";
+      structure.layout = preserveProvisionalUnknown ? "unknown" :
+        (bet.bet_type === "column" ? "column_bet" : "normal_row");
       if ((bet.continuation || {}).present) {
         if (!structure.continuation) structure.continuation = true;
       } else if (Object.prototype.hasOwnProperty.call(structure, "continuation")) {
@@ -1704,6 +1715,12 @@ def render_vision_ui_section() -> str:
     html += '<div style="display:flex;justify-content:space-between;gap:8px;align-items:start">' +
       '<strong>投注 ' + (index + 1) + '</strong>' +
       '<span class="qwen-review-state" style="font-size:12px;color:' + stateColor + ';font-weight:700">' + esc(stateLabel) + '</span></div>';
+    if (card.draft_classification === "AI_UNCERTAIN") {
+      html += '<div class="runtime-draft-classification runtime-draft-provisional" style="margin-top:6px;padding:6px;background:#fff7ed;color:#9a3412;font-weight:700">' +
+        'AI_UNCERTAIN｜AI 對這筆分組不確定，請檢查。</div>';
+    } else if (card.draft_classification === "SAFE_DRAFT") {
+      html += '<div class="runtime-draft-classification runtime-draft-safe" style="margin-top:6px;color:#166534;font-size:12px;font-weight:700">SAFE_DRAFT</div>';
+    }
     html += '<div class="review-image-context" style="font-size:11px;color:#64748b;margin-top:4px">原圖位置：選取本卡時顯示可靠的行／token 範圍；無可靠 bbox 時不猜位置。</div>';
     html += '<div class="qwen-review-human-status" style="margin:6px 0;color:#9a3412;font-weight:700">' +
       esc(_qwenHumanStatus(card.source_status)) + '</div>';
@@ -1733,6 +1750,7 @@ def render_vision_ui_section() -> str:
       '<div>structure_id=' + esc(card.structure_id) + '｜primary_line_id=' + esc(card.primary_line_id) + '</div>' +
       '<div>source_line_ids=' + esc(JSON.stringify(card.source_line_ids)) + '</div>' +
       '<div>technical_status=' + esc(card.source_status) + '</div>' +
+      '<div>draft_classification=' + esc(card.draft_classification || "") + '</div>' +
       '<div>model_candidate=' + esc(JSON.stringify(card.model_candidate || {})) + '</div>' +
       '<div>reconstructed_candidate=' + esc(JSON.stringify(card.original_structure || {})) + '</div>' +
       '<div>staged_structure=' + esc(JSON.stringify(card.staged_structure || {})) + '</div>' +
@@ -1757,7 +1775,7 @@ def render_vision_ui_section() -> str:
     var cancelled = cards.filter(function(card) { return !_qwenReviewIsActive(card); });
     var activeConfirmed = active.filter(function(card) { return card.review_state === "confirmed" && card.human_confirmed === true; }).length;
     var cancelledHandled = cancelled.filter(function(card) { return card.review_state === "confirmed" && card.human_confirmed === true; }).length;
-    var blocking = cards.filter(function(card) {
+    var blocking = active.filter(function(card) {
       return card.source_status !== "consistent" && card.blocking_resolved_by_human !== true;
     }).length;
     return {
