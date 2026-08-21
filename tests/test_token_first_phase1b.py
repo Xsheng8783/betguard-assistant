@@ -20,7 +20,10 @@ from betguard.vision.cell_first import (  # noqa: E402
     SPECIAL_LITERAL,
 )
 from betguard.vision.token_first import (  # noqa: E402
+    COMPONENT_UNION_BLOCKED_BY_SEPARATOR,
     TOKEN_GROUP_CONFLICT,
+    _split_separator_violating_component,
+    _validated_region,
     group_regions_with_separators,
     literal_tokens_from_regions,
 )
@@ -112,6 +115,67 @@ def test_ambiguous_adjacency_records_conflict_without_duplication() -> None:
     assert result["token_group_conflicts"][0]["code"] == TOKEN_GROUP_CONFLICT
     assert result["retention_rate"] == 1.0
     assert len(result["retained_token_ids"]) == len(set(result["retained_token_ids"]))
+
+
+def test_component_union_blocks_transitive_separator_bypass() -> None:
+    regions = [
+        _region("A", "01", [70, 75, 130, 105]),
+        _region("B", "02", [120, 20, 180, 50]),
+        _region("C", "03", [170, 75, 230, 105]),
+    ]
+    tokens = literal_tokens_from_regions(regions)
+    separator = {
+        "separator_id": "SEP-TRANSITIVE",
+        "orientation": "vertical",
+        "start": [150, 60],
+        "end": [150, 140],
+        "confidence": 0.99,
+    }
+
+    result = group_regions_with_separators(
+        regions, tokens, [separator], image_size=(300, 300)
+    )
+
+    assert result["union_attempt_count"] == 2
+    assert result["successful_union_count"] == 1
+    assert result["component_union_blocked_by_separator_count"] == 1
+    assert result["component_union_blocks"][0]["code"] == COMPONENT_UNION_BLOCKED_BY_SEPARATOR
+    assert result["component_union_blocks"][0]["separator_ids"] == ["SEP-TRANSITIVE"]
+    assert [group["source_region_ids"] for group in result["groups"]] == [["A", "B"], ["C"]]
+    assert result["cross_separator_merge_count"] == 0
+    assert result["retention_rate"] == 1.0
+
+
+def test_deterministic_split_repairs_preexisting_separator_violation() -> None:
+    raw_regions = [
+        _region("A", "01", [70, 75, 130, 105]),
+        _region("B", "02", [120, 20, 180, 50]),
+        _region("C", "03", [170, 75, 230, 105]),
+    ]
+    region_by_id = {
+        str(region["region_id"]): _validated_region(region, index)
+        for index, region in enumerate(raw_regions, 1)
+    }
+    separator = {
+        "separator_id": "SEP-TRANSITIVE",
+        "orientation": "vertical",
+        "start": [150, 60],
+        "end": [150, 140],
+        "confidence": 0.99,
+    }
+    strong_edges = [
+        {"left_region_id": "A", "right_region_id": "B", "score": 0.70},
+        {"left_region_id": "B", "right_region_id": "C", "score": 0.70},
+    ]
+
+    first = _split_separator_violating_component(
+        ["C", "A", "B"], region_by_id, strong_edges, [separator]
+    )
+    second = _split_separator_violating_component(
+        ["B", "C", "A"], region_by_id, strong_edges, [separator]
+    )
+
+    assert first == second == [["A", "B"], ["C"]]
 
 
 def _ocr_python() -> Path:

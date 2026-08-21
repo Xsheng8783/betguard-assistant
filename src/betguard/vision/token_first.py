@@ -22,6 +22,8 @@ from betguard.vision.cell_first import (
 
 TOKEN_FIRST_SCHEMA_VERSION = SCHEMA_VERSION.replace("cell-first", "token-first")
 TOKEN_GROUP_CONFLICT = "TOKEN_GROUP_CONFLICT"
+COMPONENT_UNION_BLOCKED_BY_SEPARATOR = "COMPONENT_UNION_BLOCKED_BY_SEPARATOR"
+COMPONENT_SPLIT_BY_SEPARATOR = "COMPONENT_SPLIT_BY_SEPARATOR"
 AI_UNCERTAIN = "AI_UNCERTAIN"
 
 _LITERAL_RE = re.compile(r"半車|尾|車|各|[0-9]+[.．][0-9]+|[xX×]|[0-9]+|[^\s]")
@@ -93,6 +95,19 @@ def group_regions_with_separators(
             "retained_token_ids": [token["token_id"] for token in normalized_tokens],
             "retention_rate": 1.0 if normalized_tokens else 1.0,
             "cross_separator_merge_count": 0,
+            "union_attempt_count": 0,
+            "successful_union_count": 0,
+            "union_noop_same_component_count": 0,
+            "component_union_blocked_by_separator_count": 0,
+            "component_union_blocks": [],
+            "component_split_count": 0,
+            "component_split_created_count": 0,
+            "component_split_events": [],
+            "adjacency": {
+                "strong_edges": [],
+                "ambiguous_edges": [],
+                "blocked_edges": [],
+            },
             **evidence_authority(),
         }
 
@@ -129,14 +144,79 @@ def group_regions_with_separators(
                 ambiguous_edges.append(edge)
 
     disjoint = _DisjointSet(region_by_id)
-    for edge in strong_edges:
+    union_attempt_count = 0
+    successful_union_count = 0
+    union_noop_same_component_count = 0
+    component_union_blocks: list[dict[str, Any]] = []
+    for edge in sorted(
+        strong_edges,
+        key=lambda item: (
+            -float(item["score"]),
+            str(item["left_region_id"]),
+            str(item["right_region_id"]),
+        ),
+    ):
+        union_attempt_count += 1
+        left_root = disjoint.find(edge["left_region_id"])
+        right_root = disjoint.find(edge["right_region_id"])
+        if left_root == right_root:
+            union_noop_same_component_count += 1
+            continue
+        left_members = _component_members(disjoint, region_by_id, left_root)
+        right_members = _component_members(disjoint, region_by_id, right_root)
+        crossing_ids = _component_crossing_separator_ids(
+            left_members,
+            right_members,
+            region_by_id,
+            normalized_separators,
+        )
+        if crossing_ids:
+            component_union_blocks.append({
+                "code": COMPONENT_UNION_BLOCKED_BY_SEPARATOR,
+                "left_component_region_ids": left_members,
+                "right_component_region_ids": right_members,
+                "trigger_edge": deepcopy(edge),
+                "separator_ids": crossing_ids,
+            })
+            continue
         disjoint.union(edge["left_region_id"], edge["right_region_id"])
+        successful_union_count += 1
 
     component_regions: dict[str, list[str]] = {}
     for region_id in region_by_id:
         component_regions.setdefault(disjoint.find(region_id), []).append(region_id)
+    component_split_events: list[dict[str, Any]] = []
+    separator_safe_components: list[list[str]] = []
+    for members in component_regions.values():
+        violations = _internal_crossing_separator_ids(
+            members, region_by_id, normalized_separators
+        )
+        if not violations:
+            separator_safe_components.append(sorted(members))
+            continue
+        split_components = _split_separator_violating_component(
+            members,
+            region_by_id,
+            strong_edges,
+            normalized_separators,
+        )
+        component_split_events.append({
+            "code": COMPONENT_SPLIT_BY_SEPARATOR,
+            "source_region_ids": sorted(members),
+            "separator_ids": violations,
+            "result_components": split_components,
+        })
+        separator_safe_components.extend(split_components)
+
+    for members in separator_safe_components:
+        remaining = _internal_crossing_separator_ids(
+            members, region_by_id, normalized_separators
+        )
+        if remaining:
+            raise RuntimeError("SEPARATOR_SAFE_COMPONENT_INVARIANT_BROKEN")
+
     ordered_components = sorted(
-        component_regions.values(),
+        separator_safe_components,
         key=lambda members: _union_bbox(region_by_id[item]["bbox"] for item in members)[1::-1],
     )
     group_id_by_region: dict[str, str] = {}
@@ -246,6 +326,17 @@ def group_regions_with_separators(
         "retained_token_ids": retained_ids,
         "retention_rate": len(retained_ids) / len(normalized_tokens) if normalized_tokens else 1.0,
         "cross_separator_merge_count": cross_separator_merge_count,
+        "union_attempt_count": union_attempt_count,
+        "successful_union_count": successful_union_count,
+        "union_noop_same_component_count": union_noop_same_component_count,
+        "component_union_blocked_by_separator_count": len(component_union_blocks),
+        "component_union_blocks": component_union_blocks,
+        "component_split_count": len(component_split_events),
+        "component_split_created_count": sum(
+            max(0, len(event["result_components"]) - 1)
+            for event in component_split_events
+        ),
+        "component_split_events": component_split_events,
         "adjacency": {
             "strong_edges": strong_edges,
             "ambiguous_edges": ambiguous_edges,
@@ -274,6 +365,96 @@ def separator_crossings(
         if _segments_intersect_or_close(first, second, start, end, tolerance):
             result.append(separator)
     return result
+
+
+def _component_members(
+    disjoint: "_DisjointSet",
+    region_by_id: dict[str, dict[str, Any]],
+    root: str,
+) -> list[str]:
+    return sorted(
+        region_id
+        for region_id in region_by_id
+        if disjoint.find(region_id) == root
+    )
+
+
+def _component_crossing_separator_ids(
+    left_members: Iterable[str],
+    right_members: Iterable[str],
+    region_by_id: dict[str, dict[str, Any]],
+    separators: Iterable[dict[str, Any]],
+) -> list[str]:
+    crossing_ids = {
+        separator["separator_id"]
+        for left_id in left_members
+        for right_id in right_members
+        for separator in separator_crossings(
+            region_by_id[left_id], region_by_id[right_id], separators
+        )
+    }
+    return sorted(crossing_ids)
+
+
+def _internal_crossing_separator_ids(
+    members: Iterable[str],
+    region_by_id: dict[str, dict[str, Any]],
+    separators: Iterable[dict[str, Any]],
+) -> list[str]:
+    ordered = sorted(members)
+    crossing_ids = {
+        separator["separator_id"]
+        for left_index, left_id in enumerate(ordered)
+        for right_id in ordered[left_index + 1:]
+        for separator in separator_crossings(
+            region_by_id[left_id], region_by_id[right_id], separators
+        )
+    }
+    return sorted(crossing_ids)
+
+
+def _split_separator_violating_component(
+    members: Iterable[str],
+    region_by_id: dict[str, dict[str, Any]],
+    strong_edges: Iterable[dict[str, Any]],
+    separators: Iterable[dict[str, Any]],
+) -> list[list[str]]:
+    """Greedily create all-pairs separator-safe connected subcomponents."""
+    edge_scores: dict[frozenset[str], float] = {
+        frozenset((edge["left_region_id"], edge["right_region_id"])): float(edge["score"])
+        for edge in strong_edges
+    }
+    ordered = sorted(
+        members,
+        key=lambda region_id: (
+            float(region_by_id[region_id]["center_y"]),
+            float(region_by_id[region_id]["center_x"]),
+            region_id,
+        ),
+    )
+    components: list[list[str]] = []
+    for region_id in ordered:
+        candidates: list[tuple[float, int]] = []
+        for component_index, component in enumerate(components):
+            if _component_crossing_separator_ids(
+                [region_id], component, region_by_id, separators
+            ):
+                continue
+            connecting_scores = [
+                edge_scores.get(frozenset((region_id, member)), 0.0)
+                for member in component
+            ]
+            best_score = max(connecting_scores, default=0.0)
+            if best_score > 0.0:
+                candidates.append((best_score, component_index))
+        if candidates:
+            _score, component_index = max(
+                candidates, key=lambda item: (item[0], -item[1])
+            )
+            components[component_index].append(region_id)
+        else:
+            components.append([region_id])
+    return [sorted(component) for component in components]
 
 
 def _validated_region(source: dict[str, Any], index: int) -> dict[str, Any]:

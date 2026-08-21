@@ -286,7 +286,7 @@ def main() -> int:
         evaluations.append(base)
 
     report = {
-        "phase": "TOKEN_FIRST_RED_SEPARATOR_GROUPING_PHASE_1B",
+        "phase": str(seal.get("phase") or "TOKEN_FIRST_GROUPING_UNSPECIFIED_PHASE"),
         "prediction_seal_sha256": _sha256(seal_path),
         "truth_loaded_only_after_prediction_seal": True,
         "samples": evaluations,

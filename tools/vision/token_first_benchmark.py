@@ -25,6 +25,7 @@ IMPLEMENTATION_PATHS = (
     REPO_ROOT / "src" / "betguard" / "vision" / "token_first.py",
     REPO_ROOT / "tools" / "vision" / "token_first_pipeline.py",
 )
+PHASE = "TOKEN_FIRST_CONSTRAINED_SEPARATOR_GROUPING_PHASE_1C"
 
 
 def _parse_image(value: str) -> tuple[str, Path]:
@@ -97,13 +98,13 @@ def main() -> int:
 
     predictions_path = output_dir / "predictions.json"
     _write_json(predictions_path, {
-        "phase": "TOKEN_FIRST_RED_SEPARATOR_GROUPING_PHASE_1B",
+        "phase": PHASE,
         "truth_loaded": False,
         "samples": predictions,
     })
     artifacts.append(predictions_path)
     seal = {
-        "phase": "TOKEN_FIRST_RED_SEPARATOR_GROUPING_PHASE_1B",
+        "phase": PHASE,
         "sealed_at_utc": datetime.now(timezone.utc).isoformat(),
         "truth_loaded_before_seal": False,
         "sample_count": len(predictions),
