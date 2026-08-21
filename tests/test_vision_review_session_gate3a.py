@@ -1349,7 +1349,8 @@ def test_all_confirmed_cards_create_candidate_preview(page) -> None:
         "expected_human_answer_hash",
         "idempotency_key",
     }
-    assert "Candidate" in page.text_content("#qwen-review-complete-status")
+    assert "安全快照" in page.text_content("#qwen-review-complete-status")
+    assert page.locator("#qwen-created-candidate-metadata").get_attribute("open") is None
     assert "vc-" + "1" * 32 in page.text_content("#qwen-created-candidate-metadata")
 
 

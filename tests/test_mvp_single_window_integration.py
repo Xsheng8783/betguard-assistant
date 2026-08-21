@@ -216,6 +216,10 @@ def test_required_sample_vertical_slice_preserves_values(tmp_path, sample):
         "idempotency_key": action["idempotency_key"],
     })
     assert result["status"] == "FILLED_VERIFIED"
+    if sample == "sample-007":
+        assert len(operations) == 24
+        assert len(cancelled) == 1
+        assert len(browser.rows) == 24
     assert [row["number_groups"] for row in browser.rows] == [
         operation["number_groups"] for operation in operations
     ]

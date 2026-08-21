@@ -1437,6 +1437,231 @@ def render_vision_ui_section() -> str:
     return [numberText, rules.map(_qwenRuleToParserText).join(" ")].filter(function(part) { return !!part; }).join(" ");
   }
 
+  function _qwenValidHumanNumber(value) {
+    return /^(0[1-9]|[12]\\d|3[0-9])$/.test(String(value == null ? "" : value).trim());
+  }
+
+  function _qwenFlattenGroups(groups) {
+    return _qwenNormalizeGroups(groups || []).reduce(function(all, group) {
+      return all.concat(group);
+    }, []);
+  }
+
+  function _qwenTransposeRows(rows) {
+    if (!Array.isArray(rows) || rows.length !== 2) return [];
+    var first = (rows[0] || []).map(_qwenNumber);
+    var second = (rows[1] || []).map(_qwenNumber);
+    if (!first.length || first.length !== second.length) return [];
+    if (first.concat(second).some(function(value) { return !_qwenValidHumanNumber(value); })) return [];
+    return first.map(function(value, index) { return [value, second[index]]; });
+  }
+
+  function _qwenLiteralRows(text) {
+    var rows = [];
+    String(text || "").split(/\\r?\\n/).forEach(function(line) {
+      // Decimal multiplier literals such as 0.5 are deliberately excluded.
+      var values = [];
+      var expression = /(^|[^\\d.])(0[1-9]|[12]\\d|3[0-9])(?=$|[^\\d.])/g;
+      var match;
+      while ((match = expression.exec(line)) !== null) values.push(match[2]);
+      if (values.length) rows.push(values);
+    });
+    return rows;
+  }
+
+  function _qwenVisibleRows(card) {
+    card = card || {};
+    var candidates = [
+      card.ai_visible_rows,
+      card.evidence && card.evidence.visible_rows,
+      card.evidence_sources && card.evidence_sources.gemma && card.evidence_sources.gemma.visible_rows,
+      card.crop_reread_suggestion && card.crop_reread_suggestion.visible_rows,
+      card.evidence_sources && card.evidence_sources.crop_reread &&
+        card.evidence_sources.crop_reread.suggestion &&
+        card.evidence_sources.crop_reread.suggestion.visible_rows
+    ];
+    for (var i = 0; i < candidates.length; i++) {
+      if (!Array.isArray(candidates[i])) continue;
+      var normalized = candidates[i].map(function(row) {
+        return (Array.isArray(row) ? row : []).map(_qwenNumber).filter(_qwenValidHumanNumber);
+      }).filter(function(row) { return row.length; });
+      if (normalized.length) return normalized;
+    }
+    var literal = _qwenLiteralRows(card.evidence && card.evidence.raw_text);
+    if (literal.length) return literal;
+    var structure = card.staged_structure || {};
+    var groups = _qwenNormalizeGroups(structure.number_groups || []);
+    if (_qwenCanonicalLayout(structure.layout) === "column_bet" && groups.length > 1) {
+      var rowCount = groups[0].length;
+      if (rowCount > 0 && groups.every(function(group) { return group.length === rowCount; })) {
+        var rows = [];
+        for (var rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+          rows.push(groups.map(function(group) { return group[rowIndex]; }));
+        }
+        return rows;
+      }
+    }
+    return groups.length ? [_qwenFlattenGroups(groups)] : [];
+  }
+
+  function _qwenNextHumanBetId() {
+    var used = Object.create(null);
+    (qwenReviewSession && qwenReviewSession.structures || []).forEach(function(card) {
+      used[String(card.human_bet_id || "")] = true;
+    });
+    for (var i = 1; i < 1000; i++) {
+      var value = _qwenHumanBetId(i - 1);
+      if (!used[value]) return value;
+    }
+    return "H-999";
+  }
+
+  function _qwenQuickCommit(index, component, updated, fields, note) {
+    if (!qwenReviewSession || !qwenReviewSession.structures[index]) return Promise.resolve(null);
+    var card = qwenReviewSession.structures[index];
+    var previous = _cloneJson(card.staged_structure || {});
+    card.staged_structure = _cloneJson(updated || {});
+    (fields || []).forEach(function(field) {
+      card.field_sources[field] = {source: "Human Answer", human_confirmed: false};
+      _recordReviewFieldCorrection(card, field, "Human Answer", previous[field], card.staged_structure[field]);
+    });
+    card.manual_edits.push({
+      component: component,
+      note: note || null,
+      adopted_at: new Date().toISOString(),
+      human_confirmed: false
+    });
+    delete card.quick_preview;
+    delete card.quick_group_draft;
+    delete card.quick_multiplier_draft;
+    delete card.quick_special_draft;
+    _invalidateReviewConfirmation(card);
+    card.blocking_resolved_by_human = false;
+    _renderQwenReviewSession();
+    return _qwenQueueAuthorityMutation();
+  }
+
+  function _qwenAiLiteralHtml(card) {
+    var raw = String(card && card.evidence && card.evidence.raw_text || "").trim();
+    var rows = _qwenVisibleRows(card);
+    return '<section class="qwen-ai-literal" style="margin-top:7px;padding:7px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:5px">' +
+      '<strong>AI 原始讀取</strong>' +
+      '<div class="qwen-ai-raw-text" style="white-space:pre-wrap;font-family:monospace">' + esc(raw || "未提供") + '</div>' +
+      '<div class="qwen-ai-visible-rows" style="font-size:12px;color:#475569">可見兩排／行：' + esc(JSON.stringify(rows)) + '</div></section>';
+  }
+
+  function _qwenQuickPreviewHtml(card, index) {
+    var preview = card.quick_preview;
+    if (!preview) return '';
+    var apply = '';
+    if (preview.kind === "normal") {
+      apply = '<button type="button" class="qwen-apply-normal-preview" onclick="qwenQuickApplyNormal(' + index + ')">套用一般投注</button>';
+    } else if (preview.kind === "two_row_column") {
+      apply = '<button type="button" class="qwen-apply-column-preview" ' + (preview.valid ? '' : 'disabled ') +
+        'onclick="qwenQuickApplyColumn(' + index + ')">套用柱碰分組</button>';
+    } else if (preview.kind === "merge_next") {
+      apply = '<button type="button" class="qwen-apply-merge-preview" ' + (preview.valid ? '' : 'disabled ') +
+        'onclick="qwenQuickApplyMerge(' + index + ')">確認合併並套用</button>';
+    }
+    return '<div class="qwen-quick-preview" data-preview-kind="' + esc(preview.kind || '') + '" style="margin-top:7px;padding:8px;background:#fff7ed;border:1px solid #fdba74;border-radius:5px">' +
+      '<strong>人工操作預覽（尚未套用）</strong>' +
+      '<div class="qwen-preview-rows">兩排：' + esc(JSON.stringify(preview.rows || [])) + '</div>' +
+      '<div class="qwen-preview-groups">柱群：' + esc(JSON.stringify(preview.groups || [])) + '</div>' +
+      (preview.warning ? '<div class="qwen-preview-warning" style="color:#b91c1c;font-weight:700">' + esc(preview.warning) + '</div>' : '') +
+      apply + ' <button type="button" class="qwen-cancel-quick-preview" onclick="qwenQuickCancelPreview(' + index + ')">取消預覽</button></div>';
+  }
+
+  function _qwenGroupEditorHtml(card, index) {
+    var groups = card.quick_group_draft;
+    if (!Array.isArray(groups)) return '';
+    var html = '<div class="qwen-group-editor" style="margin-top:7px;padding:8px;border:1px solid #93c5fd;border-radius:5px">' +
+      '<strong>柱群編輯器（套用前不會修改 Human Answer）</strong>';
+    for (var g = 0; g < groups.length; g++) {
+      html += '<div class="qwen-group-row" data-group-index="' + g + '" style="display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-top:6px">' +
+        '<strong>第' + (g + 1) + '柱：</strong>';
+      for (var n = 0; n < groups[g].length; n++) {
+        html += '<span class="qwen-group-number" data-number-index="' + n + '" style="display:inline-flex;gap:2px;align-items:center">' +
+          '<input value="' + esc(groups[g][n]) + '" maxlength="2" size="2" onchange="qwenGroupSetNumber(' + index + ',' + g + ',' + n + ',this.value)">' +
+          '<button type="button" title="移到上一柱" onclick="qwenGroupMoveNumber(' + index + ',' + g + ',' + n + ',-1)">←</button>' +
+          '<button type="button" title="移到下一柱" onclick="qwenGroupMoveNumber(' + index + ',' + g + ',' + n + ',1)">→</button>' +
+          '<button type="button" title="刪除號碼" onclick="qwenGroupDeleteNumber(' + index + ',' + g + ',' + n + ')">×</button></span>';
+      }
+      html += '<button type="button" onclick="qwenGroupAddNumber(' + index + ',' + g + ')">＋號碼</button>' +
+        '<button type="button" title="上移柱" onclick="qwenGroupMoveColumn(' + index + ',' + g + ',-1)">↑柱</button>' +
+        '<button type="button" title="下移柱" onclick="qwenGroupMoveColumn(' + index + ',' + g + ',1)">↓柱</button>' +
+        '<button type="button" onclick="qwenGroupDeleteColumn(' + index + ',' + g + ')">刪除柱</button></div>';
+    }
+    return html + '<div class="qwen-group-editor-error" style="color:#b91c1c">' + esc(card.quick_group_error || '') + '</div>' +
+      '<button type="button" onclick="qwenGroupAddColumn(' + index + ')">＋新增柱</button> ' +
+      '<button type="button" class="qwen-apply-group-editor" onclick="qwenGroupApply(' + index + ')">套用柱群</button> ' +
+      '<button type="button" onclick="qwenGroupCancel(' + index + ')">取消</button></div>';
+  }
+
+  function _qwenMultiplierEditorHtml(card, index) {
+    var draft = card.quick_multiplier_draft;
+    if (!Array.isArray(draft)) return '';
+    var html = '<div class="qwen-multiplier-editor" style="margin-top:7px;padding:8px;border:1px solid #a7f3d0;border-radius:5px">' +
+      '<strong>Ordered multiplier rules</strong>';
+    for (var i = 0; i < draft.length; i++) {
+      var rule = draft[i] || {};
+      html += '<div class="qwen-multiplier-rule" data-rule-index="' + i + '" style="display:flex;flex-wrap:wrap;gap:4px;margin-top:5px">' +
+        '<label>類別 <input class="qwen-multiplier-category" value="' + esc(rule.category || '') + '" size="7" onchange="qwenMultiplierSet(' + index + ',' + i + ',\\'category\\',this.value)"></label>' +
+        '<label>倍率 <input class="qwen-multiplier-value" value="' + esc(rule.value || '') + '" size="5" onchange="qwenMultiplierSet(' + index + ',' + i + ',\\'value\\',this.value)"></label>' +
+        '<label>範圍 <input class="qwen-multiplier-scope" value="' + esc(rule.scope || '') + '" size="12" onchange="qwenMultiplierSet(' + index + ',' + i + ',\\'scope\\',this.value)"></label>' +
+        '<button type="button" onclick="qwenMultiplierMove(' + index + ',' + i + ',-1)">↑</button>' +
+        '<button type="button" onclick="qwenMultiplierMove(' + index + ',' + i + ',1)">↓</button>' +
+        '<button type="button" onclick="qwenMultiplierDelete(' + index + ',' + i + ')">刪除</button></div>';
+    }
+    return html + '<div class="qwen-multiplier-error" style="color:#b91c1c">' + esc(card.quick_multiplier_error || '') + '</div>' +
+      '<button type="button" onclick="qwenMultiplierAdd(' + index + ')">＋倍率規則</button> ' +
+      '<button type="button" class="qwen-apply-multiplier-editor" onclick="qwenMultiplierApply(' + index + ')">套用倍率</button> ' +
+      '<button type="button" onclick="qwenMultiplierCancel(' + index + ')">取消</button></div>';
+  }
+
+  function _qwenSpecialQuickEditorHtml(card, index) {
+    var draft = card.quick_special_draft;
+    if (!draft) return '';
+    var kinds = [["none","無"],["tail","尾"],["car","車"],["half_car","半車"],["each","各"],["custom","自訂原文"]];
+    var options = kinds.map(function(item) {
+      return '<option value="' + item[0] + '" ' + (draft.kind === item[0] ? 'selected ' : '') + '>' + item[1] + '</option>';
+    }).join('');
+    return '<div class="qwen-special-quick-editor" style="margin-top:7px;padding:8px;border:1px solid #fbcfe8;border-radius:5px">' +
+      '<strong>特殊玩法</strong> <select class="qwen-special-kind" onchange="qwenSpecialSet(' + index + ',\\'kind\\',this.value)">' + options + '</select> ' +
+      '<label>原文 <input class="qwen-special-literal" value="' + esc(draft.literal || '') + '" onchange="qwenSpecialSet(' + index + ',\\'literal\\',this.value)"></label> ' +
+      '<label>範圍 <input class="qwen-special-quick-scope" value="' + esc(draft.scope || '') + '" onchange="qwenSpecialSet(' + index + ',\\'scope\\',this.value)"></label> ' +
+      '<label><input type="checkbox" class="qwen-special-quick-continuation" ' + (draft.continuation ? 'checked ' : '') + 'onchange="qwenSpecialSet(' + index + ',\\'continuation\\',this.checked)"> continuation</label>' +
+      '<div class="qwen-special-quick-error" style="color:#b91c1c">' + esc(card.quick_special_error || '') + '</div>' +
+      '<button type="button" class="qwen-apply-special-editor" onclick="qwenSpecialApply(' + index + ')">套用特殊玩法</button> ' +
+      '<button type="button" onclick="qwenSpecialCancel(' + index + ')">取消</button></div>';
+  }
+
+  function _qwenSplitEditorHtml(card, index) {
+    if (card.quick_split_text == null) return '';
+    return '<div class="qwen-split-editor" style="margin-top:7px;padding:8px;border:1px solid #c4b5fd;border-radius:5px">' +
+      '<strong>拆成兩筆（請明確輸入兩行）</strong>' +
+      '<textarea class="qwen-split-rows" style="display:block;width:100%;min-height:54px" onchange="qwenSplitSetText(' + index + ',this.value)">' + esc(card.quick_split_text) + '</textarea>' +
+      '<div class="qwen-split-warning" style="font-size:12px;color:#9a3412">倍率與特殊玩法保留在第一筆；第二筆由人工另行補充並確認。</div>' +
+      '<div class="qwen-split-error" style="color:#b91c1c">' + esc(card.quick_split_error || '') + '</div>' +
+      '<button type="button" class="qwen-apply-split" onclick="qwenSplitApply(' + index + ')">確認拆分</button> ' +
+      '<button type="button" onclick="qwenSplitCancel(' + index + ')">取消</button></div>';
+  }
+
+  function _qwenQuickCorrectionHtml(card, index) {
+    var nextAvailable = !!(qwenReviewSession && qwenReviewSession.structures[index + 1]);
+    return '<section class="qwen-fast-correction" style="margin-top:8px;padding:8px;background:#f8fafc;border:1px solid #94a3b8;border-radius:6px" onclick="event.stopPropagation()">' +
+      '<strong>快速人工修正</strong><div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:6px">' +
+      '<button type="button" class="qwen-quick-normal" onclick="qwenQuickSetNormal(' + index + ')">設為一般投注</button>' +
+      '<button type="button" class="qwen-quick-two-row" onclick="qwenQuickPreviewTwoRow(' + index + ')">兩排轉柱碰</button>' +
+      '<button type="button" class="qwen-quick-merge" ' + (nextAvailable ? '' : 'disabled ') + 'onclick="qwenQuickPreviewMerge(' + index + ')">與下一筆合併為柱碰</button>' +
+      '<button type="button" class="qwen-quick-split" onclick="qwenSplitOpen(' + index + ')">拆成兩筆</button>' +
+      '<button type="button" class="qwen-open-group-editor" onclick="qwenGroupOpen(' + index + ')">編輯柱群</button>' +
+      '<button type="button" class="qwen-open-multiplier-editor" onclick="qwenMultiplierOpen(' + index + ')">編輯倍率</button>' +
+      '<button type="button" class="qwen-open-special-editor" onclick="qwenSpecialOpen(' + index + ')">編輯特殊玩法</button></div>' +
+      _qwenQuickPreviewHtml(card, index) + _qwenGroupEditorHtml(card, index) +
+      _qwenMultiplierEditorHtml(card, index) + _qwenSpecialQuickEditorHtml(card, index) +
+      _qwenSplitEditorHtml(card, index) + '</section>';
+  }
+
   function _qwenRuleToParserText(rule) {
     var parts = String(rule || "").toUpperCase().split("X");
     if (parts.length !== 2) return String(rule || "");
@@ -1681,7 +1906,8 @@ def render_vision_ui_section() -> str:
     html += '</div>';
     var rules = Array.isArray(structure.multiplier_rules) ? structure.multiplier_rules : [];
     html += '<div class="review-field" data-field="multiplier" data-conflict="' + String(conflicts.multiplier) + '" style="padding:6px;' + fieldStyle(conflicts.multiplier) + '">' +
-      '<div class="qwen-review-play"><strong>Human Answer・倍率：</strong>' + esc(rules.length ? rules.join("、") : "未辨識／需要人工處理") + '</div>' +
+      '<div class="qwen-review-play"><strong>Human Answer・倍率：</strong>' + esc(rules.length ? rules.join("、") : "未辨識／需要人工處理") +
+      (structure.multiplier_scope == null || structure.multiplier_scope === "" ? '' : '；範圍=' + esc(structure.multiplier_scope)) + '</div>' +
       conflictText(conflicts.multiplier);
     if (structure.collision != null) html += '<div class="qwen-review-collision"><strong>疊寫類別：</strong>' + esc(structure.collision) + '</div>';
     html += '</div>';
@@ -1772,10 +1998,12 @@ def render_vision_ui_section() -> str:
         esc(card.crop_reread_status) + '" style="margin-top:5px;font-size:12px;font-weight:700;color:#1d4ed8">' +
         esc(rereadLabel) + '</div>';
     }
-    html += '<div class="review-image-context" style="font-size:11px;color:#64748b;margin-top:4px">原圖位置：選取本卡時顯示可靠的行／token 範圍；無可靠 bbox 時不猜位置。</div>';
+    html += '<div class="review-image-context" style="font-size:11px;color:#64748b;margin-top:4px">原圖位置：有可信 region provenance 才顯示高亮；否則保留完整原圖，不猜 bbox。</div>';
     html += '<div class="qwen-review-human-status" style="margin:6px 0;color:#9a3412;font-weight:700">' +
       esc(_qwenHumanStatus(card.source_status)) + '</div>';
+    html += _qwenAiLiteralHtml(card);
     html += _qwenCardStructureHtml(card);
+    html += _qwenQuickCorrectionHtml(card, index);
     html += _qwenGemmaEvidenceHtml(card, index);
     if (card.manual_edits.length) {
       html += '<div class="qwen-manual-edit-marker" style="font-size:12px;color:#0f766e;margin-top:5px">已採用人工修改</div>';
@@ -1898,11 +2126,14 @@ def render_vision_ui_section() -> str:
     var authorityState = String(qwenReviewSession.server_state || "unpersisted");
     var authorityColor = authorityState === "ready" ? "#166534" : (authorityState === "saving" ? "#475569" : "#b91c1c");
     var authorityText = authorityState === "ready"
-      ? "Server Human Review 已保存｜revision=" + qwenReviewSession.human_answer_revision + "｜hash=" + String(qwenReviewSession.human_answer_hash || "").slice(0, 12)
+      ? "Human Answer 已安全保存"
       : (authorityState === "saving" ? "正在保存 Server Human Review…" :
         (authorityState === "stale" ? "Human Answer 已變更，請重新載入並確認。" : "Server Human Review 尚未可用。"));
     html += '<div id="qwen-authority-status" data-authority-state="' + esc(authorityState) + '" style="padding:6px 8px;margin-bottom:7px;background:#f8fafc;color:' + authorityColor + '">' + esc(authorityText) +
-      (authorityState === "stale" || authorityState === "error" ? ' <button type="button" id="qwen-reload-authority" onclick="qwenReloadReviewAuthority()">重新載入</button>' : '') + '</div>';
+      (authorityState === "stale" || authorityState === "error" ? ' <button type="button" id="qwen-reload-authority" onclick="qwenReloadReviewAuthority()">重新載入</button>' : '') +
+      '<details class="qwen-authority-advanced" style="font-size:11px;color:#64748b"><summary>進階資訊</summary>revision=' +
+      esc(qwenReviewSession.human_answer_revision == null ? '-' : qwenReviewSession.human_answer_revision) +
+      '｜hash=' + esc(String(qwenReviewSession.human_answer_hash || "").slice(0, 12)) + '</details></div>';
     if (qwenReviewSession.provider_failure) {
       html += '<div class="qwen-provider-failure-review-note" style="padding:7px;background:#fff7ed;color:#9a3412">Qwen 未完成；可使用既有 Gemma／PP 證據或人工新增，不會自動建立候選。</div>';
     }
@@ -1949,6 +2180,18 @@ def render_vision_ui_section() -> str:
   }
 
   function _qwenReliableStructureBox(card) {
+    var cropGeometry = card && card.crop_reread_geometry;
+    var cropBox = cropGeometry && cropGeometry.bbox;
+    var cropWidth = Number(uploadedImageMetadata && uploadedImageMetadata.width || 0);
+    var cropHeight = Number(uploadedImageMetadata && uploadedImageMetadata.height || 0);
+    if (Array.isArray(cropBox) && cropBox.length === 4 && cropWidth > 0 && cropHeight > 0) {
+      var cropValues = cropBox.map(Number);
+      if (cropValues.every(Number.isFinite) && cropValues[0] >= 0 && cropValues[1] >= 0 &&
+          cropValues[2] <= cropWidth && cropValues[3] <= cropHeight &&
+          cropValues[2] > cropValues[0] && cropValues[3] > cropValues[1]) {
+        return {x1:cropValues[0], y1:cropValues[1], x2:cropValues[2], y2:cropValues[3], width:cropWidth, height:cropHeight};
+      }
+    }
     if (!qwenEvidenceResult) return null;
     var lineIds = Object.create(null);
     card.source_line_ids.forEach(function(lineId) { lineIds[String(lineId)] = true; });
@@ -2058,6 +2301,395 @@ def render_vision_ui_section() -> str:
       }
     }
   }
+
+  window.qwenQuickCancelPreview = function(index) {
+    if (!qwenReviewSession || !qwenReviewSession.structures[index]) return;
+    delete qwenReviewSession.structures[index].quick_preview;
+    _renderQwenReviewSession();
+  };
+
+  window.qwenQuickPreviewNormal = function(index) {
+    if (!qwenReviewSession || !qwenReviewSession.structures[index]) return;
+    var card = qwenReviewSession.structures[index];
+    var numbers = _qwenFlattenGroups((card.staged_structure || {}).number_groups || []);
+    card.quick_preview = {
+      kind: "normal",
+      rows: numbers.length ? [numbers] : [],
+      groups: numbers.length ? [numbers] : [],
+      valid: numbers.length > 0,
+      warning: numbers.length ? "" : "目前沒有合法號碼可套用。"
+    };
+    _renderQwenReviewSession();
+  };
+
+  window.qwenQuickSetNormal = function(index) {
+    window.qwenQuickPreviewNormal(index);
+    window.qwenQuickApplyNormal(index);
+  };
+
+  window.qwenQuickApplyNormal = function(index) {
+    if (!qwenReviewSession || !qwenReviewSession.structures[index]) return;
+    var card = qwenReviewSession.structures[index];
+    var preview = card.quick_preview;
+    if (!preview || preview.kind !== "normal" || !preview.valid) return;
+    var updated = _cloneJson(card.staged_structure || {});
+    updated.layout = "normal_row";
+    updated.number_groups = [_cloneJson(preview.groups[0])];
+    _qwenQuickCommit(index, "set_normal", updated, ["layout", "number_groups"], "explicit_user_action");
+  };
+
+  window.qwenQuickPreviewTwoRow = function(index) {
+    if (!qwenReviewSession || !qwenReviewSession.structures[index]) return;
+    var card = qwenReviewSession.structures[index];
+    var rows = _qwenVisibleRows(card);
+    var groups = _qwenTransposeRows(rows);
+    var warning = "";
+    if (rows.length !== 2) warning = "需要剛好兩排可見號碼；請改用柱群編輯器人工整理。";
+    else if (rows[0].length !== rows[1].length) warning = "兩排長度不一致，未猜測缺字位置，不能套用。";
+    else if (!groups.length) warning = "兩排包含不合法號碼，不能套用。";
+    card.quick_preview = {kind:"two_row_column", rows:_cloneJson(rows), groups:groups, valid:groups.length > 0, warning:warning};
+    _renderQwenReviewSession();
+  };
+
+  window.qwenQuickApplyColumn = function(index) {
+    if (!qwenReviewSession || !qwenReviewSession.structures[index]) return;
+    var card = qwenReviewSession.structures[index];
+    var preview = card.quick_preview;
+    if (!preview || preview.kind !== "two_row_column" || !preview.valid) return;
+    var updated = _cloneJson(card.staged_structure || {});
+    updated.layout = "column_bet";
+    updated.number_groups = _cloneJson(preview.groups);
+    _qwenQuickCommit(index, "two_rows_to_column", updated, ["layout", "number_groups"], "explicit_preview_apply");
+  };
+
+  window.qwenQuickPreviewMerge = function(index) {
+    if (!qwenReviewSession || !qwenReviewSession.structures[index] || !qwenReviewSession.structures[index + 1]) return;
+    var current = qwenReviewSession.structures[index];
+    var next = qwenReviewSession.structures[index + 1];
+    var rows = [
+      _qwenFlattenGroups((current.staged_structure || {}).number_groups || []),
+      _qwenFlattenGroups((next.staged_structure || {}).number_groups || [])
+    ];
+    var groups = _qwenTransposeRows(rows);
+    var warning = rows[0].length !== rows[1].length
+      ? "兩筆號碼數量不同，未猜測缺字位置，不能合併。"
+      : (!groups.length ? "目前號碼不足或不合法，不能合併。" : "下一筆只會在您確認後移除；兩筆都不會自動確認。");
+    current.quick_preview = {kind:"merge_next", rows:rows, groups:groups, valid:groups.length > 0, warning:warning};
+    _renderQwenReviewSession();
+  };
+
+  window.qwenQuickApplyMerge = function(index) {
+    if (!qwenReviewSession || !qwenReviewSession.structures[index] || !qwenReviewSession.structures[index + 1]) return;
+    var card = qwenReviewSession.structures[index];
+    var removed = qwenReviewSession.structures[index + 1];
+    var preview = card.quick_preview;
+    if (!preview || preview.kind !== "merge_next" || !preview.valid) return;
+    var previous = _cloneJson(card.staged_structure || {});
+    var updated = _cloneJson(previous);
+    updated.layout = "column_bet";
+    updated.number_groups = _cloneJson(preview.groups);
+    card.staged_structure = updated;
+    card.field_sources.layout = {source:"Human Answer",human_confirmed:false};
+    card.field_sources.number_groups = {source:"Human Answer",human_confirmed:false};
+    _recordReviewFieldCorrection(card, "layout", "Human Answer", previous.layout, updated.layout);
+    _recordReviewFieldCorrection(card, "number_groups", "Human Answer", previous.number_groups || [], updated.number_groups);
+    card.manual_edits.push({component:"merge_next_as_column", merged_human_bet_id:removed.human_bet_id, adopted_at:new Date().toISOString(), human_confirmed:false});
+    delete card.quick_preview;
+    _invalidateReviewConfirmation(card);
+    card.blocking_resolved_by_human = false;
+    qwenReviewSession.structures.splice(index + 1, 1);
+    _renderQwenReviewSession();
+    _qwenQueueAuthorityMutation();
+  };
+
+  window.qwenGroupOpen = function(index) {
+    if (!qwenReviewSession || !qwenReviewSession.structures[index]) return;
+    var card = qwenReviewSession.structures[index];
+    card.quick_group_draft = _qwenNormalizeGroups((card.staged_structure || {}).number_groups || []);
+    if (!card.quick_group_draft.length) card.quick_group_draft = [[""]];
+    card.quick_group_error = "";
+    _renderQwenReviewSession();
+  };
+
+  window.qwenGroupCancel = function(index) {
+    if (!qwenReviewSession || !qwenReviewSession.structures[index]) return;
+    delete qwenReviewSession.structures[index].quick_group_draft;
+    delete qwenReviewSession.structures[index].quick_group_error;
+    _renderQwenReviewSession();
+  };
+
+  window.qwenGroupSetNumber = function(index, groupIndex, numberIndex, value) {
+    var card = qwenReviewSession && qwenReviewSession.structures[index];
+    if (!card || !Array.isArray(card.quick_group_draft) || !card.quick_group_draft[groupIndex]) return;
+    card.quick_group_draft[groupIndex][numberIndex] = _qwenNumber(value);
+  };
+
+  window.qwenGroupAddNumber = function(index, groupIndex) {
+    var card = qwenReviewSession && qwenReviewSession.structures[index];
+    if (!card || !card.quick_group_draft || !card.quick_group_draft[groupIndex]) return;
+    card.quick_group_draft[groupIndex].push("");
+    _renderQwenReviewSession();
+  };
+
+  window.qwenGroupDeleteNumber = function(index, groupIndex, numberIndex) {
+    var card = qwenReviewSession && qwenReviewSession.structures[index];
+    if (!card || !card.quick_group_draft || !card.quick_group_draft[groupIndex]) return;
+    card.quick_group_draft[groupIndex].splice(numberIndex, 1);
+    _renderQwenReviewSession();
+  };
+
+  window.qwenGroupMoveNumber = function(index, groupIndex, numberIndex, direction) {
+    var card = qwenReviewSession && qwenReviewSession.structures[index];
+    var target = groupIndex + direction;
+    if (!card || !card.quick_group_draft || !card.quick_group_draft[groupIndex] || !card.quick_group_draft[target]) return;
+    var value = card.quick_group_draft[groupIndex].splice(numberIndex, 1)[0];
+    card.quick_group_draft[target].push(value);
+    _renderQwenReviewSession();
+  };
+
+  window.qwenGroupAddColumn = function(index) {
+    var card = qwenReviewSession && qwenReviewSession.structures[index];
+    if (!card || !Array.isArray(card.quick_group_draft)) return;
+    card.quick_group_draft.push([""]);
+    _renderQwenReviewSession();
+  };
+
+  window.qwenGroupDeleteColumn = function(index, groupIndex) {
+    var card = qwenReviewSession && qwenReviewSession.structures[index];
+    if (!card || !Array.isArray(card.quick_group_draft)) return;
+    card.quick_group_draft.splice(groupIndex, 1);
+    _renderQwenReviewSession();
+  };
+
+  window.qwenGroupMoveColumn = function(index, groupIndex, direction) {
+    var card = qwenReviewSession && qwenReviewSession.structures[index];
+    var target = groupIndex + direction;
+    if (!card || !card.quick_group_draft || target < 0 || target >= card.quick_group_draft.length) return;
+    var value = card.quick_group_draft.splice(groupIndex, 1)[0];
+    card.quick_group_draft.splice(target, 0, value);
+    _renderQwenReviewSession();
+  };
+
+  window.qwenGroupApply = function(index) {
+    var card = qwenReviewSession && qwenReviewSession.structures[index];
+    if (!card || !Array.isArray(card.quick_group_draft)) return;
+    var groups = card.quick_group_draft.map(function(group) { return group.map(_qwenNumber); });
+    if (groups.length < 2 || groups.some(function(group) { return !group.length || group.some(function(value) { return !_qwenValidHumanNumber(value); }); })) {
+      card.quick_group_error = "柱碰至少需要兩個非空柱，且每個號碼必須是 01–39。";
+      _renderQwenReviewSession();
+      return;
+    }
+    var updated = _cloneJson(card.staged_structure || {});
+    updated.number_groups = groups;
+    updated.layout = "column_bet";
+    _qwenQuickCommit(index, "group_editor", updated, ["number_groups", "layout"], "explicit_group_apply");
+  };
+
+  function _qwenMultiplierDraft(structure) {
+    structure = structure || {};
+    var scope = structure.multiplier_scope == null ? "" : String(structure.multiplier_scope);
+    return (Array.isArray(structure.multiplier_rules) ? structure.multiplier_rules : []).map(function(rule) {
+      var match = String(rule || "").toUpperCase().match(/^([234](?:\\/[234])*)X(\\d+(?:\\.\\d+)?)$/);
+      return {category:match ? match[1] : "", value:match ? match[2] : "", scope:scope};
+    });
+  }
+
+  window.qwenMultiplierOpen = function(index) {
+    var card = qwenReviewSession && qwenReviewSession.structures[index];
+    if (!card) return;
+    card.quick_multiplier_draft = _qwenMultiplierDraft(card.staged_structure);
+    if (!card.quick_multiplier_draft.length) card.quick_multiplier_draft = [{category:"2",value:"1",scope:""}];
+    card.quick_multiplier_error = "";
+    _renderQwenReviewSession();
+  };
+
+  window.qwenMultiplierCancel = function(index) {
+    var card = qwenReviewSession && qwenReviewSession.structures[index];
+    if (!card) return;
+    delete card.quick_multiplier_draft;
+    delete card.quick_multiplier_error;
+    _renderQwenReviewSession();
+  };
+
+  window.qwenMultiplierSet = function(index, ruleIndex, field, value) {
+    var card = qwenReviewSession && qwenReviewSession.structures[index];
+    if (!card || !card.quick_multiplier_draft || !card.quick_multiplier_draft[ruleIndex] || ["category","value","scope"].indexOf(field) < 0) return;
+    card.quick_multiplier_draft[ruleIndex][field] = String(value || "").trim();
+  };
+
+  window.qwenMultiplierAdd = function(index) {
+    var card = qwenReviewSession && qwenReviewSession.structures[index];
+    if (!card || !card.quick_multiplier_draft) return;
+    card.quick_multiplier_draft.push({category:"2",value:"1",scope:card.quick_multiplier_draft[0] && card.quick_multiplier_draft[0].scope || ""});
+    _renderQwenReviewSession();
+  };
+
+  window.qwenMultiplierDelete = function(index, ruleIndex) {
+    var card = qwenReviewSession && qwenReviewSession.structures[index];
+    if (!card || !card.quick_multiplier_draft) return;
+    card.quick_multiplier_draft.splice(ruleIndex, 1);
+    _renderQwenReviewSession();
+  };
+
+  window.qwenMultiplierMove = function(index, ruleIndex, direction) {
+    var card = qwenReviewSession && qwenReviewSession.structures[index];
+    var target = ruleIndex + direction;
+    if (!card || !card.quick_multiplier_draft || target < 0 || target >= card.quick_multiplier_draft.length) return;
+    var value = card.quick_multiplier_draft.splice(ruleIndex, 1)[0];
+    card.quick_multiplier_draft.splice(target, 0, value);
+    _renderQwenReviewSession();
+  };
+
+  window.qwenMultiplierApply = function(index) {
+    var card = qwenReviewSession && qwenReviewSession.structures[index];
+    if (!card || !Array.isArray(card.quick_multiplier_draft)) return;
+    var rules = [];
+    var scopes = [];
+    for (var i = 0; i < card.quick_multiplier_draft.length; i++) {
+      var item = card.quick_multiplier_draft[i];
+      var category = String(item.category || "").replace(/\\s+/g, "");
+      var value = String(item.value || "").trim();
+      if (!/^[234](?:\\/[234]){0,2}$/.test(category) ||
+          category.split("/").some(function(part, partIndex, parts) { return parts.indexOf(part) !== partIndex; }) ||
+          !/^\\d+(?:\\.\\d+)?$/.test(value)) {
+        card.quick_multiplier_error = "倍率類別僅支援 2、3、4 的單一或斜線組合（例如 2/3、3/4、2/3/4）；倍率值必須是非負數字。";
+        _renderQwenReviewSession();
+        return;
+      }
+      rules.push(category + "X" + value);
+      scopes.push(String(item.scope || "").trim());
+    }
+    if (!rules.length) {
+      card.quick_multiplier_error = "至少保留一條倍率規則；不確定時請保留原值並人工檢查。";
+      _renderQwenReviewSession();
+      return;
+    }
+    if (scopes.some(function(scope) { return scope !== scopes[0]; })) {
+      card.quick_multiplier_error = "目前 authority contract 只有單一倍率範圍；不同 scope 請拆成投注後再設定。";
+      _renderQwenReviewSession();
+      return;
+    }
+    var updated = _cloneJson(card.staged_structure || {});
+    updated.multiplier_rules = rules;
+    updated.multiplier_scope = scopes[0] || null;
+    updated.collision = _qwenCollisionFromRules(rules, updated.collision);
+    _qwenQuickCommit(index, "multiplier_editor", updated, ["multiplier_rules", "multiplier_scope"], "explicit_multiplier_apply");
+  };
+
+  function _qwenCurrentSpecialDraft(structure) {
+    structure = structure || {};
+    var entries = [
+      ["tail", _qwenSpecialFieldValue(structure, "tail")],
+      ["car", _qwenSpecialFieldValue(structure, "car")],
+      ["half_car", _qwenSpecialFieldValue(structure, "half_car")],
+      ["each", _qwenSpecialFieldValue(structure, "each")]
+    ];
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i][1] != null && entries[i][1] !== "") return {kind:entries[i][0],literal:String(entries[i][1]),scope:String(structure.scope || ""),continuation:!!structure.continuation};
+    }
+    if (structure.special_text) return {kind:"custom",literal:String(structure.special_text),scope:String(structure.scope || ""),continuation:!!structure.continuation};
+    return {kind:"none",literal:"",scope:String(structure.scope || ""),continuation:!!structure.continuation};
+  }
+
+  window.qwenSpecialOpen = function(index) {
+    var card = qwenReviewSession && qwenReviewSession.structures[index];
+    if (!card) return;
+    card.quick_special_draft = _qwenCurrentSpecialDraft(card.staged_structure);
+    card.quick_special_error = "";
+    _renderQwenReviewSession();
+  };
+
+  window.qwenSpecialCancel = function(index) {
+    var card = qwenReviewSession && qwenReviewSession.structures[index];
+    if (!card) return;
+    delete card.quick_special_draft;
+    delete card.quick_special_error;
+    _renderQwenReviewSession();
+  };
+
+  window.qwenSpecialSet = function(index, field, value) {
+    var card = qwenReviewSession && qwenReviewSession.structures[index];
+    if (!card || !card.quick_special_draft || ["kind","literal","scope","continuation"].indexOf(field) < 0) return;
+    card.quick_special_draft[field] = field === "continuation" ? value === true : String(value || "");
+  };
+
+  window.qwenSpecialApply = function(index) {
+    var card = qwenReviewSession && qwenReviewSession.structures[index];
+    if (!card || !card.quick_special_draft) return;
+    var draft = card.quick_special_draft;
+    if (["none","tail","car","half_car","each","custom"].indexOf(draft.kind) < 0 || (draft.kind !== "none" && !String(draft.literal || "").trim())) {
+      card.quick_special_error = "請選擇特殊玩法並保留圖片可見原文；看不清楚時不要猜。";
+      _renderQwenReviewSession();
+      return;
+    }
+    var updated = _cloneJson(card.staged_structure || {});
+    ["tail","尾","car","車","half_car","半車","each","各"].forEach(function(key) { updated[key] = null; });
+    updated.special_text = "";
+    if (draft.kind === "custom") updated.special_text = String(draft.literal).trim();
+    else if (draft.kind !== "none") updated[draft.kind] = String(draft.literal).trim();
+    updated.scope = String(draft.scope || "").trim() || null;
+    updated.continuation = draft.continuation === true;
+    _qwenQuickCommit(index, "special_play_editor", updated,
+      ["tail","car","half_car","each","special_text","scope","continuation"], "explicit_special_apply");
+  };
+
+  window.qwenSplitOpen = function(index) {
+    var card = qwenReviewSession && qwenReviewSession.structures[index];
+    if (!card) return;
+    var rows = _qwenVisibleRows(card);
+    card.quick_split_text = rows.slice(0, 2).map(function(row) { return row.join(" "); }).join("\\n");
+    card.quick_split_error = "";
+    _renderQwenReviewSession();
+  };
+
+  window.qwenSplitSetText = function(index, value) {
+    var card = qwenReviewSession && qwenReviewSession.structures[index];
+    if (card) card.quick_split_text = String(value || "");
+  };
+
+  window.qwenSplitCancel = function(index) {
+    var card = qwenReviewSession && qwenReviewSession.structures[index];
+    if (!card) return;
+    delete card.quick_split_text;
+    delete card.quick_split_error;
+    _renderQwenReviewSession();
+  };
+
+  window.qwenSplitApply = function(index) {
+    var card = qwenReviewSession && qwenReviewSession.structures[index];
+    if (!card) return;
+    var rows = _qwenLiteralRows(card.quick_split_text || "");
+    if (rows.length !== 2 || rows.some(function(row) { return !row.length || row.some(function(value) { return !_qwenValidHumanNumber(value); }); })) {
+      card.quick_split_error = "請明確輸入兩行合法 01–39 號碼；系統不會自動猜拆分點。";
+      _renderQwenReviewSession();
+      return;
+    }
+    var previous = _cloneJson(card.staged_structure || {});
+    var first = _cloneJson(previous);
+    first.layout = "normal_row";
+    first.number_groups = [_cloneJson(rows[0])];
+    card.staged_structure = first;
+    card.field_sources.number_groups = {source:"Human Answer",human_confirmed:false};
+    card.field_sources.layout = {source:"Human Answer",human_confirmed:false};
+    _recordReviewFieldCorrection(card, "number_groups", "Human Answer", previous.number_groups || [], first.number_groups);
+    _recordReviewFieldCorrection(card, "layout", "Human Answer", previous.layout, first.layout);
+    card.manual_edits.push({component:"split_card", part:1, adopted_at:new Date().toISOString(), human_confirmed:false});
+    delete card.quick_split_text;
+    _invalidateReviewConfirmation(card);
+    card.blocking_resolved_by_human = false;
+    var second = _qwenNewManualCard(qwenReviewSession.structures.length);
+    second.human_bet_id = _qwenNextHumanBetId();
+    second.structure_id = "MANUAL-SPLIT-" + String(Date.now()) + "-" + String(index + 2);
+    second.review_state = "pending";
+    second.staged_structure.number_groups = [_cloneJson(rows[1])];
+    second.staged_structure.layout = "normal_row";
+    second.original_structure = _cloneJson(second.staged_structure);
+    second.edit_text = rows[1].join(" ");
+    second.manual_edits.push({component:"split_card", part:2, source_human_bet_id:card.human_bet_id, adopted_at:new Date().toISOString(), human_confirmed:false});
+    qwenReviewSession.structures.splice(index + 1, 0, second);
+    _renderQwenReviewSession();
+    _qwenQueueAuthorityMutation();
+  };
 
   window.qwenReviewSelect = function(index) {
     if (!qwenReviewSession || !qwenReviewSession.structures[index]) return;
@@ -2411,9 +3043,21 @@ def render_vision_ui_section() -> str:
   };
 
   document.addEventListener("keydown", function(event) {
-    if (!qwenReviewSession || !(event.ctrlKey || event.metaKey) || event.key !== "Enter") return;
+    if (!qwenReviewSession) return;
     var index = _qwenActiveReviewIndex();
-    if (index < 0 || qwenReviewSession.structures[index].review_state === "editing") return;
+    if (index < 0) return;
+    if (event.altKey && !event.ctrlKey && !event.metaKey) {
+      var key = String(event.key || "").toLowerCase();
+      if (["n","c","m"].indexOf(key) < 0) return;
+      event.preventDefault();
+      // Shortcuts only open a preview.  They never apply or confirm structure.
+      if (key === "n") qwenQuickPreviewNormal(index);
+      if (key === "c") qwenQuickPreviewTwoRow(index);
+      if (key === "m") qwenQuickPreviewMerge(index);
+      return;
+    }
+    if (!(event.ctrlKey || event.metaKey) || event.key !== "Enter" ||
+        qwenReviewSession.structures[index].review_state === "editing") return;
     event.preventDefault();
     qwenReviewConfirm(index);
   });
@@ -2473,12 +3117,11 @@ def render_vision_ui_section() -> str:
       output.innerHTML = '<div id="qwen-existing-candidate-stale" data-candidate-state="' + esc(derivedState) + '" style="padding:8px;background:#fff7ed;color:#9a3412">舊 Candidate 狀態：' + esc(derivedState) + '；不會改寫舊 snapshot。重新確認 Human Answer 後才能建立新版 Candidate。</div>';
       return;
     }
-    output.innerHTML = '<div id="qwen-review-complete-status" style="padding:8px;background:#ecfdf5;border-left:4px solid #10b981;color:#065f46;font-weight:700">Candidate 已建立</div>' +
-      '<div id="qwen-created-candidate-metadata" style="font-size:12px;color:#065f46;margin-top:5px">Candidate ID=' + esc(candidate.candidate_id || "-") +
+    output.innerHTML = '<div id="qwen-review-complete-status" style="padding:8px;background:#ecfdf5;border-left:4px solid #10b981;color:#065f46;font-weight:700">已建立安全快照</div>' +
+      '<details id="qwen-created-candidate-metadata" style="font-size:11px;color:#64748b;margin-top:5px"><summary>進階資訊</summary>Candidate ID=' + esc(candidate.candidate_id || "-") +
       '｜revision=' + esc(candidate.revision || "-") +
       '｜content hash=' + esc(String(candidate.canonical_content_hash || "").slice(0, 12)) +
-      '｜CURRENT</div>' +
-      '<div class="candidate-boundary-safety" style="font-size:11px;color:#475569">candidate_only=true；approved_for_fill=false；external fill=0；auto_confirm=false；auto_submit=false</div>' +
+      '｜CURRENT<div class="candidate-boundary-safety">candidate_only=true；approved_for_fill=false；external fill=0；auto_confirm=false；auto_submit=false</div></details>' +
       _qwenCandidateQueueHtml();
   }
 
@@ -2495,9 +3138,10 @@ def render_vision_ui_section() -> str:
     }
     var entry = record.queue_entry || record;
     var state = String(record.state || entry.state_at_creation || "QUEUED");
-    var html = '<div id="qwen-candidate-queue-status" data-queue-state="' + esc(state) + '" style="margin-top:7px;color:#065f46">待處理狀態=' + esc(state) +
-      '｜entry ID=' + esc(entry.queue_entry_id || "-") +
-      '｜sequence=' + esc(entry.enqueue_sequence || "-") + '</div>';
+    var html = '<div id="qwen-candidate-queue-status" data-queue-state="' + esc(state) + '" style="margin-top:7px;color:#065f46">' +
+      (state === "QUEUED" ? '已加入待處理' : '待處理狀態=' + esc(state)) + '</div>' +
+      '<details class="qwen-queue-advanced" style="font-size:11px;color:#64748b"><summary>進階資訊</summary>entry ID=' + esc(entry.queue_entry_id || "-") +
+      '｜sequence=' + esc(entry.enqueue_sequence || "-") + '</details>';
     if (state === "QUEUED" || state === "BLOCKED") {
       html += '<button type="button" id="qwen-candidate-remove" onclick="qwenRemoveCandidateQueueEntry()">移除待處理</button>';
     }
