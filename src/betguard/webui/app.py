@@ -1225,6 +1225,9 @@ def build_workbench_handler(
             if path == "/api/vision/v1/providers":
                 self._handle_vision_providers()
                 return
+            if path == "/api/vision/v1/acceptance-dataset/status":
+                self._handle_image_text_acceptance_status()
+                return
             if path == "/api/vision/v1/candidate-queue":
                 self._handle_validated_candidate_queue_list()
                 return
@@ -1389,6 +1392,9 @@ def build_workbench_handler(
                 return
             if path == "/api/vision/v1/transcriptions":
                 self._handle_vision_transcription()
+                return
+            if path == "/api/vision/v1/acceptance-dataset/samples":
+                self._handle_image_text_verified_sample()
                 return
             if path == "/api/vision/v1/mvp/sandbox/actions":
                 self._handle_mvp_sandbox_action()
@@ -3373,6 +3379,26 @@ window.assistPanelFill = assistPanelFill;
 
             result = transcribe_image_to_text(image_id)
             self._send_json(result, status=200 if result["ok"] else 400)
+
+        def _handle_image_text_acceptance_status(self) -> None:
+            from betguard.vision.image_text_acceptance import get_dataset_status
+
+            self._send_json(get_dataset_status())
+
+        def _handle_image_text_verified_sample(self) -> None:
+            data = self._read_json_body()
+            if data is None:
+                self._send_json(
+                    {"ok": False, "error": {"code": "INVALID_JSON", "message": "JSON 格式無效"}},
+                    status=400,
+                )
+                return
+            image_id = str(data.get("image_id") or "")
+            verified_text = str(data.get("human_verified_betguard_text") or "")
+            from betguard.vision.image_text_acceptance import save_human_verified_sample
+
+            result = save_human_verified_sample(image_id, verified_text)
+            self._send_json(result, status=201 if result["ok"] else 400)
 
         @staticmethod
         def _mvp_plain_message(code: str) -> str:

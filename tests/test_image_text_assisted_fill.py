@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
-from betguard.vision import service
+from betguard.vision import image_text_acceptance, service
 from betguard.webfill.batch_mock_queue import build_batch_mock_queue
 from betguard.webui import app as webui_app
 
@@ -75,6 +75,13 @@ def test_explicit_transcription_uses_whole_image_gemma_only(
         }
 
     monkeypatch.setattr(service, "run_gemma_shadow", fake_run)
+    monkeypatch.setattr(
+        image_text_acceptance,
+        "record_machine_transcription",
+        lambda image_id, **kwargs: captured.update(
+            {"capture_image_id": image_id, "capture": kwargs}
+        ),
+    )
     result = service.transcribe_image_to_text("image-id")
 
     assert result["ok"] is True
@@ -85,11 +92,15 @@ def test_explicit_transcription_uses_whole_image_gemma_only(
     assert result["value_authority"] == "existing_text_parser_after_explicit_user_action"
     assert result["external_call_count"] == 1
     assert result["retry_count"] == 0
+    assert result["verified_sample_capture_available"] is True
     assert result["auto_apply"] is False
     assert result["auto_confirm"] is False
     assert result["auto_submit"] is False
     assert captured["request"].image_path.endswith("input.png")
     assert captured["config"].enabled is True
+    assert captured["capture_image_id"] == "image-id"
+    assert captured["capture"]["ai_original_text"] == "05.08.09 二三各 0.5"
+    assert captured["capture"]["source_image_sha256"] == "a" * 64
 
 
 def test_empty_prediction_stays_editable_and_never_auto_applies(
@@ -155,6 +166,77 @@ def test_http_transcription_endpoint_returns_only_editable_text(monkeypatch) -> 
         "user_editable": True,
         "auto_submit": False,
     }
+
+
+def test_http_verified_sample_uses_only_image_id_and_human_text(monkeypatch) -> None:
+    captured = {}
+
+    def fake_save(image_id, verified_text):
+        captured["image_id"] = image_id
+        captured["verified_text"] = verified_text
+        return {
+            "ok": True,
+            "sample": {"revision_id": "revision-000001"},
+            "dataset_status": {
+                "unique_human_verified_images": 1,
+                "target": 10,
+                "acceptance_dataset_ready": False,
+            },
+        }
+
+    monkeypatch.setattr(image_text_acceptance, "save_human_verified_sample", fake_save)
+
+    with _running_app() as port:
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            connection.request(
+                "POST",
+                "/api/vision/v1/acceptance-dataset/samples",
+                body=json.dumps(
+                    {
+                        "image_id": "image-1",
+                        "human_verified_betguard_text": "06.13.23.22 二三50",
+                        "ai_original_text": "browser must not control this",
+                    }
+                ).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            payload = json.loads(response.read().decode())
+        finally:
+            connection.close()
+
+    assert response.status == 201
+    assert payload["ok"] is True
+    assert captured == {
+        "image_id": "image-1",
+        "verified_text": "06.13.23.22 二三50",
+    }
+
+
+def test_http_acceptance_status_reports_unique_images(monkeypatch) -> None:
+    monkeypatch.setattr(
+        image_text_acceptance,
+        "get_dataset_status",
+        lambda: {
+            "ok": True,
+            "unique_human_verified_images": 4,
+            "target": 10,
+            "acceptance_dataset_ready": False,
+        },
+    )
+
+    with _running_app() as port:
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            connection.request("GET", "/api/vision/v1/acceptance-dataset/status")
+            response = connection.getresponse()
+            payload = json.loads(response.read().decode())
+        finally:
+            connection.close()
+
+    assert response.status == 200
+    assert payload["unique_human_verified_images"] == 4
 
 
 def test_manually_corrected_image_text_is_accepted_by_existing_parser() -> None:

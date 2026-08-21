@@ -18,6 +18,8 @@ def test_image_flow_is_four_plain_user_steps() -> None:
     assert 'id="vision-run-btn"' in html
     assert 'id="vision-transcription-text"' in html
     assert 'id="vision-use-text-btn"' in html
+    assert 'id="vision-save-verified-btn"' in html
+    assert "保存為正確範例" in html
 
 
 def test_transcription_is_large_editable_text_not_a_review_schema() -> None:
@@ -41,6 +43,17 @@ def test_image_text_uses_the_existing_text_parser_entrypoint() -> None:
     assert "createBatch();" in html
     assert "/assist-panel/create-batch" not in html
     assert "image-specific parser" in html
+
+
+def test_verified_sample_button_uses_server_parser_and_shows_n_of_ten() -> None:
+    html = _html()
+
+    assert "/api/vision/v1/acceptance-dataset/status" in html
+    assert "/api/vision/v1/acceptance-dataset/samples" in html
+    assert "human_verified_betguard_text: text" in html
+    assert "已累積正確圖片範例：" in html
+    assert 'data.verified_sample_capture_available === true' in html
+    assert "parserErrorText(data)" in html
 
 
 def test_gemma_transcription_has_no_qwen_or_model_voting_controls() -> None:

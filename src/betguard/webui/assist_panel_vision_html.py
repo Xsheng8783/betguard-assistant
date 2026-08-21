@@ -32,8 +32,10 @@ def render_vision_ui_section() -> str:
   <textarea id="vision-transcription-text" placeholder="AI 辨識後會放在這裡；也可以直接手動輸入或修改。" style="min-height:210px"></textarea>
   <div style="display:flex;gap:7px;flex-wrap:wrap;margin-top:8px">
     <button id="vision-use-text-btn" class="btn-primary" type="button">解析／輔助填入</button>
+    <button id="vision-save-verified-btn" type="button" disabled style="background:#0f766e;color:#fff">保存為正確範例</button>
     <button id="vision-clear-text-btn" type="button" style="background:#64748b;color:#fff">清空文字</button>
   </div>
+  <div id="vision-acceptance-dataset-status" style="font-size:13px;color:#475569;margin-top:9px">已累積正確圖片範例：讀取中…</div>
   <div id="vision-status" class="status" aria-live="polite"></div>
   <div style="font-size:12px;color:#94a3b8;margin-top:7px">不會自動送出；auto-submit=false</div>
 </div>
@@ -47,16 +49,50 @@ def render_vision_ui_section() -> str:
   var runButton = document.getElementById("vision-run-btn");
   var transcription = document.getElementById("vision-transcription-text");
   var status = document.getElementById("vision-status");
+  var saveVerifiedButton = document.getElementById("vision-save-verified-btn");
+  var datasetStatus = document.getElementById("vision-acceptance-dataset-status");
+  var transcriptionCaptureAvailable = false;
 
   function setVisionStatus(message, isError) {
     status.textContent = message || "";
     status.style.color = isError ? "#b91c1c" : "#475569";
   }
 
+  function renderDatasetStatus(data) {
+    var count = Number(data.unique_human_verified_images || 0);
+    var target = Number(data.target || 10);
+    datasetStatus.textContent = "已累積正確圖片範例：" + count + " / " + target;
+    if (data.acceptance_dataset_ready) {
+      datasetStatus.textContent += " · ACCEPTANCE_DATASET_READY = YES";
+    }
+  }
+
+  function refreshDatasetStatus() {
+    fetch("/api/vision/v1/acceptance-dataset/status")
+      .then(function(response) { return response.json(); })
+      .then(function(data) {
+        if (!data.ok) throw new Error("status unavailable");
+        renderDatasetStatus(data);
+      }).catch(function() {
+        datasetStatus.textContent = "已累積正確圖片範例：目前無法讀取";
+      });
+  }
+
+  function parserErrorText(data) {
+    var details = (data.parser_errors || []).map(function(item) {
+      var fragment = String(item.fragment || "");
+      var messages = (item.messages || []).join("；");
+      return (fragment ? "「" + fragment + "」：" : "") + messages;
+    }).filter(Boolean);
+    return details.length ? " " + details.join(" / ") : "";
+  }
+
   function uploadImage(file) {
     if (!file) return;
     setVisionStatus("圖片上傳中…", false);
     runButton.style.display = "none";
+    transcriptionCaptureAvailable = false;
+    saveVerifiedButton.disabled = true;
     var reader = new FileReader();
     reader.onload = function() {
       fetch("/api/vision/v1/images", {
@@ -70,6 +106,7 @@ def render_vision_ui_section() -> str:
       .then(function(data) {
         if (!data.ok) throw new Error((data.error && data.error.message) || "圖片上傳失敗");
         uploadedImageId = String(data.image.image_id || "");
+        transcription.value = "";
         document.getElementById("vision-preview-img").src =
           "/api/vision/v1/images/" + encodeURIComponent(uploadedImageId);
         document.getElementById("vision-preview").style.display = "block";
@@ -126,8 +163,15 @@ def render_vision_ui_section() -> str:
       runButton.textContent = "重新辨識";
       if (!data.ok) throw new Error((data.error && data.error.message) || "AI 辨識失敗");
       transcription.value = String(data.text || "");
+      transcriptionCaptureAvailable = data.verified_sample_capture_available === true;
+      saveVerifiedButton.disabled = !transcriptionCaptureAvailable;
       transcription.focus();
-      setVisionStatus("辨識完成。請檢查文字，需要時直接修改。", false);
+      setVisionStatus(
+        transcriptionCaptureAvailable
+          ? "辨識完成。請檢查文字，需要時直接修改；確認正確後可保存範例。"
+          : "辨識完成。請檢查文字，需要時直接修改。範例保存目前不可用，但仍可正常解析。",
+        !transcriptionCaptureAvailable
+      );
     }).catch(function(error) {
       runButton.disabled = false;
       runButton.textContent = "重新辨識";
@@ -142,6 +186,44 @@ def render_vision_ui_section() -> str:
     setVisionStatus("文字已清空。", false);
   });
 
+  saveVerifiedButton.addEventListener("click", function() {
+    var text = transcription.value.trim();
+    if (!uploadedImageId || !transcriptionCaptureAvailable) {
+      setVisionStatus("請先上傳圖片並完成 AI 辨識。", true);
+      return;
+    }
+    if (!text) {
+      setVisionStatus("正確文字不可為空白。", true);
+      return;
+    }
+    saveVerifiedButton.disabled = true;
+    setVisionStatus("正在用現有 parser 驗證並保存…", false);
+    fetch("/api/vision/v1/acceptance-dataset/samples", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        image_id: uploadedImageId,
+        human_verified_betguard_text: text
+      })
+    }).then(function(response) { return response.json(); })
+    .then(function(data) {
+      saveVerifiedButton.disabled = false;
+      if (!data.ok) {
+        throw new Error(
+          ((data.error && data.error.message) || "保存失敗") + parserErrorText(data)
+        );
+      }
+      renderDatasetStatus(data.dataset_status || {});
+      setVisionStatus(
+        "已保存正確範例（" + String(data.sample.revision_id || "新版本") + "）。您可以繼續解析／輔助填入。",
+        false
+      );
+    }).catch(function(error) {
+      saveVerifiedButton.disabled = false;
+      setVisionStatus(error.message || "保存失敗，請檢查文字。", true);
+    });
+  });
+
   document.getElementById("vision-use-text-btn").addEventListener("click", function() {
     var text = transcription.value.trim();
     if (!text) {
@@ -154,6 +236,8 @@ def render_vision_ui_section() -> str:
     switchMode("text");
     createBatch();
   });
+
+  refreshDatasetStatus();
 })();
 </script>
 """

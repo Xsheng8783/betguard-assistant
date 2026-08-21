@@ -307,6 +307,29 @@ def transcribe_image_to_text(image_id: str) -> dict[str, Any]:
             "external_call_count": int(evidence.get("external_call_count") or 0),
             "retry_count": int(evidence.get("retry_count") or 0),
         }
+    capture_available = False
+    try:
+        from betguard.vision.image_text_acceptance import record_machine_transcription
+
+        record_machine_transcription(
+            image_id,
+            source_image_sha256=meta.sha256,
+            ai_original_text=text,
+            reader=GEMMA_SHADOW_PROVIDER_ID,
+            model_cache_identity={
+                "model": config.model,
+                "model_version": config.model_version,
+                "adapter_version": config.adapter_version,
+                "prompt_sha256": config.prompt_sha256,
+                "request_schema_version": config.request_schema_version,
+                "cache_hit": bool(evidence.get("cache_hit", False)),
+            },
+        )
+        capture_available = True
+    except Exception:
+        # Acceptance capture is optional bookkeeping.  A local disk failure
+        # must never block the normal editable transcription workflow.
+        capture_available = False
     return _ok({
         "text": text,
         "reader": GEMMA_SHADOW_PROVIDER_ID,
@@ -316,6 +339,7 @@ def transcribe_image_to_text(image_id: str) -> dict[str, Any]:
         "cache_hit": bool(evidence.get("cache_hit", False)),
         "external_call_count": int(evidence.get("external_call_count") or 0),
         "retry_count": int(evidence.get("retry_count") or 0),
+        "verified_sample_capture_available": capture_available,
         "auto_apply": False,
         "auto_confirm": False,
         "auto_submit": False,
