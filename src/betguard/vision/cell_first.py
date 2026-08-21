@@ -86,7 +86,7 @@ def classify_literal(
 def make_token(
     *,
     token_id: str,
-    cell_id: str,
+    cell_id: str | None,
     text_raw: str,
     confidence: float,
     bbox: Iterable[float],
@@ -103,7 +103,7 @@ def make_token(
         raise ValueError("token confidence must be between zero and one")
     return {
         "token_id": str(token_id),
-        "cell_id": str(cell_id),
+        "cell_id": str(cell_id) if cell_id is not None else None,
         "text_raw": str(text_raw),
         "confidence": score,
         "bbox": [x1, y1, x2, y2],
