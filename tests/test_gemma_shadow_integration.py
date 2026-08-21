@@ -452,22 +452,20 @@ def test_gemma_is_nonselectable_default_off_evidence_provider(monkeypatch) -> No
     assert provider["primary_machine_source"] is True
 
 
-def test_ui_keeps_gemma_read_only_until_explicit_browser_local_adoption() -> None:
+def test_ui_uses_gemma_only_as_editable_plain_text_transcription() -> None:
     source = (REPO / "src/betguard/webui/assist_panel_vision_html.py").read_text(encoding="utf-8")
-    render_call = source.index("html += _renderGemmaShadowEvidence();")
-    advanced_details = source.rfind('id="qwen-advanced-evidence"', 0, render_call)
-    assert advanced_details >= 0
-    review_session = source[
-        source.index("function _createQwenReviewSession"):
-        source.index("function _renderQwenCompletion")
-    ]
-    assert "explicit_user_click" in review_session
-    assert "不使用位置、文字或索引補位" in review_session
-    assert "採用 Gemma 號碼" in review_session
-    assert "採用 Gemma 倍率" in review_session
-    assert "card.accepted_by_human" not in review_session
-    assert "card.manual_candidate_id" not in review_session
-    assert "Gemma 4 26B raw-reader evidence (Advanced only)" in source
+    service_source = (REPO / "src/betguard/vision/service.py").read_text(encoding="utf-8")
+
+    assert 'id="vision-transcription-text"' in source
+    assert 'fetch("/api/vision/v1/transcriptions"' in source
+    assert 'document.getElementById("batch-text").value = text' in source
+    assert "createBatch();" in source
+    assert "run_gemma_shadow(request, config=config)" in service_source
+    assert "machine_transcription_only" in service_source
+    assert "existing_text_parser_after_explicit_user_action" in service_source
+    assert "Qwen" not in source
+    assert "card.accepted_by_human" not in source
+    assert "card.manual_candidate_id" not in source
 
 
 def test_payload_has_no_candidate_queue_draft_or_webfill_side_effects() -> None:

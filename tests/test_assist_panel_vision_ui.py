@@ -1,185 +1,93 @@
-"""Test Assist Panel vision UI integration."""
+"""Product contract for the simple image-to-text Assist Panel flow."""
 
 from __future__ import annotations
 
 
-class TestVisionUIHtml:
-    """Verify vision UI HTML is present and well-formed."""
+def _html() -> str:
+    from betguard.webui.assist_panel_vision_html import render_vision_ui_section
 
-    def test_vision_section_present(self):
-        from betguard.webui.assist_panel_vision_html import render_vision_ui_section
-        html = render_vision_ui_section()
-        assert "vision-section" in html
-        assert "vision-drop-zone" in html
-        assert "vision-file-input" in html
-        assert "vision-preview" in html
-        assert "vision-run-btn" in html
-        assert "vision-results" in html
-
-    def test_runtime_router_and_human_confirmation_notice(self):
-        from betguard.webui.assist_panel_vision_html import render_vision_ui_section
-        html = render_vision_ui_section()
-        assert 'provider_id: "runtime-reader-router"' in html
-        assert "vision-provider-status" in html
-        assert "human_confirmation_required:true" in html
-        assert "逐筆確認" in html
-
-    def test_runtime_router_response_helper_and_failure_labels(self):
-        from betguard.webui.assist_panel_vision_html import render_vision_ui_section
-
-        html = render_vision_ui_section()
-        assert "function _runtimeRoutingFromResponse(data)" in html
-        assert "data.routing_result" in html
-        assert "data.result && data.result.routing_result" in html
-        assert html.count("_runtimeRoutingFromResponse(data)") >= 3
-        assert "AI 辨識失敗" in html
-        assert "Qwen 第二意見失敗" in html
-        assert "Qwen 辨識失敗" not in html
-
-    def test_dense_partial_reader_ux_is_folded_and_keeps_manual_add(self):
-        from betguard.webui.assist_panel_vision_html import render_vision_ui_section
-
-        html = render_vision_ui_section()
-        assert "AI 已讀到部分投注，仍有內容需要人工補充。" in html
-        assert "machine_read_diagnostics:seed.machine_read_diagnostics || {}" in html
-        assert '<details id="runtime-reader-advanced"' in html
-        assert "qwen-add-manual-structure" in html
-
-    def test_qwen_second_opinion_has_finite_client_timeout(self):
-        from betguard.webui.assist_panel_vision_html import render_vision_ui_section
-
-        html = render_vision_ui_section()
-        assert "function _runtimeFetchJsonWithTimeout" in html
-        assert "RUNTIME_SECOND_OPINION_TIMEOUT_MS = 75000" in html
-        assert 'error.name = "AbortError"' in html
-        assert "controller.abort()" in html
-        assert "取得 Qwen 第二意見" in html
-
-    def test_document_mode_can_be_supplied_before_paid_recognition(self):
-        from betguard.webui.assist_panel_vision_html import render_vision_ui_section
-
-        html = render_vision_ui_section()
-
-        assert 'id="vision-document-mode"' in html
-        assert '<option value="column">整張是柱碰</option>' in html
-        assert "document_mode:" in html
-
-    def test_confirmed_text_only_returns_to_text_review(self):
-        from betguard.webui.assist_panel_vision_html import render_vision_ui_section
-        html = render_vision_ui_section()
-        assert "visionApplyConfirmedText" in html
-        assert 'textArea.value = texts.join("\\n")' in html
-        assert 'switchMode("text")' in html
-        assert "createBatchBtn.click" not in html
-        assert "if (!visionQualityPassed)" in html
-        assert "auto_submit=false" in html
-        assert "auto_confirm=false" in html
-
-    def test_layout_hint_is_not_treated_as_final_bet_type(self):
-        from betguard.webui.assist_panel_vision_html import render_vision_ui_section
-        html = render_vision_ui_section()
-        assert "模型版面提示" in html
-        assert "vision-layout-choice" in html
-        assert "人工選擇牌型" in html
-        assert '<option value="column">柱碰</option>' in html
-        assert "模型不會決定最終牌型" in html
-        assert 'layoutChoice === "unknown"' in html
-        assert "牌組數" in html
-        assert "一筆完整牌組" in html
-        assert "相同星別＋倍率" in html
-        # Human Answer must retain an explicit 「各」 scope when it exists; it is
-        # review-only metadata and must not be inferred from layout_hint.
-        assert '"each", "各"' in html
-
-    def test_ocr_observations_are_converted_to_editable_review_draft(self):
-        from betguard.webui.assist_panel_vision_html import render_vision_ui_section
-        html = render_vision_ui_section()
-        assert "_visionReviewDraft(line)" in html
-        assert 'group.join(".")' in html
-        assert '.join("/")' in html
-        assert 'return numbers.split(".")[0] + "車" + multiplier' in html
-        assert "模型原文" in html
-        assert "可編輯的 Review 格式草稿" in html
-
-    def test_low_resolution_portrait_uses_one_composite_aid_image(self):
-        from betguard.webui.assist_panel_vision_html import render_vision_ui_section
-        html = render_vision_ui_section()
-        assert "_createVisionAidImage" in html
-        assert 'canvas.width = 1800' in html
-        assert '"LEFT DETAIL", "CENTER DETAIL", "RIGHT DETAIL"' in html
-        assert "uploadedAidImageId" in html
-        assert "aided_image_id" in html
-        assert "原始圖片品質 Gate 仍然有效" in html
-
-    def test_only_local_sandbox_assist_fill_button(self):
-        from betguard.webui.assist_panel_vision_html import render_vision_ui_section
-        html = render_vision_ui_section()
-        assert "輔助填入本機測試頁" in html
-        assert "/api/vision/v1/mvp/sandbox/execute" in html
-        assert "/assist-fill/" not in html.lower()
-
-    def test_no_create_batch_call(self):
-        from betguard.webui.assist_panel_vision_html import render_vision_ui_section
-        html = render_vision_ui_section()
-        assert "create-batch" not in html.lower()
-
-    def test_no_external_site_urls(self):
-        from betguard.webui.assist_panel_vision_html import render_vision_ui_section
-        html = render_vision_ui_section()
-        assert "127.0.0.1" in html
-        assert "http://" not in html
-        assert "https://" not in html
-
-    def test_escape_function_present(self):
-        from betguard.webui.assist_panel_vision_html import render_vision_ui_section
-        html = render_vision_ui_section()
-        assert "esc(" in html or "escape(" in html
-
-    def test_drop_zone_has_accept_attributes(self):
-        from betguard.webui.assist_panel_vision_html import render_vision_ui_section
-        html = render_vision_ui_section()
-        assert "accept" in html
-        assert "image/png" in html
-        assert "image/jpeg" in html
-
-    def test_clipboard_paste_handler(self):
-        from betguard.webui.assist_panel_vision_html import render_vision_ui_section
-        html = render_vision_ui_section()
-        assert "paste" in html.lower()
-        assert "clipboardData" in html
+    return render_vision_ui_section()
 
 
-class TestAssistPanelIntegration:
-    """Verify assist panel integrates vision UI."""
+def test_image_flow_is_four_plain_user_steps() -> None:
+    html = _html()
 
-    def test_handler_imports_vision(self):
-        """_handle_assist_panel imports vision HTML renderer."""
-        from betguard.webui.assist_panel_vision_html import render_vision_ui_section
-        assert callable(render_vision_ui_section)
-
-    def test_assist_panel_html_unchanged(self):
-        """Original ASSIST_PANEL_HTML is still imported (not replaced)."""
-        from betguard.webui.assist_panel_html import ASSIST_PANEL_HTML
-        assert "Betguard" in ASSIST_PANEL_HTML
-        assert "textarea" in ASSIST_PANEL_HTML
-
-    def test_mode_toggle_in_handler(self):
-        """Handler injects mode toggle buttons — verify import works."""
-        from betguard.webui.assist_panel_vision_html import render_vision_ui_section
-        html = render_vision_ui_section()
-        assert "switchMode" in html or "vision-section" in html
+    for label in ("上傳圖片", "AI 辨識", "修改文字", "解析／輔助填入"):
+        assert label in html
+    assert 'id="vision-drop-zone"' in html
+    assert 'id="vision-run-btn"' in html
+    assert 'id="vision-transcription-text"' in html
+    assert 'id="vision-use-text-btn"' in html
 
 
-class TestDefaultMode:
-    """Default mode remains text input."""
+def test_transcription_is_large_editable_text_not_a_review_schema() -> None:
+    html = _html()
 
-    def test_vision_section_hidden_by_default(self):
-        from betguard.webui.assist_panel_vision_html import render_vision_ui_section
-        html = render_vision_ui_section()
-        assert 'style="display:none"' in html.replace(" ", "")
-        assert "vision-section" in html
+    assert '<textarea id="vision-transcription-text"' in html
+    assert "min-height:210px" in html
+    assert "直接修改、刪除或補上內容" in html
+    assert "逐筆確認" not in html
+    assert "AI_UNCERTAIN" not in html
+    assert "number_groups" not in html
+    assert "bbox" not in html.lower()
+    assert "field conflict" not in html.lower()
 
-    def test_text_input_still_present(self):
-        from betguard.webui.assist_panel_html import ASSIST_PANEL_HTML
-        assert "batch-text" in ASSIST_PANEL_HTML
-        assert "createBatchBtn" in ASSIST_PANEL_HTML
+
+def test_image_text_uses_the_existing_text_parser_entrypoint() -> None:
+    html = _html()
+
+    assert 'document.getElementById("batch-text").value = text' in html
+    assert 'switchMode("text")' in html
+    assert "createBatch();" in html
+    assert "/assist-panel/create-batch" not in html
+    assert "image-specific parser" in html
+
+
+def test_gemma_transcription_has_no_qwen_or_model_voting_controls() -> None:
+    html = _html()
+
+    assert 'fetch("/api/vision/v1/transcriptions"' in html
+    assert "Qwen" not in html
+    assert "runtime-reader-router" not in html
+    assert "second opinion" not in html.lower()
+    assert "provider_id" not in html
+
+
+def test_failed_ai_never_blocks_manual_text_entry() -> None:
+    html = _html()
+
+    assert "您仍可直接輸入文字" in html
+    assert 'transcription.style.display = "block"' in html
+    assert "quality Gate" not in html
+    assert "visionQualityPassed" not in html
+
+
+def test_upload_accepts_supported_images_drag_drop_and_paste() -> None:
+    html = _html()
+
+    assert 'accept="image/png,image/jpeg,image/webp"' in html
+    assert 'addEventListener("drop"' in html
+    assert 'addEventListener("paste"' in html
+    assert "clipboardData" in html
+
+
+def test_no_automatic_or_real_site_action_is_present() -> None:
+    html = _html()
+
+    assert "auto-submit=false" in html
+    assert "auto-confirm=true" not in html
+    assert "submit(" not in html.lower()
+    assert "candidate-queue" not in html
+    assert "assist-fill/start" not in html
+    assert "http://" not in html
+    assert "https://" not in html
+
+
+def test_original_text_input_remains_the_default_product_entry() -> None:
+    from betguard.webui.assist_panel_html import ASSIST_PANEL_HTML
+
+    assert 'id="batch-text"' in ASSIST_PANEL_HTML
+    assert 'id="createBatchBtn"' in ASSIST_PANEL_HTML
+    assert "function createBatch()" in ASSIST_PANEL_HTML
+    assert 'fetch("/assist-panel/create-batch"' in ASSIST_PANEL_HTML
+    assert 'style="display:none"' in _html().replace(" ", "")

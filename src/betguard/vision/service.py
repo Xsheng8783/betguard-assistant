@@ -9,6 +9,7 @@ from __future__ import annotations
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from typing import Any
 
 from betguard.vision.contracts import (
@@ -240,6 +241,85 @@ def delete_image_api(image_id: str) -> dict[str, Any]:
         return _ok()
     except Exception:
         return _error("IMAGE_STORAGE_FAILED", "圖片刪除失敗", retryable=True)
+
+
+# ── Plain-text image transcription ─────────────────────────────────────────
+
+
+def gemma_evidence_to_betguard_text(evidence: dict[str, Any]) -> str:
+    """Join literal whole-image Gemma records without semantic rewriting."""
+    if evidence.get("status") != "completed":
+        return ""
+    items = evidence.get("items")
+    if not isinstance(items, list):
+        return ""
+    records = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        raw_text = str(item.get("raw_text") or "").strip()
+        if raw_text:
+            records.append(raw_text)
+    return "\n\n".join(records)
+
+
+def transcribe_image_to_text(image_id: str) -> dict[str, Any]:
+    """Use only the existing whole-image Gemma reader as a typing aid.
+
+    The returned text has no value authority.  It becomes actionable only
+    after the user sends the editable text through the existing text parser.
+    """
+    meta = get_metadata(image_id)
+    if meta is None or meta.is_expired():
+        return _error("IMAGE_NOT_FOUND", "圖片不存在或已過期")
+    request = RecognitionRequest(
+        request_id=f"transcription-{image_id}",
+        image_id=image_id,
+        image_path=str(meta.storage_path),
+        mime_type=meta.mime_type,
+        metadata={
+            "sha256": meta.sha256,
+            "width": meta.width,
+            "height": meta.height,
+            "size_bytes": meta.byte_size,
+        },
+    )
+    try:
+        # The old feature flag controlled shadow routing.  This explicit
+        # transcription endpoint is enabled by the user's click whenever the
+        # existing Gemma credential is available.
+        config = replace(get_gemma_shadow_config(), enabled=True)
+        evidence = run_gemma_shadow(request, config=config)
+    except Exception:
+        return _safe_error(
+            "IMAGE_TRANSCRIPTION_FAILED",
+            "AI 圖片辨識目前無法使用，仍可直接輸入文字。",
+        )
+    text = gemma_evidence_to_betguard_text(evidence)
+    if not text:
+        status = str(evidence.get("status") or "failed")
+        return {
+            **_safe_error(
+                "IMAGE_TRANSCRIPTION_EMPTY",
+                "AI 沒有讀到可用文字，請直接輸入或重新辨識。",
+            ),
+            "reader_status": status,
+            "external_call_count": int(evidence.get("external_call_count") or 0),
+            "retry_count": int(evidence.get("retry_count") or 0),
+        }
+    return _ok({
+        "text": text,
+        "reader": GEMMA_SHADOW_PROVIDER_ID,
+        "machine_transcription_only": True,
+        "user_editable": True,
+        "value_authority": "existing_text_parser_after_explicit_user_action",
+        "cache_hit": bool(evidence.get("cache_hit", False)),
+        "external_call_count": int(evidence.get("external_call_count") or 0),
+        "retry_count": int(evidence.get("retry_count") or 0),
+        "auto_apply": False,
+        "auto_confirm": False,
+        "auto_submit": False,
+    })
 
 
 # ── Job execution ────────────────────────────────────────────────────────────

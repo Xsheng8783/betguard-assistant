@@ -1387,6 +1387,9 @@ def build_workbench_handler(
             if path == "/api/vision/v1/jobs":
                 self._handle_vision_job()
                 return
+            if path == "/api/vision/v1/transcriptions":
+                self._handle_vision_transcription()
+                return
             if path == "/api/vision/v1/mvp/sandbox/actions":
                 self._handle_mvp_sandbox_action()
                 return
@@ -2503,7 +2506,7 @@ def build_workbench_handler(
             mode_toggle = """
 <div style="margin-bottom:8px;display:flex;gap:6px">
   <button id="mode-text-btn" style="font-size:13px;padding:4px 10px;min-height:unset;background:#2563eb;color:#fff" onclick="switchMode('text')">文字輸入</button>
-  <button id="mode-vision-btn" style="font-size:13px;padding:4px 10px;min-height:unset;background:#94a3b8;color:#fff" onclick="switchMode('vision')">手寫圖片辨識</button>
+  <button id="mode-vision-btn" style="font-size:13px;padding:4px 10px;min-height:unset;background:#94a3b8;color:#fff" onclick="switchMode('vision')">上傳圖片</button>
 </div>
 """
             html = html.replace('<textarea id="batch-text"', mode_toggle + '<textarea id="batch-text"')
@@ -3355,6 +3358,20 @@ window.assistPanelFill = assistPanelFill;
                 game=game,
                 second_opinion_requested=second_opinion_requested,
             )
+            self._send_json(result, status=200 if result["ok"] else 400)
+
+        def _handle_vision_transcription(self) -> None:
+            data = self._read_json_body()
+            if data is None:
+                self._send_json(
+                    {"ok": False, "error": {"code": "INVALID_JSON", "message": "JSON 格式無效"}},
+                    status=400,
+                )
+                return
+            image_id = str(data.get("image_id") or "")
+            from betguard.vision.service import transcribe_image_to_text
+
+            result = transcribe_image_to_text(image_id)
             self._send_json(result, status=200 if result["ok"] else 400)
 
         @staticmethod

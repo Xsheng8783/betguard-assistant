@@ -41,9 +41,15 @@ ENDPOINT_TEMPLATE = (
 )
 
 RAW_READER_PROMPT = """Directly inspect only the attached original handwritten betting-slip image.
-Faithfully transcribe visible writing from top-left to bottom-right. Preserve line breaks,
-leading zeroes, separators, stacked writing, corrections, cancellation marks, and uncertainty.
-Do not use betting knowledge or likely patterns to invent missing content.
+Faithfully transcribe visible writing from top-left to bottom-right into plain text that can be
+pasted into Betguard's existing text input. Preserve the original record order and line breaks,
+visible x / X / × operators, 01-39 leading zeroes, all multiplier text, decimal 0.5, 尾, 車,
+半車, 各, corrections, and cancellation marks. Do not use betting knowledge or likely patterns
+to invent an unreadable number. Keep an unreadable position visibly uncertain instead of guessing.
+
+Do not decide betting structures, turn rows into inferred columns, or infer relationships from
+spacing. The image feature uses only ``raw_text`` as a typing aid; every other JSON field is
+compatibility metadata and must stay literal or unclear rather than becoming betting authority.
 
 Each item should represent one physical betting record whenever the image clearly supports that
 boundary. Keep that record's number line, multiplier/category line, special-play text, and visible
@@ -51,7 +57,11 @@ continuation together in the same item. Do not split those components into separ
 items without clear visual evidence that they are separate records. A page normally contains
 multiple physical records: return a separate item for each record and never combine unrelated
 records into one item. The keep-together rule applies only inside the same physical record. Do not
-invent multiplication operators from spacing, alignment, or line breaks.
+invent multiplication operators from spacing, alignment, or line breaks. In each ``raw_text``,
+use only the literal Betguard-compatible transcription, with no explanation, JSON-like labels,
+confidence prose, or reconstructed betting schema. Examples of the intended plain-text style are:
+``05 × 08 09 23 × 10 20 29\n2,3 × 2`` and
+``36 38 × 07 17 × 08 18 × 06 13\n2,3,4 × 0.5``.
 
 Return ONLY one JSON object with this exact shape:
 {"version":"gemma-raw-reader-v2","items":[{"raw_text":"visible text","numbers":"literal visible numbers/columns or unclear","multiplier_text":"all literal visible rules or none","layout_guess":"normal|column|unclear","continuation":"yes|no|unclear","special_text":"raw text or none","cancelled":"yes|no|unclear","uncertain":true,"uncertain_reason":"reason or none"}]}

@@ -1,0 +1,208 @@
+"""Image transcription remains a typing aid for the existing text flow."""
+
+from __future__ import annotations
+
+import http.client
+import json
+import threading
+from contextlib import contextmanager
+from pathlib import Path
+from types import SimpleNamespace
+
+from betguard.vision import service
+from betguard.webfill.batch_mock_queue import build_batch_mock_queue
+from betguard.webui import app as webui_app
+
+
+def _metadata(tmp_path: Path) -> SimpleNamespace:
+    return SimpleNamespace(
+        storage_path=tmp_path / "input.png",
+        mime_type="image/png",
+        sha256="a" * 64,
+        width=1200,
+        height=1600,
+        byte_size=42,
+        is_expired=lambda: False,
+    )
+
+
+@contextmanager
+def _running_app():
+    handler = webui_app.build_workbench_handler(
+        project_version="image-text-test", git_commit="test"
+    )
+    server = webui_app.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_address[1]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+
+
+def test_gemma_records_become_plain_text_without_semantic_rewriting() -> None:
+    evidence = {
+        "status": "completed",
+        "items": [
+            {"raw_text": "05 × 08 09 23 × 10 20 29\n2,3 × 2"},
+            {"raw_text": "36 38 × 07 17 × 08 18 × 06 13\n2,3,4 × 0.5 尾"},
+        ],
+    }
+
+    assert service.gemma_evidence_to_betguard_text(evidence) == (
+        "05 × 08 09 23 × 10 20 29\n2,3 × 2\n\n"
+        "36 38 × 07 17 × 08 18 × 06 13\n2,3,4 × 0.5 尾"
+    )
+
+
+def test_explicit_transcription_uses_whole_image_gemma_only(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    captured = {}
+    monkeypatch.setattr(service, "get_metadata", lambda _image_id: _metadata(tmp_path))
+
+    def fake_run(request, *, config):
+        captured["request"] = request
+        captured["config"] = config
+        return {
+            "status": "completed",
+            "items": [{"raw_text": "05.08.09 二三各 0.5"}],
+            "cache_hit": False,
+            "external_call_count": 1,
+            "retry_count": 0,
+        }
+
+    monkeypatch.setattr(service, "run_gemma_shadow", fake_run)
+    result = service.transcribe_image_to_text("image-id")
+
+    assert result["ok"] is True
+    assert result["text"] == "05.08.09 二三各 0.5"
+    assert result["reader"] == "gemma4-26b-shadow"
+    assert result["machine_transcription_only"] is True
+    assert result["user_editable"] is True
+    assert result["value_authority"] == "existing_text_parser_after_explicit_user_action"
+    assert result["external_call_count"] == 1
+    assert result["retry_count"] == 0
+    assert result["auto_apply"] is False
+    assert result["auto_confirm"] is False
+    assert result["auto_submit"] is False
+    assert captured["request"].image_path.endswith("input.png")
+    assert captured["config"].enabled is True
+
+
+def test_empty_prediction_stays_editable_and_never_auto_applies(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(service, "get_metadata", lambda _image_id: _metadata(tmp_path))
+    monkeypatch.setattr(
+        service,
+        "run_gemma_shadow",
+        lambda *_args, **_kwargs: {
+            "status": "failed",
+            "items": [],
+            "external_call_count": 1,
+            "retry_count": 0,
+        },
+    )
+
+    result = service.transcribe_image_to_text("image-id")
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "IMAGE_TRANSCRIPTION_EMPTY"
+    assert result["external_call_count"] == 1
+    assert result["retry_count"] == 0
+    assert result["auto_apply"] is False
+    assert result["auto_confirm"] is False
+    assert result["auto_submit"] is False
+
+
+def test_http_transcription_endpoint_returns_only_editable_text(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service,
+        "transcribe_image_to_text",
+        lambda image_id: {
+            "ok": True,
+            "text": "05.08.09 二三50",
+            "image_id_seen": image_id,
+            "machine_transcription_only": True,
+            "user_editable": True,
+            "auto_submit": False,
+        },
+    )
+
+    with _running_app() as port:
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            connection.request(
+                "POST",
+                "/api/vision/v1/transcriptions",
+                body=json.dumps({"image_id": "image-1"}).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            payload = json.loads(response.read().decode())
+        finally:
+            connection.close()
+
+    assert response.status == 200
+    assert payload == {
+        "ok": True,
+        "text": "05.08.09 二三50",
+        "image_id_seen": "image-1",
+        "machine_transcription_only": True,
+        "user_editable": True,
+        "auto_submit": False,
+    }
+
+
+def test_manually_corrected_image_text_is_accepted_by_existing_parser() -> None:
+    # This represents the user correcting an imperfect AI transcription before
+    # pressing the same createBatch action used by pasted text.
+    corrected_text = "06.13.23.22 二三50"
+    queue = build_batch_mock_queue(corrected_text, game="六合")
+
+    assert queue["preprocessing"]["summary"]["valid_count"] == 1
+    assert queue["preprocessing"]["invalid_fragments"] == []
+    parsed = queue["preprocessing"]["valid_candidates"][0]["result"]
+    assert parsed["numbers"] == [6, 13, 23, 22]
+    assert parsed["stars"] == [2, 3]
+    assert parsed["money"] == 50
+    assert queue["final_decision"]["auto_submit"] is False
+
+
+def test_prompt_examples_are_already_supported_by_the_existing_parser() -> None:
+    examples = (
+        (
+            "05 × 08 09 23 × 10 20 29\n2,3 × 2",
+            [[5], [8, 9, 23], [10, 20, 29]],
+            [2, 3],
+            2,
+        ),
+        (
+            "36 38 × 07 17 × 08 18 × 06 13\n2,3,4 × 0.5",
+            [[36, 38], [7, 17], [8, 18], [6, 13]],
+            [2, 3, 4],
+            0.5,
+        ),
+    )
+
+    for text, columns, stars, unit in examples:
+        queue = build_batch_mock_queue(text, game="六合")
+        assert queue["preprocessing"]["summary"]["valid_count"] == 1
+        assert queue["preprocessing"]["invalid_fragments"] == []
+        parsed = queue["preprocessing"]["valid_candidates"][0]["result"]
+        assert parsed["type"] == "column"
+        assert parsed["columns"] == columns
+        assert parsed["stars"] == stars
+        assert parsed["unit"] == unit
+
+
+def test_prompt_requests_betguard_literals_without_value_authority() -> None:
+    from betguard.vision.gemma_shadow import RAW_READER_PROMPT
+
+    for literal in ("line breaks", "x / X / ×", "01-39", "0.5", "尾", "車", "半車", "各"):
+        assert literal in RAW_READER_PROMPT
+    assert "plain text" in RAW_READER_PROMPT
+    assert "Do not use betting knowledge" in RAW_READER_PROMPT
