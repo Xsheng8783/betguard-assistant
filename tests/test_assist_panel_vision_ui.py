@@ -45,6 +45,28 @@ def test_image_text_uses_the_existing_text_parser_entrypoint() -> None:
     assert "image-specific parser" in html
 
 
+def test_parser_preflight_is_simple_read_only_and_runs_before_handoff() -> None:
+    html = _html()
+
+    assert 'id="vision-preflight-status"' in html
+    assert 'id="vision-preflight-issues"' in html
+    assert "/api/vision/v1/transcriptions/preflight" in html
+    assert "全部文字可解析" in html
+    assert "段文字無法完整解析，請檢查" in html
+    assert "第 " in html and " 行：" in html
+    assert "if (!preflight.all_parseable)" in html
+    assert "transcription.value = submittedText" not in html
+    assert "auto-submit=false" in html
+
+
+def test_cancelled_notice_is_plain_and_keeps_editor_available() -> None:
+    html = _html()
+
+    assert 'id="vision-transcription-notices"' in html
+    assert "renderTranscriptionNotices(data.transcription_notices || [])" in html
+    assert '<textarea id="vision-transcription-text"' in html
+
+
 def test_verified_sample_button_uses_server_parser_and_shows_n_of_ten() -> None:
     html = _html()
 

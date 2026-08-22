@@ -168,6 +168,44 @@ def test_http_transcription_endpoint_returns_only_editable_text(monkeypatch) -> 
     }
 
 
+def test_http_parser_preflight_is_preview_only(monkeypatch) -> None:
+    seen = {}
+
+    def fake_preflight(text):
+        seen["text"] = text
+        return {
+            "ok": True,
+            "all_parseable": False,
+            "unresolved_count": 1,
+            "issues": [{"line_no": 3, "raw": "?尾", "reason": "無法完整解析"}],
+            "preview_only": True,
+            "text_mutated": False,
+            "auto_submit": False,
+        }
+
+    monkeypatch.setattr(service, "preflight_image_text", fake_preflight)
+
+    with _running_app() as port:
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            connection.request(
+                "POST",
+                "/api/vision/v1/transcriptions/preflight",
+                body=json.dumps({"text": "03 × 16 × ?尾"}).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            payload = json.loads(response.read().decode())
+        finally:
+            connection.close()
+
+    assert response.status == 200
+    assert seen["text"] == "03 × 16 × ?尾"
+    assert payload["preview_only"] is True
+    assert payload["text_mutated"] is False
+    assert payload["auto_submit"] is False
+
+
 def test_http_verified_sample_uses_only_image_id_and_human_text(monkeypatch) -> None:
     captured = {}
 

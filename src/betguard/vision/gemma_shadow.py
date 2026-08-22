@@ -28,10 +28,10 @@ from betguard.vision.contracts import RecognitionRequest
 PROVIDER_ID = "gemma4-26b-shadow"
 MODEL_NAME = "gemma-4-26b-a4b-it"
 MODEL_VERSION = MODEL_NAME
-ADAPTER_VERSION = "betguard.gemma-shadow.v2"
+ADAPTER_VERSION = "betguard.gemma-shadow.v3"
 EVIDENCE_SCHEMA_VERSION = "betguard.vision.gemma-shadow-evidence.v2"
 CACHE_SCHEMA_VERSION = "betguard.vision.gemma-shadow-cache.v2"
-REQUEST_SCHEMA_VERSION = "betguard.vision.gemma-raw-reader-request.v3"
+REQUEST_SCHEMA_VERSION = "betguard.vision.gemma-raw-reader-request.v4"
 ENABLED_ENV = "BETGUARD_GEMMA_SHADOW_ENABLED"
 API_KEY_ENV = "GEMINI_API_KEY"
 TIMEOUT_ENV = "BETGUARD_GEMMA_SHADOW_TIMEOUT_SECONDS"
@@ -42,25 +42,51 @@ ENDPOINT_TEMPLATE = (
 
 RAW_READER_PROMPT = """Directly inspect only the attached original handwritten betting-slip image.
 Faithfully transcribe visible writing from top-left to bottom-right into plain text that can be
-pasted into Betguard's existing text input. Preserve the original record order and line breaks,
-visible x / X / × operators, 01-39 leading zeroes, all multiplier text, decimal 0.5, 尾, 車,
-半車, 各, corrections, and cancellation marks. Do not use betting knowledge or likely patterns
-to invent an unreadable number. Keep an unreadable position visibly uncertain instead of guessing.
+pasted into Betguard's existing text input. This is a typing aid, not betting value authority.
 
-Do not decide betting structures, turn rows into inferred columns, or infer relationships from
-spacing. The image feature uses only ``raw_text`` as a typing aid; every other JSON field is
-compatibility metadata and must stay literal or unclear rather than becoming betting authority.
+PHYSICAL RECORD BOUNDARIES ARE HARD TRANSCRIPTION BOUNDARIES. Red horizontal or vertical grid
+lines, boxed cells, and other clear physical separators divide records. Characters on opposite
+sides of a clear separator must never appear in the same item. Return a separate item for every
+clearly separate physical record, in page order. Keep the number line, multiplier/category line,
+special-play text, and continuation that are inside one record together. If a boundary is unclear,
+preserve the visible line break instead of joining text across it. Never merge nearby left/right
+records merely because their writing is close. Each item must contain one physical betting record.
+Do not split those components into independent records, and never combine unrelated records.
+Treat a visible vertical red border as a hard left/right cut even when writing on both sides shares
+the same height. Trace every item only inside its own visible red box; do not append a number row
+from the neighboring box as a continuation line.
 
-Each item should represent one physical betting record whenever the image clearly supports that
-boundary. Keep that record's number line, multiplier/category line, special-play text, and visible
-continuation together in the same item. Do not split those components into separate independent
-items without clear visual evidence that they are separate records. A page normally contains
-multiple physical records: return a separate item for each record and never combine unrelated
-records into one item. The keep-together rule applies only inside the same physical record. Do not
-invent multiplication operators from spacing, alignment, or line breaks. In each ``raw_text``,
-use only the literal Betguard-compatible transcription, with no explanation, JSON-like labels,
-confidence prose, or reconstructed betting schema. Examples of the intended plain-text style are:
-``05 × 08 09 23 × 10 20 29\n2,3 × 2`` and
+Preserve every actually visible x / X / × operator, original line order, 01-39 leading zeroes,
+and multiplier text. DECIMAL DOTS ARE CRITICAL: visible 0.5, x0.5, ×0.5, x 0.5, or × 0.5 must
+retain the decimal dot and must never become 05, x05, or ×05. A decimal multiplier is not a
+lottery number. When the decimal or a number is unreadable, emit ? in that exact position instead
+of guessing a digit. Do not use betting knowledge or likely patterns to fill unreadable marks.
+
+Do not infer final betting semantics. One narrow Betguard-compatible visual formatting operation
+is allowed: when ONE physical record has exactly two clearly aligned number rows and the image
+also clearly shows the ×/column relation between aligned positions, transpose the visible pairs
+into columns. For visible rows ``36 07 08 06`` and ``38 17 18 13``, output
+``36 38 × 07 17 × 08 18 × 06 13``. For visible rows ``12 24 36`` and ``08 14 38``, output
+``12 08 × 24 14 × 36 38``. If either alignment or the operator relation is unclear, preserve the
+two original rows and do not invent × from spacing or line breaks.
+Do not invent multiplication operators outside that clearly visible two-row case.
+After this two-row transposition, raw_text must contain exactly ONE transposed number line, followed
+only by that record's multiplier/category or special-play line when visible. Do not repeat either
+original number row below the transposed line, and do not append any neighboring record's row.
+
+Preserve special-play literals completely, including their adjacent digit or uncertainty marker.
+For visible ``03 × 16 × 7尾``, output exactly ``03 × 16 × 7尾``; never drop 7 and output only 尾.
+If the digit is unreadable, output ``03 × 16 × ?尾``. Apply the same literal rule to 尾, 車,
+半車, and 各.
+
+For a definitely crossed-out/cancelled physical record, set ``cancelled`` to ``yes`` and use ``?``
+as raw_text if no uncancelled literal remains. Never write English explanations such as
+``(crossed out)``, ``(cancelled)``, or ``(cancelled bet)`` in raw_text. For an unclear mark, set
+cancelled and uncertain to ``unclear``/true rather than guessing.
+
+In each ``raw_text``, use only literal Betguard-compatible transcription. Do not add explanations,
+JSON-like labels, confidence prose, or reconstructed betting schemas. Examples of complete record
+text are ``05 × 08 09 23 × 10 20 29\n2,3 × 2`` and
 ``36 38 × 07 17 × 08 18 × 06 13\n2,3,4 × 0.5``.
 
 Return ONLY one JSON object with this exact shape:

@@ -1,11 +1,13 @@
 """Vision API service layer — ties image_intake to providers.
 
 All functions return {"ok": bool, ...} dicts suitable for JSON responses.
-Does NOT import parser, validator, webfill, or Playwright.
+Parser use is limited to an explicit read-only image-text preflight.  This
+module never authorizes candidates, queues, webfill, or Playwright actions.
 """
 
 from __future__ import annotations
 
+import re
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -246,21 +248,119 @@ def delete_image_api(image_id: str) -> dict[str, Any]:
 # ── Plain-text image transcription ─────────────────────────────────────────
 
 
-def gemma_evidence_to_betguard_text(evidence: dict[str, Any]) -> str:
-    """Join literal whole-image Gemma records without semantic rewriting."""
+_CANCELLED_PROSE_RE = re.compile(
+    r"\(\s*(?:crossed[\s-]*out(?:\s+with[^)]*)?|cancelled(?:\s+bet)?|canceled(?:\s+bet)?)\s*\)",
+    re.IGNORECASE,
+)
+_DECIMAL_LITERAL_RE = re.compile(r"0\s*[.．]\s*5")
+_MULTIPLIER_05_AT_END_RE = re.compile(r"(?P<operator>[xX×]\s*)0?5(?P<suffix>\s*(?:支|元)?)$")
+_SPECIAL_LITERAL_RE = re.compile(r"(?P<literal>[0-9?]+(?P<kind>半車|尾|車|各))")
+
+
+def _protect_literal_decimal(raw_text: str, multiplier_text: str) -> tuple[str, bool]:
+    """Restore 0.5 only when the model's literal multiplier field retained it."""
+    if not _DECIMAL_LITERAL_RE.search(multiplier_text):
+        return raw_text, False
+    lines = raw_text.splitlines()
+    changed = False
+    for index, line in enumerate(lines):
+        if not re.search(r"(?:^|[,，、/\s])[234二三四兩](?:\s*星)?", line):
+            continue
+        replaced = _MULTIPLIER_05_AT_END_RE.sub(
+            lambda match: f"{match.group('operator')}0.5{match.group('suffix')}",
+            line,
+        )
+        if replaced != line:
+            lines[index] = replaced
+            changed = True
+    return "\n".join(lines), changed
+
+
+def _restore_literal_special(raw_text: str, special_text: str) -> tuple[str, bool]:
+    """Keep a model-read special digit when raw_text accidentally kept only its kind."""
+    adjusted = raw_text
+    changed = False
+    for match in _SPECIAL_LITERAL_RE.finditer(special_text):
+        literal = match.group("literal")
+        kind = match.group("kind")
+        if literal in adjusted:
+            continue
+        bare_kind = re.compile(rf"(?<![0-9?]){re.escape(kind)}")
+        adjusted, count = bare_kind.subn(literal, adjusted, count=1)
+        changed = changed or count > 0
+    return adjusted, changed
+
+
+def gemma_evidence_to_betguard_text_with_notices(
+    evidence: dict[str, Any],
+) -> tuple[str, list[dict[str, str]]]:
+    """Apply the safe editable-text output contract to whole-image records."""
     if evidence.get("status") != "completed":
-        return ""
+        return "", []
     items = evidence.get("items")
     if not isinstance(items, list):
-        return ""
+        return "", []
     records = []
+    cancelled_count = 0
+    decimal_restored = 0
+    special_restored = 0
     for item in items:
         if not isinstance(item, dict):
             continue
         raw_text = str(item.get("raw_text") or "").strip()
+        has_prohibited_cancelled_prose = bool(_CANCELLED_PROSE_RE.search(raw_text))
+        if item.get("cancelled") == "yes" or has_prohibited_cancelled_prose:
+            cancelled_count += 1
+            continue
+        raw_text, decimal_changed = _protect_literal_decimal(
+            raw_text, str(item.get("multiplier_text") or "")
+        )
+        raw_text, special_changed = _restore_literal_special(
+            raw_text, str(item.get("special_text") or "")
+        )
+        decimal_restored += int(decimal_changed)
+        special_restored += int(special_changed)
         if raw_text:
             records.append(raw_text)
-    return "\n\n".join(records)
+    notices: list[dict[str, str]] = []
+    if cancelled_count:
+        notices.append(
+            {
+                "code": "CANCELLED_RECORD_OMITTED",
+                "message": (
+                    f"辨識到 {cancelled_count} 個可能已劃掉的區塊，未放入投注文字；"
+                    "請對照圖片確認。"
+                ),
+            }
+        )
+    if decimal_restored:
+        notices.append(
+            {
+                "code": "DECIMAL_LITERAL_RESTORED",
+                "message": f"已依可見 multiplier literal 保留 {decimal_restored} 個 0.5。",
+            }
+        )
+    if special_restored:
+        notices.append(
+            {
+                "code": "SPECIAL_LITERAL_RESTORED",
+                "message": f"已保留 {special_restored} 個完整 special literal。",
+            }
+        )
+    return "\n\n".join(records), notices
+
+
+def gemma_evidence_to_betguard_text(evidence: dict[str, Any]) -> str:
+    """Return only editable text for compatibility with existing callers."""
+    text, _notices = gemma_evidence_to_betguard_text_with_notices(evidence)
+    return text
+
+
+def preflight_image_text(text: str) -> dict[str, Any]:
+    """Run the existing parser as a read-only preview for editable image text."""
+    from betguard.vision.image_text_preflight import preview_image_text_with_existing_parser
+
+    return preview_image_text_with_existing_parser(text)
 
 
 def transcribe_image_to_text(image_id: str) -> dict[str, Any]:
@@ -295,7 +395,7 @@ def transcribe_image_to_text(image_id: str) -> dict[str, Any]:
             "IMAGE_TRANSCRIPTION_FAILED",
             "AI 圖片辨識目前無法使用，仍可直接輸入文字。",
         )
-    text = gemma_evidence_to_betguard_text(evidence)
+    text, transcription_notices = gemma_evidence_to_betguard_text_with_notices(evidence)
     if not text:
         status = str(evidence.get("status") or "failed")
         return {
@@ -304,6 +404,7 @@ def transcribe_image_to_text(image_id: str) -> dict[str, Any]:
                 "AI 沒有讀到可用文字，請直接輸入或重新辨識。",
             ),
             "reader_status": status,
+            "transcription_notices": transcription_notices,
             "external_call_count": int(evidence.get("external_call_count") or 0),
             "retry_count": int(evidence.get("retry_count") or 0),
         }
@@ -332,6 +433,8 @@ def transcribe_image_to_text(image_id: str) -> dict[str, Any]:
         capture_available = False
     return _ok({
         "text": text,
+        "transcription_notices": transcription_notices,
+        "parser_preflight": preflight_image_text(text),
         "reader": GEMMA_SHADOW_PROVIDER_ID,
         "machine_transcription_only": True,
         "user_editable": True,

@@ -1393,6 +1393,9 @@ def build_workbench_handler(
             if path == "/api/vision/v1/transcriptions":
                 self._handle_vision_transcription()
                 return
+            if path == "/api/vision/v1/transcriptions/preflight":
+                self._handle_vision_transcription_preflight()
+                return
             if path == "/api/vision/v1/acceptance-dataset/samples":
                 self._handle_image_text_verified_sample()
                 return
@@ -3378,6 +3381,19 @@ window.assistPanelFill = assistPanelFill;
             from betguard.vision.service import transcribe_image_to_text
 
             result = transcribe_image_to_text(image_id)
+            self._send_json(result, status=200 if result["ok"] else 400)
+
+        def _handle_vision_transcription_preflight(self) -> None:
+            data = self._read_json_body()
+            if data is None:
+                self._send_json(
+                    {"ok": False, "error": {"code": "INVALID_JSON", "message": "JSON 格式無效"}},
+                    status=400,
+                )
+                return
+            from betguard.vision.service import preflight_image_text
+
+            result = preflight_image_text(str(data.get("text") or ""))
             self._send_json(result, status=200 if result["ok"] else 400)
 
         def _handle_image_text_acceptance_status(self) -> None:

@@ -30,6 +30,9 @@ def render_vision_ui_section() -> str:
 
   <label for="vision-transcription-text" style="display:block;font-size:15px;font-weight:700;margin-bottom:5px">圖片辨識文字</label>
   <textarea id="vision-transcription-text" placeholder="AI 辨識後會放在這裡；也可以直接手動輸入或修改。" style="min-height:210px"></textarea>
+  <div id="vision-transcription-notices" style="font-size:13px;color:#92400e;margin-top:7px" aria-live="polite"></div>
+  <div id="vision-preflight-status" style="font-size:14px;color:#475569;margin-top:7px" aria-live="polite"></div>
+  <ul id="vision-preflight-issues" style="display:none;margin:5px 0 0 20px;font-size:13px;color:#92400e"></ul>
   <div style="display:flex;gap:7px;flex-wrap:wrap;margin-top:8px">
     <button id="vision-use-text-btn" class="btn-primary" type="button">解析／輔助填入</button>
     <button id="vision-save-verified-btn" type="button" disabled style="background:#0f766e;color:#fff">保存為正確範例</button>
@@ -51,7 +54,13 @@ def render_vision_ui_section() -> str:
   var status = document.getElementById("vision-status");
   var saveVerifiedButton = document.getElementById("vision-save-verified-btn");
   var datasetStatus = document.getElementById("vision-acceptance-dataset-status");
+  var transcriptionNotices = document.getElementById("vision-transcription-notices");
+  var preflightStatus = document.getElementById("vision-preflight-status");
+  var preflightIssues = document.getElementById("vision-preflight-issues");
+  var useTextButton = document.getElementById("vision-use-text-btn");
   var transcriptionCaptureAvailable = false;
+  var preflightTimer = null;
+  var preflightSequence = 0;
 
   function setVisionStatus(message, isError) {
     status.textContent = message || "";
@@ -87,12 +96,80 @@ def render_vision_ui_section() -> str:
     return details.length ? " " + details.join(" / ") : "";
   }
 
+  function renderTranscriptionNotices(notices) {
+    var messages = (notices || []).map(function(item) {
+      return String(item.message || "");
+    }).filter(Boolean);
+    transcriptionNotices.textContent = messages.join(" ");
+  }
+
+  function renderPreflight(data) {
+    preflightIssues.replaceChildren();
+    preflightIssues.style.display = "none";
+    if (!data || !transcription.value.trim()) {
+      preflightStatus.textContent = "";
+      return;
+    }
+    if (data.all_parseable) {
+      preflightStatus.textContent = "全部文字可解析";
+      preflightStatus.style.color = "#166534";
+      return;
+    }
+    var count = Number(data.unresolved_count || 0);
+    preflightStatus.textContent = "目前有 " + count + " 段文字無法完整解析，請檢查。";
+    preflightStatus.style.color = "#b45309";
+    (data.issues || []).forEach(function(issue) {
+      var item = document.createElement("li");
+      var line = Number(issue.line_no || 0);
+      item.textContent = (line ? "第 " + line + " 行：" : "位置：") +
+        String(issue.raw || "") + " — " + String(issue.reason || "無法完整解析");
+      preflightIssues.appendChild(item);
+    });
+    if (preflightIssues.children.length) preflightIssues.style.display = "block";
+  }
+
+  function requestParserPreflight(text, showTransportError) {
+    var submittedText = String(text || "");
+    var sequence = ++preflightSequence;
+    return fetch("/api/vision/v1/transcriptions/preflight", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({text: submittedText})
+    }).then(function(response) { return response.json(); })
+    .then(function(data) {
+      if (!data.ok) throw new Error("parser preview failed");
+      if (sequence === preflightSequence && transcription.value === submittedText) {
+        renderPreflight(data);
+      }
+      return data;
+    }).catch(function() {
+      if (showTransportError) setVisionStatus("目前無法執行 parser 預檢，請稍後再試。", true);
+      return null;
+    });
+  }
+
+  function scheduleParserPreflight() {
+    if (preflightTimer) clearTimeout(preflightTimer);
+    if (!transcription.value.trim()) {
+      preflightSequence += 1;
+      renderPreflight(null);
+      return;
+    }
+    preflightStatus.textContent = "正在檢查文字…";
+    preflightStatus.style.color = "#475569";
+    preflightTimer = setTimeout(function() {
+      requestParserPreflight(transcription.value, false);
+    }, 350);
+  }
+
   function uploadImage(file) {
     if (!file) return;
     setVisionStatus("圖片上傳中…", false);
     runButton.style.display = "none";
     transcriptionCaptureAvailable = false;
     saveVerifiedButton.disabled = true;
+    renderTranscriptionNotices([]);
+    renderPreflight(null);
     var reader = new FileReader();
     reader.onload = function() {
       fetch("/api/vision/v1/images", {
@@ -163,6 +240,8 @@ def render_vision_ui_section() -> str:
       runButton.textContent = "重新辨識";
       if (!data.ok) throw new Error((data.error && data.error.message) || "AI 辨識失敗");
       transcription.value = String(data.text || "");
+      renderTranscriptionNotices(data.transcription_notices || []);
+      renderPreflight(data.parser_preflight || null);
       transcriptionCaptureAvailable = data.verified_sample_capture_available === true;
       saveVerifiedButton.disabled = !transcriptionCaptureAvailable;
       transcription.focus();
@@ -176,12 +255,16 @@ def render_vision_ui_section() -> str:
       runButton.disabled = false;
       runButton.textContent = "重新辨識";
       transcription.style.display = "block";
+      renderTranscriptionNotices([]);
+      renderPreflight(null);
       setVisionStatus((error.message || "AI 辨識失敗") + " 您仍可直接輸入文字。", true);
     });
   });
 
   document.getElementById("vision-clear-text-btn").addEventListener("click", function() {
     transcription.value = "";
+    renderTranscriptionNotices([]);
+    renderPreflight(null);
     transcription.focus();
     setVisionStatus("文字已清空。", false);
   });
@@ -224,17 +307,30 @@ def render_vision_ui_section() -> str:
     });
   });
 
-  document.getElementById("vision-use-text-btn").addEventListener("click", function() {
-    var text = transcription.value.trim();
-    if (!text) {
+  transcription.addEventListener("input", scheduleParserPreflight);
+
+  useTextButton.addEventListener("click", function() {
+    var text = transcription.value;
+    if (!text.trim()) {
       setVisionStatus("請先輸入或辨識牌單文字。", true);
       return;
     }
-    // This is the only handoff: image text enters the exact same textarea and
-    // createBatch() function used by pasted text.  No image-specific parser.
-    document.getElementById("batch-text").value = text;
-    switchMode("text");
-    createBatch();
+    useTextButton.disabled = true;
+    requestParserPreflight(text, true).then(function(preflight) {
+      useTextButton.disabled = false;
+      if (!preflight) return;
+      if (!preflight.all_parseable) {
+        setVisionStatus("請直接修改無法解析的文字後再試。", true);
+        transcription.focus();
+        return;
+      }
+      // This is the only handoff: fully parseable image text enters the exact
+      // same textarea and createBatch() function used by pasted text.  No
+      // image-specific parser or queue path is introduced.
+      document.getElementById("batch-text").value = text;
+      switchMode("text");
+      createBatch();
+    });
   });
 
   refreshDatasetStatus();
