@@ -658,6 +658,16 @@ class TestNeedsReviewManualHandling:
         # Should be called in toggleCardState, setCardState, and init
         assert html.count("updateReviewCounts()") >= 3
 
+    def test_handled_review_cards_are_excluded_from_remaining_count(self) -> None:
+        """Done/manual states change the actual remaining counter, not only styling."""
+        html = self._html(f"06.13.23.22 {self.TWO_THREE}100\n17.29.1000")
+
+        assert "needs-remaining" in html
+        assert "if (s === 'done' || s === 'manual') processed++;" in html
+        assert "else remaining++;" in html
+        assert "totalEl.textContent = remaining" in html
+        assert "unprocEl.textContent = remaining" in html
+
     def test_localStorage_key_has_batch_id(self) -> None:
         """localStorage key includes batch identifier from URL."""
         html = self._html(f"06.13.23.22 {self.TWO_THREE}100\n17.29.1000")

@@ -32,7 +32,7 @@ def render_vision_ui_section() -> str:
   <textarea id="vision-transcription-text" placeholder="AI 辨識後會放在這裡；也可以直接手動輸入或修改。" style="min-height:210px"></textarea>
   <div id="vision-transcription-notices" style="font-size:13px;color:#92400e;margin-top:7px" aria-live="polite"></div>
   <div id="vision-preflight-status" style="font-size:14px;color:#475569;margin-top:7px" aria-live="polite"></div>
-  <ul id="vision-preflight-issues" style="display:none;margin:5px 0 0 20px;font-size:13px;color:#92400e"></ul>
+  <ul id="vision-preflight-issues" style="display:none;margin:5px 0 0 20px;font-size:13px;color:#92400e;white-space:pre-line"></ul>
   <div style="display:flex;gap:7px;flex-wrap:wrap;margin-top:8px">
     <button id="vision-use-text-btn" class="btn-primary" type="button">解析／輔助填入</button>
     <button id="vision-save-verified-btn" type="button" disabled style="background:#0f766e;color:#fff">保存為正確範例</button>
@@ -116,13 +116,13 @@ def render_vision_ui_section() -> str:
       return;
     }
     var count = Number(data.unresolved_count || 0);
-    preflightStatus.textContent = "目前有 " + count + " 段文字無法完整解析，請檢查。";
+    preflightStatus.textContent = "目前有 " + count + " 段文字無法完整解析，請直接修改後再試。";
     preflightStatus.style.color = "#b45309";
     (data.issues || []).forEach(function(issue) {
       var item = document.createElement("li");
       var line = Number(issue.line_no || 0);
-      item.textContent = (line ? "第 " + line + " 行：" : "位置：") +
-        String(issue.raw || "") + " — " + String(issue.reason || "無法完整解析");
+      item.textContent = (line ? "第 " + line + " 行" : "位置") + "\n" +
+        String(issue.raw || "") + "\n" + String(issue.reason || "無法完整解析");
       preflightIssues.appendChild(item);
     });
     if (preflightIssues.children.length) preflightIssues.style.display = "block";
@@ -134,7 +134,10 @@ def render_vision_ui_section() -> str:
     return fetch("/api/vision/v1/transcriptions/preflight", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({text: submittedText})
+      body: JSON.stringify({
+        text: submittedText,
+        source: IMAGE_TRANSCRIPTION_TEXT_SOURCE
+      })
     }).then(function(response) { return response.json(); })
     .then(function(data) {
       if (!data.ok) throw new Error("parser preview failed");
@@ -319,8 +322,13 @@ def render_vision_ui_section() -> str:
     requestParserPreflight(text, true).then(function(preflight) {
       useTextButton.disabled = false;
       if (!preflight) return;
-      if (!preflight.all_parseable) {
+      if (Number(preflight.unresolved_count || 0) > 0 || preflight.all_parseable !== true) {
         setVisionStatus("請直接修改無法解析的文字後再試。", true);
+        transcription.focus();
+        return;
+      }
+      if (transcription.value !== text) {
+        setVisionStatus("文字已變更，請再按一次以重新檢查。", true);
         transcription.focus();
         return;
       }
@@ -329,7 +337,7 @@ def render_vision_ui_section() -> str:
       // image-specific parser or queue path is introduced.
       document.getElementById("batch-text").value = text;
       switchMode("text");
-      createBatch();
+      createBatch(IMAGE_TRANSCRIPTION_TEXT_SOURCE);
     });
   });
 

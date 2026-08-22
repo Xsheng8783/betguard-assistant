@@ -40,9 +40,20 @@ def test_image_text_uses_the_existing_text_parser_entrypoint() -> None:
 
     assert 'document.getElementById("batch-text").value = text' in html
     assert 'switchMode("text")' in html
-    assert "createBatch();" in html
+    assert "createBatch(IMAGE_TRANSCRIPTION_TEXT_SOURCE);" in html
     assert "/assist-panel/create-batch" not in html
     assert "image-specific parser" in html
+
+
+def test_image_handoff_has_explicit_source_and_requires_whole_text_success() -> None:
+    html = _html()
+
+    assert "source: IMAGE_TRANSCRIPTION_TEXT_SOURCE" in html
+    assert "Number(preflight.unresolved_count || 0) > 0" in html
+    assert "preflight.all_parseable !== true" in html
+    assert "transcription.value !== text" in html
+    assert "createBatch(IMAGE_TRANSCRIPTION_TEXT_SOURCE);" in html
+    assert "partial" not in html.lower()
 
 
 def test_parser_preflight_is_simple_read_only_and_runs_before_handoff() -> None:
@@ -52,9 +63,9 @@ def test_parser_preflight_is_simple_read_only_and_runs_before_handoff() -> None:
     assert 'id="vision-preflight-issues"' in html
     assert "/api/vision/v1/transcriptions/preflight" in html
     assert "全部文字可解析" in html
-    assert "段文字無法完整解析，請檢查" in html
-    assert "第 " in html and " 行：" in html
-    assert "if (!preflight.all_parseable)" in html
+    assert "段文字無法完整解析，請直接修改後再試" in html
+    assert "第 " in html and " 行" in html
+    assert "preflight.all_parseable !== true" in html
     assert "transcription.value = submittedText" not in html
     assert "auto-submit=false" in html
 
@@ -125,4 +136,6 @@ def test_original_text_input_remains_the_default_product_entry() -> None:
     assert 'id="createBatchBtn"' in ASSIST_PANEL_HTML
     assert "function createBatch()" in ASSIST_PANEL_HTML
     assert 'fetch("/assist-panel/create-batch"' in ASSIST_PANEL_HTML
+    assert 'var TEXT_INPUT_SOURCE = "TEXT_INPUT"' in ASSIST_PANEL_HTML
+    assert "source: inputSource || TEXT_INPUT_SOURCE" in ASSIST_PANEL_HTML
     assert 'style="display:none"' in _html().replace(" ", "")

@@ -60,6 +60,8 @@ button{font-size:15px;padding:8px 16px;border-radius:6px;border:none;cursor:poin
 <script>
 "use strict";
 var panelState = { queuePath: "", validCandidates: [], reviewCandidates: [] };
+var TEXT_INPUT_SOURCE = "TEXT_INPUT";
+var IMAGE_TRANSCRIPTION_TEXT_SOURCE = "IMAGE_TRANSCRIPTION_TEXT";
 
 function setStatus(msg) {
   var el = document.getElementById("status-msg");
@@ -71,10 +73,13 @@ function createBatch() {
   var ta = document.getElementById("batch-text");
   var btn = document.getElementById("createBatchBtn");
   var text = ta.value.trim();
+  var requestedSource = arguments.length ? arguments[0] : TEXT_INPUT_SOURCE;
+  var inputSource = requestedSource === IMAGE_TRANSCRIPTION_TEXT_SOURCE
+    ? IMAGE_TRANSCRIPTION_TEXT_SOURCE : TEXT_INPUT_SOURCE;
 
   if (text) {
     // Textarea has content — use it directly
-    _doCreateBatch(text, ta, btn);
+    _doCreateBatch(text, ta, btn, inputSource);
   } else {
     // Try clipboard
     if (!navigator.clipboard || !navigator.clipboard.readText) {
@@ -93,7 +98,7 @@ function createBatch() {
         return;
       }
       ta.value = trimmed;
-      _doCreateBatch(trimmed, ta, btn);
+      _doCreateBatch(trimmed, ta, btn, inputSource);
     }).catch(function () {
       btn.disabled = false;
       btn.textContent = "貼上並建立審核";
@@ -102,14 +107,14 @@ function createBatch() {
   }
 }
 
-function _doCreateBatch(text, ta, btn) {
+function _doCreateBatch(text, ta, btn, inputSource) {
   btn.disabled = true;
   btn.textContent = "建立中…";
   setStatus("建立審核中...");
   fetch("/assist-panel/create-batch", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text: text })
+    body: JSON.stringify({ text: text, source: inputSource || TEXT_INPUT_SOURCE })
   }).then(function (r) { return r.text(); }).then(function (raw) {
     btn.disabled = false;
     btn.textContent = "貼上並建立審核";
@@ -175,7 +180,7 @@ function renderReview(items) {
   items.forEach(function (item, i) {
     var raw = item.raw || item.original_text || item.fragment || "";
     var reason = item.reason || item.error || item.status || "";
-    var cid = item.manual_candidate_id || ("rev" + i);
+    var cid = reviewCandidateId(item, i);
     html += '<div class="item" id="review-item-' + cid + '">'
       + '<div style="font-size:17px;word-break:break-all">' + escapeHtml(raw) + '</div>';
     if (reason) html += '<div style="font-size:13px;color:#b91c1c">' + escapeHtml(reason) + '</div>';
@@ -190,6 +195,20 @@ function renderReview(items) {
       + '</div>';
   });
   container.innerHTML = html;
+}
+
+function reviewCandidateId(item, index) {
+  if (!item._review_ui_id) {
+    item._review_ui_id = item.manual_candidate_id || ("rev" + index);
+  }
+  return item._review_ui_id;
+}
+
+function removeReviewCandidateFromState(cid) {
+  panelState.reviewCandidates = (panelState.reviewCandidates || []).filter(function(item, index) {
+    var itemId = reviewCandidateId(item, index);
+    return String(itemId) !== String(cid);
+  });
 }
 
 function escapeHtml(s) {
@@ -228,13 +247,9 @@ function markHandled(btn) {
   var cid = btn.getAttribute("data-id");
   var row = document.getElementById("review-item-" + cid);
   if (!row) return;
+  removeReviewCandidateFromState(cid);
   row.remove();
-  var cnt = document.getElementById("review-count");
-  var n = Math.max(0, parseInt(cnt.textContent) - 1);
-  cnt.textContent = n;
-  if (n === 0) {
-    document.getElementById("review-items").innerHTML = '<div class="muted">目前沒有需要人工確認的項目</div>';
-  }
+  updateReviewCount();
 }
 
 function editReviewItem(btn) {
@@ -264,6 +279,7 @@ function submitEdit(cid) {
       // Remove old review card
       var row = document.getElementById("review-item-" + cid);
       if (row) row.remove();
+      removeReviewCandidateFromState(cid);
       // Build valid candidate from reparse result
       var newCand = {
         numbers: data.numbers || [],
@@ -294,7 +310,7 @@ function cancelEdit(cid, originalRaw) {
   if (panelState.reviewCandidates) {
     for (var i = 0; i < panelState.reviewCandidates.length; i++) {
       var item = panelState.reviewCandidates[i];
-      var icid = item.manual_candidate_id || ("rev" + i);
+      var icid = reviewCandidateId(item, i);
       if (icid === cid) { found = item; break; }
     }
   }
@@ -328,13 +344,9 @@ function markManualDone(btn) {
     body: JSON.stringify({ manual_candidate_id: cid })
   }).then(function (r) { return r.json(); }).then(function (data) {
     if (data.ok) {
+      removeReviewCandidateFromState(cid);
       row.remove();
-      var cnt = document.getElementById("review-count");
-      var n = Math.max(0, parseInt(cnt.textContent) - 1);
-      cnt.textContent = n;
-      if (n === 0) {
-        document.getElementById("review-items").innerHTML = '<div class="muted">目前沒有需要人工確認的項目</div>';
-      }
+      updateReviewCount();
     } else {
       btn.disabled = false;
       setStatus(data.error || "操作失敗");

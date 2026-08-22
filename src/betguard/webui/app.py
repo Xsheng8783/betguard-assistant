@@ -3059,6 +3059,40 @@ window.assistPanelFill = assistPanelFill;
             if not text:
                 self._send_json({"ok": False, "error": "empty text"})
                 return
+            source = str(data.get("source") or "TEXT_INPUT").strip().upper()
+            if source not in {"TEXT_INPUT", "IMAGE_TRANSCRIPTION_TEXT"}:
+                self._send_json(
+                    {"ok": False, "error": "unsupported input source"},
+                    status=400,
+                )
+                return
+
+            # IMAGE_TRANSCRIPTION_TEXT must remain in its editable-text loop
+            # until the existing parser accepts the entire input.  This guard
+            # runs before queue construction/writes so stale or bypassed UI
+            # state cannot create legacy manual-review cards or partial fill.
+            if source == "IMAGE_TRANSCRIPTION_TEXT":
+                from betguard.vision.service import preflight_image_text
+
+                parser_preflight = preflight_image_text(text)
+                if (
+                    parser_preflight.get("all_parseable") is not True
+                    or int(parser_preflight.get("unresolved_count") or 0) > 0
+                ):
+                    self._send_json(
+                        {
+                            "ok": False,
+                            "error": "圖片辨識文字仍有無法解析的段落，請直接修改後再試。",
+                            "error_code": "IMAGE_TEXT_UNRESOLVED",
+                            "source": source,
+                            "parser_preflight": parser_preflight,
+                            "legacy_review_cards_created": False,
+                            "partial_fill": False,
+                            "auto_submit": False,
+                        },
+                        status=409,
+                    )
+                    return
 
             try:
                 from betguard.webfill.batch_mock_queue import build_batch_mock_queue
@@ -3108,6 +3142,7 @@ window.assistPanelFill = assistPanelFill;
                 "ok": True,
                 "batch_id": batch_id,
                 "queue_path": queue_path,
+                "source": source,
                 "valid_candidates": vc_out,
                 "invalid_fragments": iv_out,
             })
@@ -3391,9 +3426,23 @@ window.assistPanelFill = assistPanelFill;
                     status=400,
                 )
                 return
+            source = str(data.get("source") or "").strip().upper()
+            if source != "IMAGE_TRANSCRIPTION_TEXT":
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "INVALID_INPUT_SOURCE",
+                            "message": "圖片文字預檢需要明確的圖片轉錄來源。",
+                        },
+                    },
+                    status=400,
+                )
+                return
             from betguard.vision.service import preflight_image_text
 
-            result = preflight_image_text(str(data.get("text") or ""))
+            result = dict(preflight_image_text(str(data.get("text") or "")))
+            result["source"] = source
             self._send_json(result, status=200 if result["ok"] else 400)
 
         def _handle_image_text_acceptance_status(self) -> None:

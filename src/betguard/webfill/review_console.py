@@ -601,7 +601,7 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
         <span class="stat-chip">📊 共 <strong>{comfort["total_count"]}</strong> 筆</span>
         <span class="stat-chip green">✅ 可填入 <strong>{comfort["assistable_count"]}</strong></span>
         <span class="stat-chip blue">📝 未處理 <strong>{comfort["unprocessed_count"]}</strong></span>
-        <span class="stat-chip red needs-total">⚠️ 需確認 <strong>{comfort["needs_review_count"]}</strong></span>
+        <span class="stat-chip red needs-total needs-remaining">⚠️ 待確認 <strong>{comfort["needs_review_count"]}</strong></span>
         <span class="stat-chip amber">👀 Watchlist <strong>{comfort["watchlist_count"]}</strong></span>
         <span class="stat-chip">❌ Invalid <strong>{comfort["invalid_count"]}</strong></span>
         <span class="stat-chip needs-unprocessed" style="font-size:11px"><strong>0</strong> 筆待手動處理</span>
@@ -729,18 +729,19 @@ def render_review_console_html(queue: dict[str, Any], *, queue_path: str | None 
     }}
   }}
   function updateReviewCounts() {{
-    var total = 0, unprocessed = 0, processed = 0;
+    var remaining = 0, processed = 0;
     document.querySelectorAll('.review-card[data-batch-id]').forEach(function (c) {{
       var s = getCardState(c.getAttribute('data-batch-id'));
-      total++;
       if (s === 'done' || s === 'manual') processed++;
-      else unprocessed++;
+      else remaining++;
     }});
     var totalEl = document.querySelector('.stat-chip.needs-total strong');
+    var remainingEl = document.querySelector('.stat-chip.needs-remaining strong');
     var unprocEl = document.querySelector('.stat-chip.needs-unprocessed strong');
     var procEl = document.querySelector('.stat-chip.needs-processed strong');
-    if (totalEl) totalEl.textContent = total;
-    if (unprocEl) unprocEl.textContent = unprocessed;
+    if (totalEl) totalEl.textContent = remaining;
+    if (remainingEl) remainingEl.textContent = remaining;
+    if (unprocEl) unprocEl.textContent = remaining;
     if (procEl) procEl.textContent = processed;
   }}
   (function() {{

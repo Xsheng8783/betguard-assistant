@@ -459,7 +459,8 @@ def test_ui_uses_gemma_only_as_editable_plain_text_transcription() -> None:
     assert 'id="vision-transcription-text"' in source
     assert 'fetch("/api/vision/v1/transcriptions"' in source
     assert 'document.getElementById("batch-text").value = text' in source
-    assert "createBatch();" in source
+    assert "createBatch(IMAGE_TRANSCRIPTION_TEXT_SOURCE);" in source
+    assert "source: IMAGE_TRANSCRIPTION_TEXT_SOURCE" in source
     assert "run_gemma_shadow(request, config=config)" in service_source
     assert "machine_transcription_only" in service_source
     assert "existing_text_parser_after_explicit_user_action" in service_source

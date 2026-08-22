@@ -191,7 +191,12 @@ def test_http_parser_preflight_is_preview_only(monkeypatch) -> None:
             connection.request(
                 "POST",
                 "/api/vision/v1/transcriptions/preflight",
-                body=json.dumps({"text": "03 × 16 × ?尾"}).encode(),
+                body=json.dumps(
+                    {
+                        "text": "03 × 16 × ?尾",
+                        "source": "IMAGE_TRANSCRIPTION_TEXT",
+                    }
+                ).encode(),
                 headers={"Content-Type": "application/json"},
             )
             response = connection.getresponse()
@@ -204,6 +209,122 @@ def test_http_parser_preflight_is_preview_only(monkeypatch) -> None:
     assert payload["preview_only"] is True
     assert payload["text_mutated"] is False
     assert payload["auto_submit"] is False
+    assert payload["source"] == "IMAGE_TRANSCRIPTION_TEXT"
+
+
+def test_image_unresolved_never_builds_queue_or_legacy_cards(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from betguard.webfill import batch_mock_queue
+
+    monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+    monkeypatch.setattr(
+        service,
+        "preflight_image_text",
+        lambda _text: {
+            "ok": True,
+            "all_parseable": False,
+            "unresolved_count": 21,
+            "issues": [
+                {
+                    "line_no": 4,
+                    "raw": "2,3×4×05",
+                    "reason": "倍率格式無法完整解析",
+                }
+            ],
+            "preview_only": True,
+            "text_mutated": False,
+            "auto_submit": False,
+        },
+    )
+
+    def must_not_build_queue(*_args, **_kwargs):
+        raise AssertionError("image unresolved must stop before queue construction")
+
+    monkeypatch.setattr(batch_mock_queue, "build_batch_mock_queue", must_not_build_queue)
+
+    with _running_app() as port:
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            connection.request(
+                "POST",
+                "/assist-panel/create-batch",
+                body=json.dumps(
+                    {
+                        "text": "06.13.23.22 二三50\n2,3×4×05",
+                        "source": "IMAGE_TRANSCRIPTION_TEXT",
+                    }
+                ).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            payload = json.loads(response.read().decode())
+        finally:
+            connection.close()
+
+    assert response.status == 409
+    assert payload["error_code"] == "IMAGE_TEXT_UNRESOLVED"
+    assert payload["parser_preflight"]["unresolved_count"] == 21
+    assert payload["legacy_review_cards_created"] is False
+    assert payload["partial_fill"] is False
+    assert payload["auto_submit"] is False
+    assert list(tmp_path.rglob("*.json")) == []
+
+
+def test_valid_image_text_hands_off_to_existing_batch_without_review_cards(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+    text = "36 38 × 07 17 × 08 18 × 06 13\n2,3,4 × 0.5"
+
+    with _running_app() as port:
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            connection.request(
+                "POST",
+                "/assist-panel/create-batch",
+                body=json.dumps(
+                    {"text": text, "source": "IMAGE_TRANSCRIPTION_TEXT"}
+                ).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            payload = json.loads(response.read().decode())
+        finally:
+            connection.close()
+
+    assert response.status == 200
+    assert payload["ok"] is True
+    assert payload["source"] == "IMAGE_TRANSCRIPTION_TEXT"
+    assert len(payload["valid_candidates"]) == 1
+    assert payload["invalid_fragments"] == []
+
+
+def test_pasted_text_keeps_legacy_mixed_review_behavior(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(webui_app, "RUNS_DIR", tmp_path)
+    text = "06.13.23.22 二三50\n99.98.97 234.100"
+
+    with _running_app() as port:
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            connection.request(
+                "POST",
+                "/assist-panel/create-batch",
+                body=json.dumps({"text": text, "source": "TEXT_INPUT"}).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            payload = json.loads(response.read().decode())
+        finally:
+            connection.close()
+
+    assert response.status == 200
+    assert payload["ok"] is True
+    assert payload["source"] == "TEXT_INPUT"
+    assert len(payload["valid_candidates"]) == 1
+    assert len(payload["invalid_fragments"]) == 1
 
 
 def test_http_verified_sample_uses_only_image_id_and_human_text(monkeypatch) -> None:
