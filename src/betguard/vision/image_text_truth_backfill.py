@@ -29,6 +29,7 @@ _RULE_RE = re.compile(
     r"(?P<value>\d+(?:\.\d+)?)"
 )
 _TAIL_RE = re.compile(r"^(?P<digit>\d)尾$")
+_EACH_CAR_RE = re.compile(r"各\s*(?P<value>\d+(?:\.\d+)?)\s*車")
 _CATEGORY_DIGITS = {"二": "2", "三": "3", "四": "4"}
 _HUMAN_LINE_ACTIONS = {"confirmed", "corrected", "added"}
 
@@ -273,6 +274,13 @@ def _decimal_text(value: Any) -> str:
     return text.rstrip("0").rstrip(".") if "." in text else text
 
 
+def _decimal_equal(value: Any, expected: str) -> bool:
+    try:
+        return _decimal_text(value) == expected
+    except ValueError:
+        return False
+
+
 def _categories(value: Any) -> list[int]:
     text = "".join(_CATEGORY_DIGITS.get(char, char) for char in str(value or ""))
     result = [int(char) for char in text if char in "234"]
@@ -350,6 +358,49 @@ def _cancelled_records(truth: dict[str, Any]) -> list[dict[str, Any]]:
     return [record for record in truth.get("cancelled_bets", []) if isinstance(record, dict)]
 
 
+def _render_each_car(
+    line: dict[str, Any], groups: list[list[str]]
+) -> tuple[str, list[dict[str, Any]]]:
+    if len(groups) != 1:
+        raise ValueError("CAR_PLAY_REQUIRES_ONE_NUMBER_GROUP")
+    play_text = str(line.get("play_text") or line.get("special_play") or "").strip()
+    compact = re.sub(r"\s+", "", play_text)
+    if "各半車" in compact:
+        unit = "0.5"
+    else:
+        match = _EACH_CAR_RE.search(play_text)
+        if not match:
+            raise ValueError("CAR_PLAY_STRUCTURE_NOT_LOSSLESS_IN_EXISTING_PARSER")
+        unit = _decimal_text(match.group("value"))
+    if Decimal(unit) <= 0:
+        raise ValueError("CAR_PLAY_AMOUNT_MUST_BE_POSITIVE")
+
+    numbers = groups[0]
+    rendered = f"{' '.join(numbers)} 各 {unit}車"
+    expected = []
+    for number in numbers:
+        expected.append(
+            {
+                "source_line_id": line.get("line_id"),
+                "type": "car",
+                "number_groups": [[int(number)]],
+                "parser_number_groups": [[int(number)]],
+                "car_number": int(number),
+                "car_units": unit,
+                "multiplier_rules": [],
+                "multiplier_rule_map": {},
+                "special_play": {
+                    "kind": "each_car",
+                    "raw_text": play_text,
+                    "rendered_text": f"各 {unit}車",
+                },
+                "continuation": False,
+                "cancelled": False,
+            }
+        )
+    return rendered, expected
+
+
 def render_structured_human_truth(truth: dict[str, Any]) -> dict[str, Any]:
     """Render structured truth into existing-parser text without using a model."""
     if truth.get("review_status") != "reviewed" or not _all_lines_human_confirmed(truth):
@@ -360,6 +411,7 @@ def render_structured_human_truth(truth: dict[str, Any]) -> dict[str, Any]:
 
     text_lines: list[str] = []
     expected_bets: list[dict[str, Any]] = []
+    physical_active_count = 0
     for line in truth.get("lines", []):
         if not isinstance(line, dict) or line.get("cancelled") is True:
             continue
@@ -372,7 +424,11 @@ def render_structured_human_truth(truth: dict[str, Any]) -> dict[str, Any]:
             if not groups:
                 raise ValueError("EMPTY_NUMBER_GROUPS")
             if line.get("play_type") == "car_bet":
-                raise ValueError("CAR_PLAY_STRUCTURE_NOT_LOSSLESS_IN_EXISTING_PARSER")
+                rendered_car, expected_car = _render_each_car(line, groups)
+                text_lines.append(rendered_car)
+                expected_bets.extend(expected_car)
+                physical_active_count += 1
+                continue
             rules = _rules(line)
             _canonical_rule_map(rules)
             layout = str(line.get("layout_hint") or "")
@@ -417,6 +473,7 @@ def render_structured_human_truth(truth: dict[str, Any]) -> dict[str, Any]:
                     "cancelled": False,
                 }
             )
+            physical_active_count += 1
         except ValueError as exc:
             return {
                 "ok": False,
@@ -425,7 +482,7 @@ def render_structured_human_truth(truth: dict[str, Any]) -> dict[str, Any]:
             }
 
     cancelled = _cancelled_records(truth)
-    physical_count = len(expected_bets) + len(cancelled)
+    physical_count = physical_active_count + len(cancelled)
     declared = truth.get("truth_counts") if isinstance(truth.get("truth_counts"), dict) else {}
     if declared:
         declared_tuple = (
@@ -433,7 +490,7 @@ def render_structured_human_truth(truth: dict[str, Any]) -> dict[str, Any]:
             int(declared.get("active_bets") or 0),
             int(declared.get("cancelled_bets") or 0),
         )
-        actual_tuple = (physical_count, len(expected_bets), len(cancelled))
+        actual_tuple = (physical_count, physical_active_count, len(cancelled))
         if declared_tuple != actual_tuple:
             return {
                 "ok": False,
@@ -449,6 +506,7 @@ def render_structured_human_truth(truth: dict[str, Any]) -> dict[str, Any]:
             "schema_version": "betguard-migrated-human-truth-semantics-v1",
             "sample_id": truth.get("sample_id"),
             "physical_record_count": physical_count,
+            "physical_active_record_count": physical_active_count,
             "active_bet_count": len(expected_bets),
             "cancelled_bet_count": len(cancelled),
             "bets": expected_bets,
@@ -500,23 +558,36 @@ def semantic_round_trip(rendered: dict[str, Any]) -> dict[str, Any]:
     for index, (source_bet, parser_bet) in enumerate(zip(expected, actual), start=1):
         result = parser_bet.get("result") if isinstance(parser_bet, dict) else {}
         expected_groups = source_bet["parser_number_groups"]
-        actual_groups = (
-            result.get("columns")
-            if result.get("type") == "column"
-            else [result.get("numbers") or []]
-        )
+        if result.get("type") == "column":
+            actual_groups = result.get("columns")
+        elif result.get("type") == "car":
+            actual_groups = [[result.get("number")]]
+        else:
+            actual_groups = [result.get("numbers") or []]
         actual_continuation = (
             len(parser_bet.get("original_lines") or []) > 1
             and "merged continuation line" in (parser_bet.get("preprocessing_notes") or [])
         )
         special = source_bet["special_play"]
-        special_exact = special["kind"] == "none" or special["raw_text"] in str(
-            parser_bet.get("raw") or ""
-        )
+        if special["kind"] == "none":
+            special_exact = True
+        elif special["kind"] == "each_car":
+            original_line = str(parser_bet.get("original_line") or "")
+            special_exact = (
+                "各" in original_line
+                and result.get("type") == "car"
+                and _decimal_equal(result.get("car_units"), source_bet["car_units"])
+            )
+        else:
+            special_exact = special["raw_text"] in str(parser_bet.get("raw") or "")
         checks = {
             "type": result.get("type") == source_bet["type"],
             "number_groups": actual_groups == expected_groups,
-            "multiplier_rules": _actual_rule_map(result) == source_bet["multiplier_rule_map"],
+            "multiplier_rules": (
+                _actual_rule_map(result) == source_bet["multiplier_rule_map"]
+                if source_bet["type"] != "car"
+                else _decimal_equal(result.get("car_units"), source_bet["car_units"])
+            ),
             "special_play": special_exact,
             "continuation": actual_continuation == source_bet["continuation"],
         }

@@ -110,6 +110,51 @@ def test_promoted_human_literal_rule_is_rendered_without_machine_fields() -> Non
     assert semantic_round_trip(rendered)["exact"] is True
 
 
+def test_explicit_each_half_car_expands_semantically_without_losing_physical_count() -> None:
+    truth = {
+        "sample_id": "sample-013",
+        "review_status": "reviewed",
+        "reviewed_by": "local-user",
+        "lines": [
+            {
+                "line_id": "R01-L1",
+                "review_action": "confirmed",
+                "number_groups": [["15", "34"]],
+                "layout_hint": "normal_row",
+                "play_type": "car_bet",
+                "play_text": "15 34 各半車",
+            },
+            {
+                "line_id": "R02-L1",
+                "review_action": "confirmed",
+                "number_groups": [["12"], ["15", "34"], ["08", "20"]],
+                "layout_hint": "column_bet",
+                "multiplier_rules": [
+                    {"categories": ["2"], "value": "3", "rule_text": "2X3"},
+                    {"categories": ["3"], "value": "1", "rule_text": "3X1"},
+                ],
+            },
+        ],
+        "cancelled_bets": [],
+    }
+
+    rendered = render_structured_human_truth(truth)
+    proof = semantic_round_trip(rendered)
+
+    assert rendered["ok"] is True
+    assert rendered["human_verified_betguard_text"].splitlines()[0] == "15 34 各 0.5車"
+    semantics = rendered["source_semantic_result"]
+    assert semantics["physical_record_count"] == 2
+    assert semantics["physical_active_record_count"] == 2
+    assert semantics["active_bet_count"] == 3
+    assert proof["exact"] is True
+    assert [bet["result"]["type"] for bet in proof["parser_normalized_result"]["bets"]] == [
+        "car",
+        "car",
+        "column",
+    ]
+
+
 def test_migrated_save_keeps_revision_history_and_sha_dedup(tmp_path: Path) -> None:
     rendered = render_structured_human_truth(_sample007_truth())
     proof = semantic_round_trip(rendered)

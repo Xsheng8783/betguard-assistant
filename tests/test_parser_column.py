@@ -1,5 +1,7 @@
+import pytest
+
 from betguard.models import BetReport
-from betguard.parser import parse_line
+from betguard.parser import ParseError, parse_line
 from betguard.validator import validate_bet
 
 
@@ -9,6 +11,7 @@ TOUCH = "\u78b0"
 MULTIPLY = "\u00d7"
 IDEOGRAPHIC_COMMA = "\u3001"
 STAR = "\u661f"
+UNIT = "\u652f"
 
 
 def report_for(text: str) -> dict:
@@ -130,6 +133,33 @@ def test_column_h_missing_amount_and_stars_warns() -> None:
     assert report["status"] == "warning"
     assert "missing amount" in report["warnings"]
     assert "missing stars" in report["warnings"]
+
+
+def test_column_multiple_multiplier_rules_are_preserved_per_star() -> None:
+    report = report_for(
+        f"21 35 {MULTIPLY} 23 {MULTIPLY} 34 {MULTIPLY} 37 "
+        f"2{STAR}1{UNIT} 3{STAR}0.2{UNIT} 4{STAR}0.5{UNIT}"
+    )
+
+    assert report["type"] == "column"
+    assert report["columns"] == [[21, 35], [23], [34], [37]]
+    assert report["stars"] == [2, 3, 4]
+    assert report["unit"] is None
+    assert report["money"] is None
+    assert report["bets"] == {
+        "2": {"unit": 1, "money": 100},
+        "3": {"unit": 0.2, "money": 20},
+        "4": {"unit": 0.5, "money": 50},
+    }
+    assert report["status"] == "ok"
+
+
+def test_column_multiple_multiplier_rules_reject_duplicate_star() -> None:
+    with pytest.raises(ParseError, match="duplicate amount for star 2"):
+        parse_line(
+            f"21 35 {MULTIPLY} 23 {MULTIPLY} 34 {MULTIPLY} 37 "
+            f"2{STAR}1{UNIT} 2{STAR}0.5{UNIT}"
+        )
 
 
 TAIL = "\u5c3e"

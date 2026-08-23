@@ -134,7 +134,7 @@ def _should_parse_column_before_normal(value: str) -> bool:
         "/" in value
         or TOUCH_WORD in value
         or TAIL_WORD in value
-        or bool(re.search(rf"(?<=\d)(?:[xX]|{MULTIPLY_SIGN})(?=\d)", value))
+        or bool(re.search(rf"(?<=\d)\s*(?:[xX]|{MULTIPLY_SIGN})\s*(?=\d)", value))
     )
 
 
@@ -700,13 +700,19 @@ def _parse_five_number_thousand_shorthand(value: str, *, game_name: str) -> Pars
 
 
 def _parse_column_line(value: str, *, game_name: str) -> ParsedBet | None:
-    working, stars, amount = _peel_attached_column_star_amount_suffix(value)
-    if amount is None:
-        working, stars, amount = _peel_star_amount_suffix(value)
-    if amount is None:
-        working, amount = _peel_tail_amount(working)
-    if amount is None:
-        working, stars, amount = _peel_column_tail_star_amount(value)
+    working, per_star = _peel_column_per_star_bets(value)
+    bets: dict[str, BetAmount] = {}
+    if per_star is not None:
+        stars, bets = per_star
+        amount = _shared_bet_amount(bets)
+    else:
+        working, stars, amount = _peel_attached_column_star_amount_suffix(value)
+        if amount is None:
+            working, stars, amount = _peel_star_amount_suffix(value)
+        if amount is None:
+            working, amount = _peel_tail_amount(working)
+        if amount is None:
+            working, stars, amount = _peel_column_tail_star_amount(value)
 
     if not stars:
         working, stars = _peel_star_suffix(working, allow_numeric=amount is not None)
@@ -729,7 +735,33 @@ def _parse_column_line(value: str, *, game_name: str) -> ParsedBet | None:
         stars=stars,
         unit=unit,
         money=money,
+        bets=bets,
     )
+
+
+def _peel_column_per_star_bets(
+    text: str,
+) -> tuple[str, tuple[list[int], dict[str, BetAmount]] | None]:
+    """Peel two or more explicit per-star amounts from a column bet.
+
+    Requiring both a real column separator in the prefix and a complete
+    multi-rule suffix keeps ambiguous ``x``/number text on the conservative
+    legacy path.
+    """
+    for match in re.finditer(
+        rf"(?<!\S)(?=(?:[{CHINESE_TWO}{CHINESE_ALT_TWO}{CHINESE_THREE}{CHINESE_FOUR}]|[234]{STAR_WORD}))",
+        text,
+    ):
+        prefix = text[: match.start()].rstrip()
+        if not prefix or not _has_column_separator(prefix):
+            continue
+        try:
+            per_star = _parse_per_star_bets(text[match.start() :], allow_single_group=False)
+        except ParseError:
+            raise
+        if per_star is not None:
+            return prefix, per_star
+    return text, None
 
 
 def _peel_slash_star_suffix(text: str) -> tuple[str, list[int]]:
@@ -1190,10 +1222,15 @@ def _parse_per_star_bets(
         if index >= length:
             break
 
-        token_start = index
-        while index < length and not value[index].isdigit():
-            index += 1
-        raw_token = value[token_start:index]
+        numeric_star = re.match(rf"[234]{STAR_WORD}", value[index:])
+        if numeric_star:
+            raw_token = numeric_star.group(0)
+            index += numeric_star.end()
+        else:
+            token_start = index
+            while index < length and not value[index].isdigit():
+                index += 1
+            raw_token = value[token_start:index]
         token = raw_token.strip(f".,{FULL_COMMA}{COMMA_WORD} \t")
         if not token:
             return None
