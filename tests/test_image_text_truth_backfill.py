@@ -155,6 +155,74 @@ def test_explicit_each_half_car_expands_semantically_without_losing_physical_cou
     ]
 
 
+def test_confirmed_raw_car_literals_preserve_spaced_decimals_and_expand_each() -> None:
+    truth = {
+        "sample_id": "sample-012",
+        "review_status": "reviewed",
+        "reviewed_by": "local-user",
+        "lines": [
+            {
+                "line_id": "R05-L1",
+                "review_action": "confirmed",
+                "raw_text": "34 x 0 . 5 車",
+                "number_groups": [["34"]],
+                "multiplier_text": "4 x 0",
+                "layout_hint": "normal_row",
+            },
+            {
+                "line_id": "R09-L1",
+                "review_action": "confirmed",
+                "raw_text": "27 37 各 0 . 2 車",
+                "number_groups": [["27", "37"]],
+                "layout_hint": "normal_row",
+            },
+        ],
+        "cancelled_bets": [],
+    }
+
+    rendered = render_structured_human_truth(truth)
+    proof = semantic_round_trip(rendered)
+
+    assert rendered["ok"] is True
+    assert rendered["human_verified_betguard_text"].splitlines() == [
+        "34車0.5支",
+        "27 37 各 0.2車",
+    ]
+    semantics = rendered["source_semantic_result"]
+    assert semantics["physical_record_count"] == 2
+    assert semantics["active_bet_count"] == 3
+    assert proof["exact"] is True
+    assert [bet["result"]["car_units"] for bet in proof["parser_normalized_result"]["bets"]] == [
+        0.5,
+        0.2,
+        0.2,
+    ]
+
+
+def test_raw_car_literal_never_overrides_mismatched_reviewed_numbers() -> None:
+    truth = {
+        "sample_id": "sample-safe",
+        "review_status": "reviewed",
+        "reviewed_by": "local-user",
+        "lines": [
+            {
+                "line_id": "R01-L1",
+                "review_action": "confirmed",
+                "raw_text": "34 x 0.5 車",
+                "number_groups": [["35"]],
+                "layout_hint": "normal_row",
+            }
+        ],
+        "cancelled_bets": [],
+    }
+
+    assert render_structured_human_truth(truth) == {
+        "ok": False,
+        "reason": "CAR_LITERAL_NUMBER_MISMATCH",
+        "source_line_id": "R01-L1",
+    }
+
+
 def test_migrated_save_keeps_revision_history_and_sha_dedup(tmp_path: Path) -> None:
     rendered = render_structured_human_truth(_sample007_truth())
     proof = semantic_round_trip(rendered)

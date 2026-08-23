@@ -30,6 +30,14 @@ _RULE_RE = re.compile(
 )
 _TAIL_RE = re.compile(r"^(?P<digit>\d)尾$")
 _EACH_CAR_RE = re.compile(r"各\s*(?P<value>\d+(?:\.\d+)?)\s*車")
+_SINGLE_CAR_LITERAL_RE = re.compile(
+    r"^\s*(?P<number>\d{1,2})\s*[xX×]\s*"
+    r"(?P<value>\d+(?:\s*\.\s*\d+)?)\s*車\s*$"
+)
+_EACH_CAR_LITERAL_RE = re.compile(
+    r"^\s*(?P<numbers>\d{1,2}(?:[\s、,，.]+\d{1,2})+)\s*各\s*"
+    r"(?P<value>\d+(?:\s*\.\s*\d+)?)\s*車\s*$"
+)
 _CATEGORY_DIGITS = {"二": "2", "三": "3", "四": "4"}
 _HUMAN_LINE_ACTIONS = {"confirmed", "corrected", "added"}
 
@@ -376,7 +384,12 @@ def _render_each_car(
         raise ValueError("CAR_PLAY_AMOUNT_MUST_BE_POSITIVE")
 
     numbers = groups[0]
-    rendered = f"{' '.join(numbers)} 各 {unit}車"
+    car_syntax = "single_car" if len(numbers) == 1 else "each_car"
+    rendered = (
+        f"{numbers[0]}車{unit}支"
+        if car_syntax == "single_car"
+        else f"{' '.join(numbers)} 各 {unit}車"
+    )
     expected = []
     for number in numbers:
         expected.append(
@@ -391,13 +404,54 @@ def _render_each_car(
                 "multiplier_rule_map": {},
                 "special_play": {
                     "kind": "each_car",
+                    "syntax": car_syntax,
                     "raw_text": play_text,
-                    "rendered_text": f"各 {unit}車",
+                    "rendered_text": rendered,
                 },
                 "continuation": False,
                 "cancelled": False,
             }
         )
+    return rendered, expected
+
+
+def _render_explicit_car_literal(
+    line: dict[str, Any], groups: list[list[str]]
+) -> tuple[str, list[dict[str, Any]]] | None:
+    """Render an explicit, human-confirmed car literal without guessing.
+
+    Older reviewed truth sometimes kept the car notation only in ``raw_text``
+    and left the machine-derived ``play_type`` empty.  Accept that literal only
+    when it is anchored by the visible ``車`` marker and its numbers exactly
+    match the reviewed structured number group.
+    """
+    human_raw = str(line.get("human_raw_text") or "").strip()
+    source_text = human_raw or str(line.get("raw_text") or "").strip()
+    match = _EACH_CAR_LITERAL_RE.fullmatch(source_text)
+    if match:
+        literal_numbers = [
+            _number(value)
+            for value in re.split(r"[\s、,，.]+", match.group("numbers"))
+            if value
+        ]
+    else:
+        match = _SINGLE_CAR_LITERAL_RE.fullmatch(source_text)
+        if not match:
+            return None
+        literal_numbers = [_number(match.group("number"))]
+
+    if len(groups) != 1 or literal_numbers != groups[0]:
+        raise ValueError("CAR_LITERAL_NUMBER_MISMATCH")
+    unit = _decimal_text(re.sub(r"\s+", "", match.group("value")))
+    if Decimal(unit) <= 0:
+        raise ValueError("CAR_PLAY_AMOUNT_MUST_BE_POSITIVE")
+
+    rendered, expected = _render_each_car(
+        {**line, "play_text": f"各 {unit}車"},
+        groups,
+    )
+    for bet in expected:
+        bet["special_play"]["raw_text"] = source_text
     return rendered, expected
 
 
@@ -423,6 +477,13 @@ def render_structured_human_truth(truth: dict[str, Any]) -> dict[str, Any]:
             ]
             if not groups:
                 raise ValueError("EMPTY_NUMBER_GROUPS")
+            explicit_car = _render_explicit_car_literal(line, groups)
+            if explicit_car is not None:
+                rendered_car, expected_car = explicit_car
+                text_lines.append(rendered_car)
+                expected_bets.extend(expected_car)
+                physical_active_count += 1
+                continue
             if line.get("play_type") == "car_bet":
                 rendered_car, expected_car = _render_each_car(line, groups)
                 text_lines.append(rendered_car)
@@ -573,8 +634,13 @@ def semantic_round_trip(rendered: dict[str, Any]) -> dict[str, Any]:
             special_exact = True
         elif special["kind"] == "each_car":
             original_line = str(parser_bet.get("original_line") or "")
-            special_exact = (
+            syntax_marker_exact = (
                 "各" in original_line
+                if special.get("syntax") == "each_car"
+                else "車" in original_line
+            )
+            special_exact = (
+                syntax_marker_exact
                 and result.get("type") == "car"
                 and _decimal_equal(result.get("car_units"), source_bet["car_units"])
             )
