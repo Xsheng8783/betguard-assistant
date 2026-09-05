@@ -6,8 +6,7 @@
   * 純 CPU 推論 — -ngl 0（最低設備假設，不依賴獨顯）。
   * 零 Python 推論依賴 — 引擎是獨立 llama-server.exe（PyInstaller 當 data file），
     不打包 torch/transformers。
-  * 後處理白名單 — 真實牌單只有數字、乘號(x)、中文「一二三四」與小數點；
-    其餘符號（> < ≡ □ ≥ 等）是模型把筆跡/塗改當成符號，一律替換成空格。
+  * 原文保真 — 不認識的符號保留供人工檢查，不推測它們是筆跡噪音。
 
 環境變數:
   * BETGUARD_OCR_ENGINE=glm         — 啟用本引擎（在 ocr.py 判斷）
@@ -34,9 +33,8 @@ _CTX_SIZE = 8192
 _SERVER_START_TIMEOUT = 60  # 模型載入最長等待
 _INFER_TIMEOUT = 300  # 單張圖推論上限
 
-# 白名單：數字、乘號、中文一二三四、小數點、空白。
-# 其餘一律視為筆跡噪音，替換成空格（避免兩側數字黏連成 53 這種假數字）。
-_KEEP_RE = re.compile(r"[^0-9x×一二三四.\s]")
+# Detection only; never use this expression to remove or replace source marks.
+_UNSUPPORTED_RE = re.compile(r"[^0-9xX×一二三四尾車半各?.,，、/／\s]")
 
 _server: subprocess.Popen | None = None
 _server_lock = threading.Lock()
@@ -162,23 +160,13 @@ def _shutdown() -> None:
 
 
 def clean_glm_text(raw: str) -> str:
-    """過濾 GLM-OCR 原始輸出：只保留數字/x/一二三四/小數點與空白。
+    """Legacy function name; return source text verbatim, including unknown marks."""
+    return raw
 
-    Args:
-        raw: 模型原始輸出文字（可能含 > < ≡ □ 等筆跡噪音）。
 
-    Returns:
-        過濾後文字，保留換行結構；空內容回傳空字串。
-    """
-    lines = []
-    for line in raw.splitlines():
-        # 噪音字元 → 空格（保留 token 邊界，避免 5 和 3 黏成 53）
-        cleaned = _KEEP_RE.sub(" ", line)
-        # 壓縮連續空白為單一空格
-        cleaned = " ".join(cleaned.split())
-        if cleaned:
-            lines.append(cleaned)
-    return "\n".join(lines)
+def glm_text_issues(raw: str) -> dict[str, Any]:
+    unsupported = sorted(set(_UNSUPPORTED_RE.findall(raw)))
+    return {"unsupported_characters": unsupported, "uncertain": bool(unsupported or "?" in raw)}
 
 
 def _infer(image_bytes: bytes) -> str:
@@ -242,7 +230,9 @@ def extract_text(image_bytes: bytes) -> list[dict[str, Any]]:
         return []
 
     return [
-        {"text": line, "score": None, "box": []}
-        for line in cleaned.splitlines()
+        {"text": line, "score": None, "box": [], "source_line": index,
+         "native_ocr_text": output_text, "adapter_text": cleaned,
+         "transformations": [], **glm_text_issues(line)}
+        for index, line in enumerate(cleaned.splitlines(), 1)
         if line.strip()
     ]
