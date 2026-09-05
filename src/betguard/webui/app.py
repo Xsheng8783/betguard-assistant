@@ -1396,6 +1396,9 @@ def build_workbench_handler(
             if path == "/api/vision/v1/transcriptions/preflight":
                 self._handle_vision_transcription_preflight()
                 return
+            if path == "/api/vision/v1/region-review":
+                self._handle_region_review()
+                return
             if path == "/api/vision/v1/acceptance-dataset/samples":
                 self._handle_image_text_verified_sample()
                 return
@@ -3422,6 +3425,39 @@ window.assistPanelFill = assistPanelFill;
 
             result = transcribe_image_to_text(image_id, reader=reader, game=str(data.get("game", "六合")))
             self._send_json(result, status=200 if result["ok"] else 400)
+
+        def _handle_region_review(self) -> None:
+            from betguard.vision.image_intake import get_metadata
+            from betguard.vision.region_review import RegionReviewStore
+            data = self._read_json_body()
+            if not isinstance(data, dict):
+                self._send_json({"ok": False, "message": "請提供有效資料"}, status=400)
+                return
+            try:
+                meta = get_metadata(str(data.get("image_id") or ""))
+                if meta is None or meta.is_expired():
+                    raise ValueError("圖片不存在或已過期，請重新上傳")
+                store = RegionReviewStore(RUNS_DIR / "region-assisted-review-dataset-v1", meta.storage_path)
+                operation = data.get("operation")
+                if operation == "start":
+                    initial = data.get("initial_text", "")
+                    if not isinstance(initial, str) or len(initial) > 50000:
+                        raise ValueError("文字格式或長度無效")
+                    state = store.start(data.get("game"), initial_text=initial)
+                elif operation == "load":
+                    state = store.load(data.get("session_id"))
+                else:
+                    payload = data.get("payload", {})
+                    if not isinstance(payload, dict):
+                        raise ValueError("操作資料無效")
+                    state = store.update(data.get("session_id"), data.get("revision"), operation, **payload)
+                # Internal paths/provenance remain on disk, not in the simple UI.
+                state.pop("source_image_reference", None)
+                self._send_json({"ok": True, "state": state, "auto_submit": False})
+            except (ValueError, TypeError, KeyError) as exc:
+                self._send_json({"ok": False, "message": str(exc)}, status=400)
+            except OSError:
+                self._send_json({"ok": False, "message": "區域資料無法保存，請稍後重試"}, status=503)
 
         def _handle_vision_transcription_preflight(self) -> None:
             data = self._read_json_body()

@@ -31,7 +31,12 @@ def test_transcription_is_large_editable_text_not_a_review_schema() -> None:
     assert "逐筆確認" not in html
     assert "AI_UNCERTAIN" not in html
     assert "number_groups" not in html
-    assert "bbox" not in html.lower()
+    # Optional ROI editing now legitimately uses bbox in JS; the simple user
+    # interface must still hide technical field names (not ban internal data).
+    import re
+    visible_html = re.sub(r'<script>.*?</script>', '', html, flags=re.S)
+    assert "bbox" not in visible_html.lower()
+    assert 'id="rr-panel" hidden' in html
     assert "field conflict" not in html.lower()
 
 
@@ -125,7 +130,8 @@ def test_no_automatic_or_real_site_action_is_present() -> None:
     assert "submit(" not in html.lower()
     assert "candidate-queue" not in html
     assert "assist-fill/start" not in html
-    assert "http://" not in html
+    # SVG namespace is an identifier, never a network request.
+    assert "http://" not in html.replace('http://www.w3.org/2000/svg', '')
     assert "https://" not in html
 
 

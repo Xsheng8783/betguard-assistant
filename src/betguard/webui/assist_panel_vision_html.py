@@ -3,7 +3,8 @@
 
 def render_vision_ui_section() -> str:
     """Return the image typing-aid UI; parsing stays in the text workflow."""
-    return r"""
+    from betguard.webui.region_review_html import render_region_review_ui
+    html = r"""
 <div class="section" id="vision-section" style="display:none">
   <h3>圖片轉文字</h3>
   <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:8px 0 12px;font-size:13px;color:#475569">
@@ -25,6 +26,8 @@ def render_vision_ui_section() -> str:
     <img id="vision-preview-img" alt="上傳圖片預覽" style="display:block;max-width:100%;max-height:280px;border:1px solid #e2e8f0;border-radius:5px;margin-bottom:7px">
     <div id="vision-file-summary" style="font-size:12px;color:#64748b"></div>
   </div>
+
+  <!-- OPTIONAL_REGION_REVIEW -->
 
   <div id="vision-reader-controls" style="display:none;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
     <label for="vision-reader-select" style="font-size:13px;color:#475569">辨識方式</label>
@@ -197,6 +200,7 @@ def render_vision_ui_section() -> str:
       .then(function(data) {
         if (!data.ok) throw new Error((data.error && data.error.message) || "圖片上傳失敗");
         uploadedImageId = String(data.image.image_id || "");
+        document.dispatchEvent(new CustomEvent('betguard:image-uploaded', {detail: {imageId: uploadedImageId}}));
         transcription.value = "";
         document.getElementById("vision-preview-img").src =
           "/api/vision/v1/images/" + encodeURIComponent(uploadedImageId);
@@ -367,3 +371,4 @@ def render_vision_ui_section() -> str:
 })();
 </script>
 """
+    return html.replace('<!-- OPTIONAL_REGION_REVIEW -->', render_region_review_ui())
