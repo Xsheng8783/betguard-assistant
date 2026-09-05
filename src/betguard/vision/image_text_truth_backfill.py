@@ -712,29 +712,44 @@ def backfill_existing_human_truth(
     dataset_source_root: str | Path,
     *,
     acceptance_dataset_root: str | Path,
+    game_by_sample: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    from betguard.vision.lossless_representation import render_lossless_human_truth, prove_lossless_round_trip
     source_root = Path(dataset_source_root)
     destination = Path(acceptance_dataset_root)
     before = get_dataset_status(destination)
     discovery = discover_human_confirmed_sources(source_root)
+    manifest = _manifest(source_root)
     imported: list[dict[str, Any]] = []
     rejected_round_trip: list[dict[str, Any]] = []
 
     for source in discovery["eligible"]:
         sample_id = source["sample_id"]
+        # Use explicit source metadata, never image values or parser defaults.
+        # The existing dataset's versioned 539 schema is a declared game, not
+        # permission to promote out-of-range records to 六合.
+        source_truth = source.get("truth", {})
+        manifest_record = manifest[sample_id]
+        schema = source_truth.get("gt_schema_version") or manifest_record.get("gt_schema_version")
+        declared_game = source_truth.get("game") or ("539" if schema == "539-semantic-gt-v1" else None)
+        game = (game_by_sample or {}).get(sample_id) or declared_game
+        if game not in {"539", "六合"} or (declared_game and game != declared_game):
+            rejected_round_trip.append({"sample_id": sample_id, "reason": "EXPLICIT_GAME_MISSING_OR_CONFLICTING", "classification": "C"})
+            continue
         if source["kind"] == "structured_truth":
-            rendered = render_structured_human_truth(source["truth"])
+            rendered = render_lossless_human_truth(source["truth"], game=game)
             if not rendered.get("ok"):
                 rejected_round_trip.append(
-                    {"sample_id": sample_id, "reason": rendered.get("reason")}
+                    {"sample_id": sample_id, "reason": rendered.get("reason"),
+                     "source_line_id": rendered.get("source_line_id"), "game": game}
                 )
                 continue
             text = rendered["human_verified_betguard_text"]
             source_semantic = rendered["source_semantic_result"]
-            round_trip = semantic_round_trip(rendered)
+            round_trip = prove_lossless_round_trip(source["truth"], rendered, game=game)
         else:
             text = source["truth_path"].read_text(encoding="utf-8").strip()
-            round_trip = round_trip_reviewed_existing_text(text)
+            round_trip = round_trip_reviewed_existing_text(text, game=game)
             source_semantic = {
                 "schema_version": "betguard-reviewed-existing-text-semantics-v1",
                 "sample_id": sample_id,
@@ -762,6 +777,7 @@ def backfill_existing_human_truth(
             semantic_round_trip=round_trip,
             ai_original_text=None,
             dataset_root=destination,
+            game=game,
         )
         if not saved.get("ok"):
             rejected_round_trip.append(
@@ -779,10 +795,16 @@ def backfill_existing_human_truth(
                 "active_bet_count": source_semantic.get("active_bet_count"),
                 "physical_record_count": source_semantic.get("physical_record_count"),
                 "ai_original_text_available": False,
+                "game": game,
+                "round_trip_contract": round_trip.get("schema_version"),
             }
         )
 
     after = get_dataset_status(destination)
+    for rejection in rejected_round_trip:
+        reason = str(rejection.get("reason") or "")
+        rejection.setdefault("classification", "A" if "PARSER_REJECTED" in reason else
+                             "E" if reason in {"SAVE_FAILED", "SOURCE_IMAGE_NOT_FOUND", "SOURCE_IMAGE_SHA256_MISMATCH"} else "C")
     return {
         "schema_version": "betguard-existing-human-truth-backfill-report-v1",
         "found_human_confirmed_samples": len(discovery["eligible"]),
