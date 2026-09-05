@@ -26,7 +26,14 @@ def render_vision_ui_section() -> str:
     <div id="vision-file-summary" style="font-size:12px;color:#64748b"></div>
   </div>
 
-  <button id="vision-run-btn" class="btn-primary" type="button" style="display:none;margin-bottom:10px">AI 辨識圖片</button>
+  <div id="vision-reader-controls" style="display:none;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+    <label for="vision-reader-select" style="font-size:13px;color:#475569">辨識方式</label>
+    <select id="vision-reader-select" style="padding:7px 9px;border:1px solid #cbd5e1;border-radius:5px;background:#fff">
+      <option value="gemma">目前模式（Gemma）</option>
+      <option value="luna">Luna 低成本（測試）</option>
+    </select>
+    <button id="vision-run-btn" class="btn-primary" type="button">AI 辨識圖片</button>
+  </div>
 
   <label for="vision-transcription-text" style="display:block;font-size:15px;font-weight:700;margin-bottom:5px">圖片辨識文字</label>
   <textarea id="vision-transcription-text" placeholder="AI 辨識後會放在這裡；也可以直接手動輸入或修改。" style="min-height:210px"></textarea>
@@ -50,6 +57,8 @@ def render_vision_ui_section() -> str:
   var dropZone = document.getElementById("vision-drop-zone");
   var fileInput = document.getElementById("vision-file-input");
   var runButton = document.getElementById("vision-run-btn");
+  var readerControls = document.getElementById("vision-reader-controls");
+  var readerSelect = document.getElementById("vision-reader-select");
   var transcription = document.getElementById("vision-transcription-text");
   var status = document.getElementById("vision-status");
   var saveVerifiedButton = document.getElementById("vision-save-verified-btn");
@@ -130,18 +139,20 @@ def render_vision_ui_section() -> str:
 
   function requestParserPreflight(text, showTransportError) {
     var submittedText = String(text || "");
+    var submittedGame = getAssistGame();
     var sequence = ++preflightSequence;
     return fetch("/api/vision/v1/transcriptions/preflight", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({
         text: submittedText,
-        source: IMAGE_TRANSCRIPTION_TEXT_SOURCE
+        source: IMAGE_TRANSCRIPTION_TEXT_SOURCE,
+        game: submittedGame
       })
     }).then(function(response) { return response.json(); })
     .then(function(data) {
       if (!data.ok) throw new Error("parser preview failed");
-      if (sequence === preflightSequence && transcription.value === submittedText) {
+      if (sequence === preflightSequence && transcription.value === submittedText && getAssistGame() === submittedGame) {
         renderPreflight(data);
       }
       return data;
@@ -168,7 +179,7 @@ def render_vision_ui_section() -> str:
   function uploadImage(file) {
     if (!file) return;
     setVisionStatus("圖片上傳中…", false);
-    runButton.style.display = "none";
+    readerControls.style.display = "none";
     transcriptionCaptureAvailable = false;
     saveVerifiedButton.disabled = true;
     renderTranscriptionNotices([]);
@@ -193,7 +204,7 @@ def render_vision_ui_section() -> str:
         document.getElementById("vision-file-summary").textContent =
           (data.image.original_filename || "圖片") + " · " +
           data.image.width + " × " + data.image.height;
-        runButton.style.display = "inline-block";
+        readerControls.style.display = "flex";
         runButton.textContent = "AI 辨識圖片";
         setVisionStatus("圖片已上傳，可以開始辨識。", false);
       }).catch(function(error) {
@@ -236,7 +247,11 @@ def render_vision_ui_section() -> str:
     fetch("/api/vision/v1/transcriptions", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({image_id: uploadedImageId})
+      body: JSON.stringify({
+        image_id: uploadedImageId,
+        reader: readerSelect.value,
+        game: getAssistGame()
+      })
     }).then(function(response) { return response.json(); })
     .then(function(data) {
       runButton.disabled = false;
@@ -260,7 +275,11 @@ def render_vision_ui_section() -> str:
       transcription.style.display = "block";
       renderTranscriptionNotices([]);
       renderPreflight(null);
-      setVisionStatus((error.message || "AI 辨識失敗") + " 您仍可直接輸入文字。", true);
+      setVisionStatus(
+        (error.message || "AI 辨識失敗") +
+        " 您可以改用另一個辨識方式；您仍可直接輸入文字。",
+        true
+      );
     });
   });
 
@@ -289,7 +308,8 @@ def render_vision_ui_section() -> str:
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({
         image_id: uploadedImageId,
-        human_verified_betguard_text: text
+        human_verified_betguard_text: text,
+        game: getAssistGame()
       })
     }).then(function(response) { return response.json(); })
     .then(function(data) {
@@ -311,9 +331,11 @@ def render_vision_ui_section() -> str:
   });
 
   transcription.addEventListener("input", scheduleParserPreflight);
+  document.getElementById("assist-game").addEventListener("change", scheduleParserPreflight);
 
   useTextButton.addEventListener("click", function() {
     var text = transcription.value;
+    var submittedGame = getAssistGame();
     if (!text.trim()) {
       setVisionStatus("請先輸入或辨識牌單文字。", true);
       return;
@@ -327,7 +349,7 @@ def render_vision_ui_section() -> str:
         transcription.focus();
         return;
       }
-      if (transcription.value !== text) {
+      if (transcription.value !== text || getAssistGame() !== submittedGame) {
         setVisionStatus("文字已變更，請再按一次以重新檢查。", true);
         transcription.focus();
         return;

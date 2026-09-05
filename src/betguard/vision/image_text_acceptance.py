@@ -14,6 +14,7 @@ import os
 import re
 import tempfile
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -24,7 +25,7 @@ from betguard.vision.image_intake import get_metadata, read_image_data
 
 DATASET_SCHEMA_VERSION = "betguard-image-text-acceptance-dataset-v1"
 SAMPLE_SCHEMA_VERSION = "betguard-image-text-verified-sample-v1"
-CAPTURE_SCHEMA_VERSION = "betguard-image-text-machine-capture-v1"
+CAPTURE_SCHEMA_VERSION = "betguard-image-text-machine-capture-v2"
 DATASET_TARGET = 10
 
 _DATASET_DIR_NAME = "image-to-text-acceptance-dataset-v1"
@@ -105,26 +106,60 @@ def record_machine_transcription(
     reader: str,
     model_cache_identity: dict[str, Any] | None = None,
     capture_root: Path | None = None,
+    game: str = "六合",
+    provider_raw_response: Any = None,
+    native_ocr_text: str | None = None,
+    adapter_text: str | None = None,
+    parser_result: dict[str, Any] | None = None,
+    transformations: list[dict[str, Any]] | None = None,
+    source_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Capture original AI text before the editable value reaches the browser."""
+    if game not in {"539", "六合"}:
+        raise ValueError("INVALID_GAME")
     sha256 = str(source_image_sha256 or "").strip().lower()
     if not _SHA256_RE.fullmatch(sha256):
         raise ValueError("INVALID_IMAGE_SHA256")
     text = str(ai_original_text or "")
-    if not text.strip():
+    if not text.strip() and provider_raw_response is None:
         raise ValueError("AI_ORIGINAL_TEXT_EMPTY")
     root = Path(capture_root) if capture_root is not None else default_capture_root()
     captured = {
         "schema_version": CAPTURE_SCHEMA_VERSION,
+        "capture_id": uuid.uuid4().hex,
+        "game": game,
+        "provider_raw_response": provider_raw_response,
+        "provider_raw_response_available": provider_raw_response is not None,
+        "native_ocr_text": native_ocr_text,
+        "native_ocr_text_available": native_ocr_text is not None,
+        "adapter_text": adapter_text if adapter_text is not None else text,
+        "parser_result": parser_result,
+        "human_corrected_text": None,
+        "transformations": list(transformations or []),
+        "source_records": list(source_records or []),
         "image_id": str(image_id).lower(),
         "source_image_sha256": sha256,
         "ai_original_text": text,
+        "ai_original_text_role": "native_ocr_text" if native_ocr_text is not None else "legacy_adapter_text_raw_unverified",
         "reader": str(reader or ""),
         "model_cache_identity": dict(model_cache_identity or {}),
         "prediction_timestamp": _utc_now(),
     }
     with _STORAGE_LOCK:
-        _atomic_write_json(_capture_path(image_id, root), captured)
+        first_path = _capture_path(image_id, root)
+        # Immutable captures; legacy files remain untouched, even on rerecognition.
+        _atomic_write_json(root / "revisions" / str(image_id).lower() / f"{captured['capture_id']}.json", captured)
+        if not first_path.exists():
+            _atomic_write_json(first_path, captured)
+        first_sha_path = root / "first-by-sha" / f"{sha256}.json"
+        if not first_sha_path.exists():
+            # Reuse the earliest *available* capture, including v1 captures
+            # from another upload ID. Never relabel today's rerun as the first.
+            known = [record for path in root.glob("*.json")
+                     if (record := _read_json(path)) and record.get("source_image_sha256") == sha256]
+            earliest = min(known, key=lambda record: str(record.get("prediction_timestamp") or "")) if known else captured
+            _atomic_write_json(first_sha_path, earliest)
+        _atomic_write_json(root / "latest-v2" / first_path.name, captured)
     return captured
 
 
@@ -185,10 +220,12 @@ def _parser_errors(queue: dict[str, Any]) -> list[dict[str, Any]]:
     return errors
 
 
-def validate_with_existing_parser(text: str) -> dict[str, Any]:
+def validate_with_existing_parser(text: str, *, game: str = "六合") -> dict[str, Any]:
     """Require every non-empty fragment to parse through the existing path."""
     from betguard.webfill.batch_mock_queue import READY_FOR_QUEUE, build_batch_mock_queue
 
+    if game not in {"539", "六合"}:
+        return {"ok": False, "error": {"code": "INVALID_GAME", "message": "請選擇 539 或六合。"}, "parser_errors": []}
     normalized_text = str(text or "").strip()
     if not normalized_text:
         return {
@@ -197,7 +234,7 @@ def validate_with_existing_parser(text: str) -> dict[str, Any]:
             "parser_errors": [],
         }
     try:
-        queue = build_batch_mock_queue(normalized_text, game="六合")
+        queue = build_batch_mock_queue(normalized_text, game=game)
     except Exception:
         return {
             "ok": False,
@@ -249,7 +286,7 @@ def validate_with_existing_parser(text: str) -> dict[str, Any]:
         "ok": True,
         "parser_normalized_result": {
             "schema_version": "betguard-existing-parser-normalized-v1",
-            "game": "六合",
+            "game": game,
             "candidate_count": candidate_count,
             "bets": normalized_bets,
         },
@@ -304,9 +341,10 @@ def save_human_verified_sample(
     *,
     dataset_root: Path | None = None,
     capture_root: Path | None = None,
+    game: str = "六合",
 ) -> dict[str, Any]:
     """Save an explicit human correction after strict existing-parser validation."""
-    validation = validate_with_existing_parser(human_verified_betguard_text)
+    validation = validate_with_existing_parser(human_verified_betguard_text, game=game)
     if not validation.get("ok"):
         return validation
 
@@ -319,7 +357,7 @@ def save_human_verified_sample(
             "ok": False,
             "error": {"code": "INVALID_IMAGE_ID", "message": "圖片識別碼無效。"},
         }
-    capture = _read_json(capture_path)
+    capture = _read_json(captures / "latest-v2" / capture_path.name) or _read_json(capture_path)
     if not capture:
         return {
             "ok": False,
@@ -373,8 +411,14 @@ def save_human_verified_sample(
                 getattr(metadata, "original_filename", "") or ""
             ),
             "ai_original_text": str(capture.get("ai_original_text") or ""),
-            "ai_original_text_available": True,
+            "ai_original_text_available": bool(str(capture.get("ai_original_text") or "").strip()),
             "human_verified_betguard_text": str(human_verified_betguard_text).strip(),
+            "human_corrected_text": str(human_verified_betguard_text),
+            "game": game,
+            "prediction_game": capture.get("game"),
+            "prediction_capture_id": capture.get("capture_id"),
+            "prediction_layers": {key: capture.get(key) for key in (
+                "provider_raw_response", "native_ocr_text", "adapter_text", "parser_result", "transformations", "source_records")},
             "parser_normalized_result": validation["parser_normalized_result"],
             "verified_at": verified_at,
             "human_verified": True,
@@ -411,6 +455,7 @@ def save_migrated_human_verified_sample(
     semantic_round_trip: dict[str, Any],
     ai_original_text: str | None = None,
     dataset_root: Path | None = None,
+    game: str = "六合",
 ) -> dict[str, Any]:
     """Save a parser-exact migration from an existing human truth source.
 
@@ -440,7 +485,7 @@ def save_migrated_human_verified_sample(
             },
         }
 
-    validation = validate_with_existing_parser(human_verified_betguard_text)
+    validation = validate_with_existing_parser(human_verified_betguard_text, game=game)
     if not validation.get("ok"):
         return validation
     if validation.get("parser_normalized_result") != semantic_round_trip.get(
@@ -533,6 +578,7 @@ def save_migrated_human_verified_sample(
             "verified_at": verified_at,
             "human_verified": True,
             "verification_source": "migrated_existing_human_truth",
+            "game": game,
             "source_truth_provenance": source_truth_provenance,
         }
         _atomic_write_json(revisions_root / f"{revision_id}.json", sample)

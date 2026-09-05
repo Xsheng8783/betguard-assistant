@@ -41,6 +41,8 @@ button{font-size:15px;padding:8px 16px;border-radius:6px;border:none;cursor:poin
 <h2 style="display:flex;align-items:center;gap:8px">Betguard 牌單助手
 <button id="pin-btn" onclick="togglePin()" style="font-size:13px;padding:4px 10px;min-height:unset;background:#f59e0b;color:#fff">釘選視窗</button>
 </h2>
+<label for="assist-game">彩種</label>
+<select id="assist-game"><option value="六合">六合（01–49）</option><option value="539">539（01–39）</option></select>
 <textarea id="batch-text" placeholder="貼上牌單..."></textarea>
 <button id="createBatchBtn" type="button" class="btn-primary">貼上並建立審核</button>
 <div class="status" id="status-msg"></div>
@@ -62,6 +64,7 @@ button{font-size:15px;padding:8px 16px;border-radius:6px;border:none;cursor:poin
 var panelState = { queuePath: "", validCandidates: [], reviewCandidates: [] };
 var TEXT_INPUT_SOURCE = "TEXT_INPUT";
 var IMAGE_TRANSCRIPTION_TEXT_SOURCE = "IMAGE_TRANSCRIPTION_TEXT";
+function getAssistGame() { return document.getElementById("assist-game").value; }
 
 function setStatus(msg) {
   var el = document.getElementById("status-msg");
@@ -114,7 +117,7 @@ function _doCreateBatch(text, ta, btn, inputSource) {
   fetch("/assist-panel/create-batch", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text: text, source: inputSource || TEXT_INPUT_SOURCE })
+    body: JSON.stringify({ text: text, source: inputSource || TEXT_INPUT_SOURCE, game: getAssistGame() })
   }).then(function (r) { return r.text(); }).then(function (raw) {
     btn.disabled = false;
     btn.textContent = "貼上並建立審核";

@@ -15,8 +15,8 @@ FINAL_DECISION = {
 }
 
 
-def build_mock_fill_report(text: str) -> dict[str, Any]:
-    review_result = build_report(text).to_dict()
+def build_mock_fill_report(text: str, *, game: str = "539") -> dict[str, Any]:
+    review_result = build_report(text, game=game).to_dict()
     if review_result.get("status") != "ok":
         return _blocked_report(text, _review_block_reason(review_result), review_result=review_result)
 
@@ -107,10 +107,11 @@ def _column_mock_fill_report(text: str, review_result: dict[str, Any]) -> dict[s
 def run_assisted_fill_mock(
     text: str,
     *,
+    game: str = "539",
     headless: bool = False,
     page_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    report = build_mock_fill_report(text)
+    report = build_mock_fill_report(text, game=game)
     if report.get("status") != "COMPLETED_MOCK_ONLY":
         return report
 

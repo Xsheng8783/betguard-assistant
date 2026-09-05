@@ -224,6 +224,16 @@ def main() -> int:
             "visible_row_coverage": (
                 len(row_token_ids) / len(tokens) if tokens else None
             ),
+            "output_token_row_assignment_rate": (
+                len(row_token_ids) / len(tokens) if tokens else None
+            ),
+            "metric_definitions": {
+                "visible_row_coverage": "Legacy alias of output_token_row_assignment_rate; not image-row accuracy.",
+                "output_token_row_assignment_rate": "Distinct output token IDs assigned to a reconstructed row / output OCR token count. Measures internal assignment only; missed image tokens are outside this denominator.",
+                "token_bbox_scope": "Character-position partitions of parent OCR line boxes are estimates, not token-detector localization ground truth.",
+            },
+            "image_row_accuracy": None,
+            "token_localization_accuracy": None,
         }
         if truth.get("source") != "human_verified_image_ground_truth":
             base.update({"scored": False, "score_reason": "no_human_truth_qualitative_only"})

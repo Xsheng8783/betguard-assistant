@@ -343,6 +343,7 @@ def run_gemma_shadow(
         payload = _request_payload(request, image_bytes, config)
         external_call_count = 1
         envelope = (transport or _post_generate_content)(payload, api_key, config)
+        base["provider_raw_response"] = envelope
         evidence = _validated_response(envelope, base)
     except TimeoutError:
         return _failure(
@@ -722,6 +723,7 @@ def _validated_response(envelope: Any, base: dict[str, Any]) -> dict[str, Any]:
         "partial_machine_read": bool(items and rejected_items),
         "needs_review": bool(rejected_items),
         "raw_response_text": texts[0],
+        "provider_raw_response": envelope,
         "provider_request_id": str(envelope.get("responseId") or ""),
         "finish_reason": "STOP",
         "usage": envelope.get("usageMetadata") if isinstance(envelope.get("usageMetadata"), dict) else {},

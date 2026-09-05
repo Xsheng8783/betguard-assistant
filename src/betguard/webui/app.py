@@ -3060,6 +3060,10 @@ window.assistPanelFill = assistPanelFill;
                 self._send_json({"ok": False, "error": "empty text"})
                 return
             source = str(data.get("source") or "TEXT_INPUT").strip().upper()
+            game = str(data.get("game", "六合"))
+            if game not in {"539", "六合"}:
+                self._send_json({"ok": False, "error": "請選擇 539 或六合。", "error_code": "INVALID_GAME"}, status=400)
+                return
             if source not in {"TEXT_INPUT", "IMAGE_TRANSCRIPTION_TEXT"}:
                 self._send_json(
                     {"ok": False, "error": "unsupported input source"},
@@ -3074,7 +3078,7 @@ window.assistPanelFill = assistPanelFill;
             if source == "IMAGE_TRANSCRIPTION_TEXT":
                 from betguard.vision.service import preflight_image_text
 
-                parser_preflight = preflight_image_text(text)
+                parser_preflight = preflight_image_text(text, game=game)
                 if (
                     parser_preflight.get("all_parseable") is not True
                     or int(parser_preflight.get("unresolved_count") or 0) > 0
@@ -3096,7 +3100,7 @@ window.assistPanelFill = assistPanelFill;
 
             try:
                 from betguard.webfill.batch_mock_queue import build_batch_mock_queue
-                queue = build_batch_mock_queue(text.split("\n") if "\n" in text else text, game="六合")
+                queue = build_batch_mock_queue(text.split("\n") if "\n" in text else text, game=game)
             except Exception as exc:
                 self._send_json({"ok": False, "error": f"batch create error: {exc}"})
                 return
@@ -3413,9 +3417,10 @@ window.assistPanelFill = assistPanelFill;
                 )
                 return
             image_id = str(data.get("image_id") or "")
+            reader = str(data.get("reader") or "gemma")
             from betguard.vision.service import transcribe_image_to_text
 
-            result = transcribe_image_to_text(image_id)
+            result = transcribe_image_to_text(image_id, reader=reader, game=str(data.get("game", "六合")))
             self._send_json(result, status=200 if result["ok"] else 400)
 
         def _handle_vision_transcription_preflight(self) -> None:
@@ -3441,7 +3446,7 @@ window.assistPanelFill = assistPanelFill;
                 return
             from betguard.vision.service import preflight_image_text
 
-            result = dict(preflight_image_text(str(data.get("text") or "")))
+            result = dict(preflight_image_text(str(data.get("text") or ""), game=str(data.get("game", "六合"))))
             result["source"] = source
             self._send_json(result, status=200 if result["ok"] else 400)
 
@@ -3462,7 +3467,7 @@ window.assistPanelFill = assistPanelFill;
             verified_text = str(data.get("human_verified_betguard_text") or "")
             from betguard.vision.image_text_acceptance import save_human_verified_sample
 
-            result = save_human_verified_sample(image_id, verified_text)
+            result = save_human_verified_sample(image_id, verified_text, game=str(data.get("game", "六合")))
             self._send_json(result, status=201 if result["ok"] else 400)
 
         @staticmethod

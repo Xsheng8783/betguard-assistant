@@ -8,6 +8,7 @@ module never authorizes candidates, queues, webfill, or Playwright actions.
 from __future__ import annotations
 
 import re
+import json
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -36,6 +37,14 @@ from betguard.vision.image_intake import (
     read_image_data,
     save_metadata,
     validate_and_store,
+)
+from betguard.vision.openai_luna_transcription import (
+    PROVIDER_ID as OPENAI_LUNA_TRANSCRIPTION_PROVIDER_ID,
+    LunaTranscriptionError,
+    get_config_from_env as get_luna_transcription_config,
+    has_api_key as has_luna_api_key,
+    normalize_parser_safe_literals as normalize_luna_parser_safe_literals,
+    transcribe_with_luna,
 )
 from betguard.vision.paid_fallback import run_paid_vision_fallback_job
 from betguard.vision.providers.fake import FakeProvider
@@ -258,95 +267,77 @@ _SPECIAL_LITERAL_RE = re.compile(r"(?P<literal>[0-9?]+(?P<kind>半車|尾|車|�
 
 
 def _protect_literal_decimal(raw_text: str, multiplier_text: str) -> tuple[str, bool]:
-    """Restore 0.5 only when the model's literal multiplier field retained it."""
-    if not _DECIMAL_LITERAL_RE.search(multiplier_text):
-        return raw_text, False
-    lines = raw_text.splitlines()
-    changed = False
-    for index, line in enumerate(lines):
-        if not re.search(r"(?:^|[,，、/\s])[234二三四兩](?:\s*星)?", line):
-            continue
-        replaced = _MULTIPLIER_05_AT_END_RE.sub(
-            lambda match: f"{match.group('operator')}0.5{match.group('suffix')}",
-            line,
-        )
-        if replaced != line:
-            lines[index] = replaced
-            changed = True
-    return "\n".join(lines), changed
+    """Compatibility helper: another model field cannot authorize value repair."""
+    return raw_text, False
 
 
 def _restore_literal_special(raw_text: str, special_text: str) -> tuple[str, bool]:
-    """Keep a model-read special digit when raw_text accidentally kept only its kind."""
-    adjusted = raw_text
-    changed = False
-    for match in _SPECIAL_LITERAL_RE.finditer(special_text):
-        literal = match.group("literal")
-        kind = match.group("kind")
-        if literal in adjusted:
-            continue
-        bare_kind = re.compile(rf"(?<![0-9?]){re.escape(kind)}")
-        adjusted, count = bare_kind.subn(literal, adjusted, count=1)
-        changed = changed or count > 0
-    return adjusted, changed
+    """Compatibility helper: preserve missing/unknown digits for human editing."""
+    return raw_text, False
+
+
+def _gemma_source_records(evidence: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read native records before item validation, when the archived JSON exists."""
+    try:
+        decoded = json.loads(evidence.get("raw_response_text") or "null")
+        if isinstance(decoded, dict) and isinstance(decoded.get("items"), list):
+            return [item if isinstance(item, dict) else {"raw_text": json.dumps(item, ensure_ascii=False), "uncertain": True}
+                    for item in decoded["items"]]
+    except (TypeError, ValueError):
+        pass
+    return [item for item in evidence.get("items", []) if isinstance(item, dict)]
 
 
 def gemma_evidence_to_betguard_text_with_notices(
     evidence: dict[str, Any],
-) -> tuple[str, list[dict[str, str]]]:
+) -> tuple[str, list[dict[str, Any]]]:
     """Apply the safe editable-text output contract to whole-image records."""
     if evidence.get("status") != "completed":
         return "", []
-    items = evidence.get("items")
+    items = _gemma_source_records(evidence)
     if not isinstance(items, list):
         return "", []
     records = []
-    cancelled_count = 0
-    decimal_restored = 0
-    special_restored = 0
-    for item in items:
+    notices: list[dict[str, Any]] = []
+    for index, item in enumerate(items):
         if not isinstance(item, dict):
             continue
-        raw_text = str(item.get("raw_text") or "").strip()
+        raw_text = str(item.get("raw_text") or "")
+        original = raw_text
+        source_id = str(item.get("evidence_id") or f"record-{index + 1}")
+        rejected = any(r.get("item_index") == index + 1 for r in evidence.get("rejected_items", []))
+        if rejected:
+            # Unvalidated content remains visible but cannot silently join active text.
+            raw_text = "? " + (raw_text or json.dumps(item, ensure_ascii=False))
+            notices.append({"code": "PROVIDER_RECORD_UNSUPPORTED", "source_record_id": source_id,
+                            "message": "辨識區塊格式不完整，原文已保留。", "before": item, "after": raw_text})
         has_prohibited_cancelled_prose = bool(_CANCELLED_PROSE_RE.search(raw_text))
-        if item.get("cancelled") == "yes" or has_prohibited_cancelled_prose:
-            cancelled_count += 1
-            continue
-        raw_text, decimal_changed = _protect_literal_decimal(
-            raw_text, str(item.get("multiplier_text") or "")
-        )
-        raw_text, special_changed = _restore_literal_special(
-            raw_text, str(item.get("special_text") or "")
-        )
-        decimal_restored += int(decimal_changed)
-        special_restored += int(special_changed)
+        if item.get("cancelled") in {"yes", "unclear"} or has_prohibited_cancelled_prose:
+            # Existing '?' is deliberately unresolved. Preserve *all* source text,
+            # including neighboring lines; no new executable cancellation syntax.
+            raw_text = "? " + raw_text
+            notices.append({
+                "code": "CANCELLATION_UNCONFIRMED", "source_record_id": source_id,
+                "message": "此區塊可能有取消記號，原文已保留，請直接檢查文字。",
+                "before": original, "after": raw_text, "human_confirmed": False,
+            })
+        for field in ("multiplier_text", "special_text"):
+            literal = str(item.get(field) or "")
+            # This is a disagreement flag, never evidence that one field is right.
+            parts = [part.strip() for part in literal.split(";") if part.strip()]
+            compact = re.sub(r"\s+", "", original).replace("X", "×").replace("x", "×")
+            if literal.lower() not in {"", "none", "unclear"} and any(
+                re.sub(r"\s+", "", part).replace("X", "×").replace("x", "×") not in compact
+                for part in parts
+            ):
+                notices.append({
+                    "code": "MODEL_FIELD_CONFLICT", "source_record_id": source_id,
+                    "message": "辨識欄位不一致；保留原文，未自動改值。",
+                    "field": field, "field_text": literal,
+                    "before": original, "after": original, "human_confirmed": False,
+                })
         if raw_text:
             records.append(raw_text)
-    notices: list[dict[str, str]] = []
-    if cancelled_count:
-        notices.append(
-            {
-                "code": "CANCELLED_RECORD_OMITTED",
-                "message": (
-                    f"辨識到 {cancelled_count} 個可能已劃掉的區塊，未放入投注文字；"
-                    "請對照圖片確認。"
-                ),
-            }
-        )
-    if decimal_restored:
-        notices.append(
-            {
-                "code": "DECIMAL_LITERAL_RESTORED",
-                "message": f"已依可見 multiplier literal 保留 {decimal_restored} 個 0.5。",
-            }
-        )
-    if special_restored:
-        notices.append(
-            {
-                "code": "SPECIAL_LITERAL_RESTORED",
-                "message": f"已保留 {special_restored} 個完整 special literal。",
-            }
-        )
     return "\n\n".join(records), notices
 
 
@@ -356,22 +347,46 @@ def gemma_evidence_to_betguard_text(evidence: dict[str, Any]) -> str:
     return text
 
 
-def preflight_image_text(text: str) -> dict[str, Any]:
+def preflight_image_text(text: str, *, game: str = "六合") -> dict[str, Any]:
     """Run the existing parser as a read-only preview for editable image text."""
     from betguard.vision.image_text_preflight import preview_image_text_with_existing_parser
 
-    return preview_image_text_with_existing_parser(text)
+    return preview_image_text_with_existing_parser(text, game=game)
 
 
-def transcribe_image_to_text(image_id: str) -> dict[str, Any]:
-    """Use only the existing whole-image Gemma reader as a typing aid.
+def _capture_failed_transcription(image_id, meta, reader, game, raw_response, code):
+    """Preserve received failed output without turning it into a prediction/truth."""
+    if raw_response is None:
+        return False
+    try:
+        from betguard.vision.image_text_acceptance import record_machine_transcription
+        record_machine_transcription(
+            image_id, source_image_sha256=meta.sha256, reader=reader, game=game,
+            ai_original_text="", provider_raw_response=raw_response, adapter_text="",
+            parser_result={"all_parseable": False, "prediction_validated": False, "error_code": code},
+            transformations=[{"code": code, "action": "preserved_unvalidated_response", "human_confirmed": False}],
+        )
+        return True
+    except Exception:
+        return False
+
+
+def transcribe_image_to_text(image_id: str, *, reader: str = "gemma", game: str = "六合") -> dict[str, Any]:
+    """Use one explicitly selected whole-image reader as a typing aid.
 
     The returned text has no value authority.  It becomes actionable only
     after the user sends the editable text through the existing text parser.
     """
+    if game not in {"539", "六合"}:
+        return _safe_error("INVALID_GAME", "請明確選擇 539 或六合。")
     meta = get_metadata(image_id)
     if meta is None or meta.is_expired():
         return _error("IMAGE_NOT_FOUND", "圖片不存在或已過期")
+    normalized_reader = str(reader or "gemma").strip().lower()
+    if normalized_reader in {"luna", OPENAI_LUNA_TRANSCRIPTION_PROVIDER_ID.lower()}:
+        return _transcribe_image_with_luna(image_id, meta, game=game)
+    if normalized_reader not in {"gemma", GEMMA_SHADOW_PROVIDER_ID.lower()}:
+        return _safe_error("IMAGE_TRANSCRIPTION_READER_INVALID", "不支援的圖片辨識方式。")
     request = RecognitionRequest(
         request_id=f"transcription-{image_id}",
         image_id=image_id,
@@ -398,12 +413,15 @@ def transcribe_image_to_text(image_id: str) -> dict[str, Any]:
     text, transcription_notices = gemma_evidence_to_betguard_text_with_notices(evidence)
     if not text:
         status = str(evidence.get("status") or "failed")
+        raw_captured = _capture_failed_transcription(image_id, meta, GEMMA_SHADOW_PROVIDER_ID, game,
+                                                    evidence.get("provider_raw_response"), status)
         return {
             **_safe_error(
                 "IMAGE_TRANSCRIPTION_EMPTY",
                 "AI 沒有讀到可用文字，請直接輸入或重新辨識。",
             ),
             "reader_status": status,
+            "failed_provider_response_captured": raw_captured,
             "transcription_notices": transcription_notices,
             "external_call_count": int(evidence.get("external_call_count") or 0),
             "retry_count": int(evidence.get("retry_count") or 0),
@@ -415,7 +433,14 @@ def transcribe_image_to_text(image_id: str) -> dict[str, Any]:
         record_machine_transcription(
             image_id,
             source_image_sha256=meta.sha256,
-            ai_original_text=text,
+            ai_original_text="\n\n".join(str(item.get("raw_text") or "") for item in _gemma_source_records(evidence)),
+            game=game,
+            provider_raw_response=evidence.get("provider_raw_response", evidence.get("raw_response_text")),
+            native_ocr_text="\n\n".join(str(item.get("raw_text") or "") for item in _gemma_source_records(evidence)),
+            adapter_text=text,
+            parser_result=preflight_image_text(text, game=game),
+            transformations=transcription_notices,
+            source_records=_gemma_source_records(evidence),
             reader=GEMMA_SHADOW_PROVIDER_ID,
             model_cache_identity={
                 "model": config.model,
@@ -434,7 +459,8 @@ def transcribe_image_to_text(image_id: str) -> dict[str, Any]:
     return _ok({
         "text": text,
         "transcription_notices": transcription_notices,
-        "parser_preflight": preflight_image_text(text),
+        "game": game,
+        "parser_preflight": preflight_image_text(text, game=game),
         "reader": GEMMA_SHADOW_PROVIDER_ID,
         "machine_transcription_only": True,
         "user_editable": True,
@@ -447,6 +473,143 @@ def transcribe_image_to_text(image_id: str) -> dict[str, Any]:
         "auto_confirm": False,
         "auto_submit": False,
     })
+
+
+def _transcribe_image_with_luna(image_id: str, meta: ImageMetadata, *, game: str = "六合") -> dict[str, Any]:
+    """Run one cached Luna request without entering legacy vision review."""
+    config = get_luna_transcription_config()
+    try:
+        prediction = transcribe_with_luna(
+            image_path=meta.storage_path,
+            mime_type=meta.mime_type,
+            image_sha256=meta.sha256,
+            config=config,
+        )
+    except LunaTranscriptionError as exc:
+        result = _safe_error(exc.code, str(exc))
+        result["failed_provider_response_captured"] = _capture_failed_transcription(
+            image_id, meta, OPENAI_LUNA_TRANSCRIPTION_PROVIDER_ID, game, getattr(exc, "provider_raw_response", None), exc.code)
+        result.update(
+            {
+                "reader": OPENAI_LUNA_TRANSCRIPTION_PROVIDER_ID,
+                "external_call_count": 1 if has_luna_api_key() else 0,
+                "retry_count": 0,
+            }
+        )
+        return result
+    except Exception:
+        return {
+            **_safe_error(
+                "IMAGE_TRANSCRIPTION_FAILED",
+                "Luna 圖片辨識目前無法使用，仍可改用 Gemma 或直接輸入文字。",
+            ),
+            "reader": OPENAI_LUNA_TRANSCRIPTION_PROVIDER_ID,
+            "external_call_count": 1 if has_luna_api_key() else 0,
+            "retry_count": 0,
+        }
+
+    native_text = str(prediction.get("native_ocr_text", prediction.get("text")) or "")
+    text = str(prediction.get("text") or "")
+    adapter_input = text
+    text, car_literal_reformatted = normalize_luna_parser_safe_literals(text)
+    if not text:
+        return {
+            **_safe_error(
+                "IMAGE_TRANSCRIPTION_EMPTY",
+                "Luna 沒有讀到可用文字，請改用 Gemma 或直接輸入。",
+            ),
+            "reader": OPENAI_LUNA_TRANSCRIPTION_PROVIDER_ID,
+            "external_call_count": int(prediction.get("external_call_count") or 0),
+            "retry_count": 0,
+        }
+
+    notices: list[dict[str, str]] = []
+    if car_literal_reformatted:
+        notices.append(
+            {
+                "code": "CAR_LITERAL_REFORMATTED",
+                "message": (
+                    f"已將 {car_literal_reformatted} 個可見車玩法文字改排為 existing parser 格式；"
+                    "號碼與金額未變更。"
+                ),
+            }
+        )
+    cancelled_count = int(prediction.get("cancelled_count") or 0)
+    if cancelled_count:
+        notices.append(
+            {
+                "code": "CANCELLED_RECORD_OMITTED",
+                "message": (
+                    f"Luna 辨識到 {cancelled_count} 個可能已劃掉的區塊，未放入投注文字；"
+                    "請對照圖片確認。"
+                ),
+            }
+        )
+    uncertain_count = int(prediction.get("uncertain_count") or 0)
+    if uncertain_count:
+        notices.append(
+            {
+                "code": "LUNA_UNCERTAIN_TEXT_PRESENT",
+                "message": f"Luna 標記 {uncertain_count} 個看不清楚的位置，請直接檢查文字中的 ?。",
+            }
+        )
+
+    capture_available = False
+    try:
+        from betguard.vision.image_text_acceptance import record_machine_transcription
+
+        record_machine_transcription(
+            image_id,
+            source_image_sha256=meta.sha256,
+            ai_original_text=native_text,
+            game=game,
+            provider_raw_response=prediction.get("provider_raw_response"),
+            native_ocr_text=prediction.get("native_ocr_text"),
+            adapter_text=text,
+            parser_result=preflight_image_text(text, game=game),
+            transformations=notices
+                + ([{"code": "PROVIDER_RECORD_FORMATTING", "before": native_text, "after": adapter_input}]
+                   if prediction.get("native_ocr_text") is not None and native_text != adapter_input else [])
+                + ([{"code": "CAR_LITERAL_REFORMATTED", "before": adapter_input, "after": text}]
+                   if adapter_input != text else []),
+            source_records=prediction.get("source_records", []),
+            reader=OPENAI_LUNA_TRANSCRIPTION_PROVIDER_ID,
+            model_cache_identity={
+                "model": prediction.get("model"),
+                "adapter_version": prediction.get("adapter_version"),
+                "prompt_sha256": prediction.get("prompt_sha256"),
+                "response_schema_version": prediction.get("response_schema_version"),
+                "image_detail": prediction.get("image_detail"),
+                "cache_identity": prediction.get("cache_identity"),
+                "cache_hit": bool(prediction.get("cache_hit", False)),
+            },
+        )
+        capture_available = True
+    except Exception:
+        capture_available = False
+
+    return _ok(
+        {
+            "text": text,
+            "transcription_notices": notices,
+            "game": game,
+            "parser_preflight": preflight_image_text(text, game=game),
+            "reader": OPENAI_LUNA_TRANSCRIPTION_PROVIDER_ID,
+            "model": prediction.get("model"),
+            "machine_transcription_only": True,
+            "user_editable": True,
+            "value_authority": "existing_text_parser_after_explicit_user_action",
+            "cache_hit": bool(prediction.get("cache_hit", False)),
+            "external_call_count": int(prediction.get("external_call_count") or 0),
+            "retry_count": 0,
+            "latency_ms": int(prediction.get("latency_ms") or 0),
+            "usage": dict(prediction.get("usage") or {}),
+            "verified_sample_capture_available": capture_available,
+            "auto_apply": False,
+            "auto_confirm": False,
+            "auto_submit": False,
+        }
+    )
 
 
 # ── Job execution ────────────────────────────────────────────────────────────

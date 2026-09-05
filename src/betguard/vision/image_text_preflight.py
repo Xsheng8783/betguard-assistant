@@ -50,17 +50,22 @@ def _issue_from_fragment(fragment: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def preview_image_text_with_existing_parser(text: str) -> dict[str, Any]:
+def preview_image_text_with_existing_parser(text: str, *, game: str = "六合") -> dict[str, Any]:
     """Preview the exact text without mutating it or creating queue artifacts."""
     from betguard.webfill.batch_mock_queue import READY_FOR_QUEUE, build_batch_mock_queue
 
     original_text = str(text or "")
     stripped = original_text.strip()
     digest = hashlib.sha256(original_text.encode("utf-8")).hexdigest()
+    if game not in {"539", "六合"}:
+        return {"ok": False, "game": game, "all_parseable": False, "unresolved_count": 1,
+                "issues": [{"line_no": 0, "raw": original_text, "reason": "請選擇 539 或六合。"}],
+                "error": "INVALID_GAME", "auto_submit": False}
     if not stripped:
         return {
             "ok": True,
             "schema_version": SCHEMA_VERSION,
+            "game": game,
             "all_parseable": False,
             "parsed_bet_count": 0,
             "unresolved_count": 0,
@@ -73,11 +78,12 @@ def preview_image_text_with_existing_parser(text: str) -> dict[str, Any]:
         }
 
     try:
-        queue = build_batch_mock_queue(original_text, game="六合")
+        queue = build_batch_mock_queue(original_text, game=game)
     except Exception as exc:
         return {
             "ok": False,
             "schema_version": SCHEMA_VERSION,
+            "game": game,
             "all_parseable": False,
             "parsed_bet_count": 0,
             "unresolved_count": 1,
@@ -119,10 +125,18 @@ def preview_image_text_with_existing_parser(text: str) -> dict[str, Any]:
     return {
         "ok": True,
         "schema_version": SCHEMA_VERSION,
+        "game": game,
         "all_parseable": all_parseable,
         "parsed_bet_count": len(valid),
         "unresolved_count": len(issues),
         "issues": issues,
+        "parser_normalized_result": {
+            "game": game,
+            "bets": valid,
+            "invalid_fragments": invalid,
+            "ignored_metadata_lines": ignored,
+            "source_mapping_basis": "existing parser original_line/original_lines; not verified physical boundaries",
+        },
         "input_text_sha256": digest,
         "preview_only": True,
         "text_mutated": False,

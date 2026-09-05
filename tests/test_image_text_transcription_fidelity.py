@@ -44,7 +44,7 @@ def test_sample007_physical_records_stay_separated_by_blank_line() -> None:
     assert "12 × 03 22 31" not in records[2]
 
 
-def test_decimal_contract_restores_only_literal_multiplier_context() -> None:
+def test_decimal_contract_preserves_conflicting_literal_without_repair() -> None:
     evidence = {
         "status": "completed",
         "items": [
@@ -58,9 +58,8 @@ def test_decimal_contract_restores_only_literal_multiplier_context() -> None:
 
     text, notices = service.gemma_evidence_to_betguard_text_with_notices(evidence)
 
-    assert text.endswith("2,3,4 × 0.5")
-    assert "2,3,4 × 05" not in text
-    assert any(item["code"] == "DECIMAL_LITERAL_RESTORED" for item in notices)
+    assert text.endswith("2,3,4 × 05")
+    assert any(item["code"] == "MODEL_FIELD_CONFLICT" for item in notices)
 
 
 def test_column_examples_are_betguard_parser_compatible() -> None:
@@ -76,7 +75,7 @@ def test_column_examples_are_betguard_parser_compatible() -> None:
         assert result["type"] == "column"
 
 
-def test_special_tail_digit_is_restored_from_literal_evidence() -> None:
+def test_special_tail_digit_conflict_is_not_repaired_from_model_evidence() -> None:
     evidence = {
         "status": "completed",
         "items": [
@@ -90,11 +89,11 @@ def test_special_tail_digit_is_restored_from_literal_evidence() -> None:
 
     text, notices = service.gemma_evidence_to_betguard_text_with_notices(evidence)
 
-    assert text == "03 × 16 × 7尾\n2,3 × 1"
-    assert any(item["code"] == "SPECIAL_LITERAL_RESTORED" for item in notices)
+    assert text == "03 × 16 × 尾\n2,3 × 1"
+    assert any(item["code"] == "MODEL_FIELD_CONFLICT" for item in notices)
 
 
-def test_cancelled_record_never_becomes_english_or_active_text() -> None:
+def test_cancelled_record_preserves_source_and_cannot_parse_as_active() -> None:
     evidence = {
         "status": "completed",
         "items": [
@@ -106,15 +105,11 @@ def test_cancelled_record_never_becomes_english_or_active_text() -> None:
 
     text, notices = service.gemma_evidence_to_betguard_text_with_notices(evidence)
 
-    assert text == "04 × 19 × 39\n2,3 × 0.5"
-    assert "crossed out" not in text.lower()
-    assert "cancelled" not in text.lower()
-    assert notices == [
-        {
-            "code": "CANCELLED_RECORD_OMITTED",
-            "message": "辨識到 2 個可能已劃掉的區塊，未放入投注文字；請對照圖片確認。",
-        }
-    ]
+    assert text.startswith("04 × 19 × 39\n2,3 × 0.5")
+    assert "(crossed out with red ink)" in text
+    assert "(cancelled bet)" in text
+    assert not service.preflight_image_text(text)["all_parseable"]
+    assert len([n for n in notices if n["code"] == "CANCELLATION_UNCONFIRMED"]) == 2
 
 
 def test_prompt_contains_generic_fidelity_rules_without_sample_special_case() -> None:

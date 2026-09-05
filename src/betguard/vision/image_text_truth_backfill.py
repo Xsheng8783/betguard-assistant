@@ -593,11 +593,11 @@ def _actual_rule_map(result: dict[str, Any]) -> dict[str, str]:
     return mapped
 
 
-def semantic_round_trip(rendered: dict[str, Any]) -> dict[str, Any]:
+def semantic_round_trip(rendered: dict[str, Any], *, game: str = "六合") -> dict[str, Any]:
     if not rendered.get("ok"):
         return {"exact": False, "reason": rendered.get("reason")}
     text = str(rendered["human_verified_betguard_text"])
-    validation = validate_with_existing_parser(text)
+    validation = validate_with_existing_parser(text, game=game)
     if not validation.get("ok"):
         return {
             "exact": False,
@@ -687,8 +687,8 @@ def semantic_round_trip(rendered: dict[str, Any]) -> dict[str, Any]:
     return proof
 
 
-def round_trip_reviewed_existing_text(text: str) -> dict[str, Any]:
-    validation = validate_with_existing_parser(text)
+def round_trip_reviewed_existing_text(text: str, *, game: str = "六合") -> dict[str, Any]:
+    validation = validate_with_existing_parser(text, game=game)
     if not validation.get("ok"):
         return {
             "exact": False,

@@ -133,10 +133,11 @@ def test_http_transcription_endpoint_returns_only_editable_text(monkeypatch) -> 
     monkeypatch.setattr(
         service,
         "transcribe_image_to_text",
-        lambda image_id: {
+        lambda image_id, *, reader="gemma", game="六合": {
             "ok": True,
             "text": "05.08.09 二三50",
             "image_id_seen": image_id,
+            "reader_seen": reader,
             "machine_transcription_only": True,
             "user_editable": True,
             "auto_submit": False,
@@ -162,16 +163,53 @@ def test_http_transcription_endpoint_returns_only_editable_text(monkeypatch) -> 
         "ok": True,
         "text": "05.08.09 二三50",
         "image_id_seen": "image-1",
+        "reader_seen": "gemma",
         "machine_transcription_only": True,
         "user_editable": True,
         "auto_submit": False,
     }
 
 
+def test_http_transcription_endpoint_forwards_selected_luna_reader(monkeypatch) -> None:
+    seen = {}
+
+    def fake_transcription(image_id, *, reader="gemma", game="六合"):
+        seen.update({"image_id": image_id, "reader": reader})
+        return {
+            "ok": True,
+            "text": "05 × 08 09 33 × 10 20 39 2,3 × 1",
+            "reader": "openai-gpt-5.6-luna-transcription",
+            "machine_transcription_only": True,
+            "user_editable": True,
+            "auto_submit": False,
+        }
+
+    monkeypatch.setattr(service, "transcribe_image_to_text", fake_transcription)
+
+    with _running_app() as port:
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            connection.request(
+                "POST",
+                "/api/vision/v1/transcriptions",
+                body=json.dumps({"image_id": "image-1", "reader": "luna"}).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            payload = json.loads(response.read().decode())
+        finally:
+            connection.close()
+
+    assert response.status == 200
+    assert seen == {"image_id": "image-1", "reader": "luna"}
+    assert payload["reader"] == "openai-gpt-5.6-luna-transcription"
+    assert payload["auto_submit"] is False
+
+
 def test_http_parser_preflight_is_preview_only(monkeypatch) -> None:
     seen = {}
 
-    def fake_preflight(text):
+    def fake_preflight(text, *, game="六合"):
         seen["text"] = text
         return {
             "ok": True,
@@ -221,7 +259,7 @@ def test_image_unresolved_never_builds_queue_or_legacy_cards(
     monkeypatch.setattr(
         service,
         "preflight_image_text",
-        lambda _text: {
+        lambda _text, *, game="六合": {
             "ok": True,
             "all_parseable": False,
             "unresolved_count": 21,
@@ -330,7 +368,7 @@ def test_pasted_text_keeps_legacy_mixed_review_behavior(
 def test_http_verified_sample_uses_only_image_id_and_human_text(monkeypatch) -> None:
     captured = {}
 
-    def fake_save(image_id, verified_text):
+    def fake_save(image_id, verified_text, *, game="六合"):
         captured["image_id"] = image_id
         captured["verified_text"] = verified_text
         return {

@@ -57,6 +57,8 @@ def literal_tokens_from_regions(regions: Iterable[dict[str, Any]]) -> list[dict[
                 "source_region_bbox": region["bbox"],
                 "source_character_span": [match.start(), match.end()],
                 "bbox_origin": "deterministic_partition_of_ppocr_region",
+                "bbox_is_estimated": True,
+                "token_localization_verified": False,
             })
             tokens.append(token)
     return tokens
