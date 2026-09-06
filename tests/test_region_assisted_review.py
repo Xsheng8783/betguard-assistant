@@ -168,11 +168,25 @@ def test_private_source_survives_upload_expiry(store):
     assert private.read_bytes()==old and store.image_path.read_bytes()==old
 
 
-def test_invalid_legacy_inline_multiplier_not_silently_rewritten(store):
+def test_explicit_inline_multiplier_confirm_keeps_raw_and_distinct_values(store):
     s=store.start('539',initial_text='01 07 19 2×5 3×0.5')
+    assert not s['regions'][0]['region_confirmed']
+    s=action(store,s,'confirm',region_id=s['regions'][0]['id'])
+    assert s['regions'][0]['region_confirmed']
+    assert s['regions'][0]['raw_transcription']=='01 07 19 2×5 3×0.5'
+    from betguard.vision.service import preflight_image_text
+    parsed=preflight_image_text(s['regions'][0]['raw_transcription'],game='539')
+    assert parsed['all_parseable']
+    assert parsed['parser_normalized_result']['bets'][0]['result']['bets']=={
+        '2':{'unit':5,'money':500},'3':{'unit':0.5,'money':50}}
+
+
+def test_conflicting_inline_multiplier_still_cannot_be_confirmed(store):
+    raw='01 07 19 2×5 2×0.5'
+    s=store.start('539',initial_text=raw)
     s=action(store,s,'confirm',region_id=s['regions'][0]['id'])
     assert not s['regions'][0]['region_confirmed']
-    assert s['regions'][0]['raw_transcription']=='01 07 19 2×5 3×0.5'
+    assert s['regions'][0]['raw_transcription']==raw
 
 
 def test_failed_revision_publication_keeps_previous_complete_state(store,monkeypatch):

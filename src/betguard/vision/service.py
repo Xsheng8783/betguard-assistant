@@ -38,12 +38,15 @@ from betguard.vision.image_intake import (
     save_metadata,
     validate_and_store,
 )
+from betguard.vision.image_text_literals import (
+    FORMATTER_VERSION as IMAGE_TEXT_FORMATTER_VERSION,
+    normalize_parser_safe_literals,
+)
 from betguard.vision.openai_luna_transcription import (
     PROVIDER_ID as OPENAI_LUNA_TRANSCRIPTION_PROVIDER_ID,
     LunaTranscriptionError,
     get_config_from_env as get_luna_transcription_config,
     has_api_key as has_luna_api_key,
-    normalize_parser_safe_literals as normalize_luna_parser_safe_literals,
     transcribe_with_luna,
 )
 from betguard.vision.paid_fallback import run_paid_vision_fallback_job
@@ -304,6 +307,7 @@ def gemma_evidence_to_betguard_text_with_notices(
             continue
         raw_text = str(item.get("raw_text") or "")
         original = raw_text
+        notices_before_record = len(notices)
         source_id = str(item.get("evidence_id") or f"record-{index + 1}")
         rejected = any(r.get("item_index") == index + 1 for r in evidence.get("rejected_items", []))
         if rejected:
@@ -335,6 +339,17 @@ def gemma_evidence_to_betguard_text_with_notices(
                     "message": "辨識欄位不一致；保留原文，未自動改值。",
                     "field": field, "field_text": literal,
                     "before": original, "after": original, "human_confirmed": False,
+                })
+        if not item.get("uncertain") and len(notices) == notices_before_record:
+            # Syntax-only spelling, never repair a conflicting model field or
+            # make an unvalidated/possibly-cancelled record executable.
+            raw_text, count = normalize_parser_safe_literals(raw_text)
+            if count:
+                notices.append({
+                    "code": "CAR_LITERAL_REFORMATTED", "source_record_id": source_id,
+                    "message": "車數已改排為明確單位格式；號碼與車數未變更，仍請核對原圖。",
+                    "formatter_version": IMAGE_TEXT_FORMATTER_VERSION,
+                    "before": original, "after": raw_text, "human_confirmed": False,
                 })
         if raw_text:
             records.append(raw_text)
@@ -448,6 +463,7 @@ def transcribe_image_to_text(image_id: str, *, reader: str = "gemma", game: str 
                 "adapter_version": config.adapter_version,
                 "prompt_sha256": config.prompt_sha256,
                 "request_schema_version": config.request_schema_version,
+                "text_formatter_version": IMAGE_TEXT_FORMATTER_VERSION,
                 "cache_hit": bool(evidence.get("cache_hit", False)),
             },
         )
@@ -511,7 +527,7 @@ def _transcribe_image_with_luna(image_id: str, meta: ImageMetadata, *, game: str
     native_text = str(prediction.get("native_ocr_text", prediction.get("text")) or "")
     text = str(prediction.get("text") or "")
     adapter_input = text
-    text, car_literal_reformatted = normalize_luna_parser_safe_literals(text)
+    text, car_literal_reformatted = normalize_parser_safe_literals(text)
     if not text:
         return {
             **_safe_error(
@@ -530,8 +546,9 @@ def _transcribe_image_with_luna(image_id: str, meta: ImageMetadata, *, game: str
                 "code": "CAR_LITERAL_REFORMATTED",
                 "message": (
                     f"已將 {car_literal_reformatted} 個可見車玩法文字改排為 existing parser 格式；"
-                    "號碼與金額未變更。"
+                    "號碼與車數未變更，仍請核對原圖。"
                 ),
+                "formatter_version": IMAGE_TEXT_FORMATTER_VERSION,
             }
         )
     cancelled_count = int(prediction.get("cancelled_count") or 0)
@@ -581,6 +598,7 @@ def _transcribe_image_with_luna(image_id: str, meta: ImageMetadata, *, game: str
                 "response_schema_version": prediction.get("response_schema_version"),
                 "image_detail": prediction.get("image_detail"),
                 "cache_identity": prediction.get("cache_identity"),
+                "text_formatter_version": IMAGE_TEXT_FORMATTER_VERSION,
                 "cache_hit": bool(prediction.get("cache_hit", False)),
             },
         )

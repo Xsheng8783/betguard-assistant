@@ -85,6 +85,8 @@ def _local_server(tmp_path: Path, monkeypatch) -> Iterator[int]:
 
 MOCK_NORMAL_SUCCESS = {
     "ok": True,
+    "numbers_verified": True,
+    "game_verified": True,
     "amounts_verified": True,
     "missing_targets": [],
     "missing_amount_stars": [],
@@ -213,15 +215,18 @@ class TestAssistPanelE2E:
             page.wait_for_selector("#valid-items .assist-fill-btn", timeout=8000)
             fill_btn = page.query_selector("#valid-items .assist-fill-btn")
             fill_btn.click()
+            page.wait_for_selector(".mark-done-btn")
+            assert not page.locator(".assist-completed").count()
+            page.click(".mark-done-btn")  # explicit existing human action
             page.wait_for_selector("#valid-items .item.assist-completed", timeout=5000)
             # Wait 3 seconds — card must still exist (no auto-remove)
             page.wait_for_timeout(3000)
         cards = page.query_selector_all("#valid-items .item.assist-completed")
         assert len(cards) >= 1, "Card should have assist-completed class after success"
         status = page.inner_text("body")
-        assert "請確認真站" in status
+        assert "已下牌" in status
         assert "已輔助填入" in status
-        assert "assist-completed" in status or "已填入" in status
+        assert "已下牌" in status
         # Count assertion
         completed_cnt = int(page.inner_text("#completed-count"))
         assert completed_cnt >= 1
@@ -323,17 +328,16 @@ class TestAssistPanelE2E:
             btns = page.query_selector_all("#valid-items .assist-fill-btn")
             assert len(btns) >= 2
             btns[0].click()
+            page.wait_for_selector(".mark-done-btn")
+            assert not page.locator(".assist-completed").count()
+            page.click(".mark-done-btn")
             page.wait_for_selector("#valid-items .item.assist-completed", timeout=5000)
             # Click remove on first completed card
-            rm_btns = page.query_selector_all("#valid-items .item.assist-completed button")
-            for b in rm_btns:
-                if b.inner_text() == "移除":
-                    b.click()
-                    break
+            page.click("#clear-completed-btn")
             page.wait_for_timeout(500)
         # First card removed, second still exists
         all_cards = page.query_selector_all("#valid-items .item")
-        assert len(all_cards) >= 1, "Second card should remain"
+        assert len(all_cards) == 1, "Only the second, uncompleted card should remain"
 
     def test_clear_completed_removes_only_completed_cards(
         self, tmp_path: Path, monkeypatch, page: Page
@@ -446,6 +450,9 @@ class TestAssistPanelE2E:
             page.click("#createBatchBtn")
             page.wait_for_selector("#valid-items .assist-fill-btn", timeout=8000)
             page.click("#valid-items .assist-fill-btn")
+            page.wait_for_selector(".mark-done-btn", timeout=5000)
+            assert not page.locator(".assist-completed").count()
+            page.click(".mark-done-btn")
             page.wait_for_selector("#valid-items .item.assist-completed", timeout=5000)
         assert not external, f"External requests made: {external}"
 

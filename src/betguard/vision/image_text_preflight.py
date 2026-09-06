@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import Any
 
 
@@ -78,7 +79,7 @@ def preview_image_text_with_existing_parser(text: str, *, game: str = "六合") 
         }
 
     try:
-        queue = build_batch_mock_queue(original_text, game=game)
+        queue = build_batch_mock_queue(original_text, game=game, adjacent_rule_scope=False)
     except Exception as exc:
         return {
             "ok": False,
@@ -107,6 +108,18 @@ def preview_image_text_with_existing_parser(text: str, *, game: str = "六合") 
     invalid = list(preprocessing.get("invalid_fragments", []))
     ignored = list(preprocessing.get("ignored_metadata_lines", []))
     issues = [_issue_from_fragment(fragment) for fragment in invalid]
+    for candidate in valid:
+        # Pasted-text car shorthand stays legal in the existing parser. In image
+        # text a bare single-digit rule is also a plausible orphan multiplier;
+        # require explicit car wording or a zero-padded number, never guess scope.
+        source = str(candidate.get("original_line") or candidate.get("raw") or "")
+        if (candidate.get("result", {}).get("type") == "car"
+                and re.fullmatch(r"\s*[234]\s*[xX×*]\s*\d+(?:\.\d+)?(?:支)?\s*", source)):
+            issues.append({
+                "line_no": int(candidate.get("line_no") or 0), "raw": source,
+                "reason": "這可能是漏掉號碼的倍率行；請寫出完整投注。若是車，請明寫車字或兩位號碼。",
+                "code": "IMAGE_SINGLE_DIGIT_ROLE_AMBIGUOUS", "parser_errors": [],
+            })
     for line in ignored:
         issues.append(
             {

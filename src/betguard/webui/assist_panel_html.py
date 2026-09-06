@@ -64,6 +64,16 @@ button{font-size:15px;padding:8px 16px;border-radius:6px;border:none;cursor:poin
 var panelState = { queuePath: "", validCandidates: [], reviewCandidates: [] };
 var TEXT_INPUT_SOURCE = "TEXT_INPUT";
 var IMAGE_TRANSCRIPTION_TEXT_SOURCE = "IMAGE_TRANSCRIPTION_TEXT";
+var fillBusy = false;
+var inputRevision = 0;
+function invalidateTextResult() {
+  inputRevision++;
+  panelState.stale = true;
+  document.querySelectorAll('.assist-fill-btn').forEach(function(b){ b.disabled=true; });
+  setStatus("文字或彩種已變更，請重新解析。");
+}
+document.getElementById("batch-text").addEventListener("input", invalidateTextResult);
+document.getElementById("assist-game").addEventListener("change", invalidateTextResult);
 function getAssistGame() { return document.getElementById("assist-game").value; }
 
 function setStatus(msg) {
@@ -75,12 +85,12 @@ function setStatus(msg) {
 function createBatch() {
   var ta = document.getElementById("batch-text");
   var btn = document.getElementById("createBatchBtn");
-  var text = ta.value.trim();
+  var text = ta.value;
   var requestedSource = arguments.length ? arguments[0] : TEXT_INPUT_SOURCE;
   var inputSource = requestedSource === IMAGE_TRANSCRIPTION_TEXT_SOURCE
     ? IMAGE_TRANSCRIPTION_TEXT_SOURCE : TEXT_INPUT_SOURCE;
 
-  if (text) {
+  if (text.trim()) {
     // Textarea has content — use it directly
     _doCreateBatch(text, ta, btn, inputSource);
   } else {
@@ -100,8 +110,8 @@ function createBatch() {
         setStatus("剪貼簿沒有可用文字");
         return;
       }
-      ta.value = trimmed;
-      _doCreateBatch(trimmed, ta, btn, inputSource);
+      ta.value = clipText;
+      _doCreateBatch(clipText, ta, btn, inputSource);
     }).catch(function () {
       btn.disabled = false;
       btn.textContent = "貼上並建立審核";
@@ -111,13 +121,15 @@ function createBatch() {
 }
 
 function _doCreateBatch(text, ta, btn, inputSource) {
+  if (fillBusy) return;
+  var game = getAssistGame(), revision = inputRevision;
   btn.disabled = true;
   btn.textContent = "建立中…";
   setStatus("建立審核中...");
   fetch("/assist-panel/create-batch", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text: text, source: inputSource || TEXT_INPUT_SOURCE, game: getAssistGame() })
+    body: JSON.stringify({ text: text, source: inputSource || TEXT_INPUT_SOURCE, game: game })
   }).then(function (r) { return r.text(); }).then(function (raw) {
     btn.disabled = false;
     btn.textContent = "貼上並建立審核";
@@ -125,6 +137,12 @@ function _doCreateBatch(text, ta, btn, inputSource) {
     try { data = JSON.parse(raw); }
     catch (e) { setStatus("回應不是有效 JSON"); return; }
     if (!data.ok) { setStatus(data.error || "建立審核失敗"); return; }
+    if (revision !== inputRevision || game !== getAssistGame() || text !== ta.value) {
+      setStatus("文字或彩種已變更，請重新解析。"); return;
+    }
+    panelState.stale = false;
+    panelState.game = game;
+    panelState.text = text;
     panelState.queuePath = data.queue_path || "";
     var valid = data.valid_items || data.valid_candidates || data.valid || [];
     var review = data.review_items || data.needs_review || data.invalid_items
@@ -134,7 +152,9 @@ function _doCreateBatch(text, ta, btn, inputSource) {
     renderValid(valid);
     renderReview(review);
     updateCompletedCount();
-    setStatus("已建立 " + valid.length + " 筆可輔助， " + review.length + " 筆需確認");
+    var supported = valid.filter(function(c){return c.fill_supported !== false;}).length;
+    setStatus("已建立 " + supported + " 筆可輔助， " + review.length + " 筆需確認"
+      + (supported < valid.length ? "，" + (valid.length-supported) + " 筆欄位尚未支援" : ""));
   }).catch(function (e) {
     btn.disabled = false;
     btn.textContent = "貼上並建立審核";
@@ -144,14 +164,18 @@ function _doCreateBatch(text, ta, btn, inputSource) {
 
 document.getElementById("createBatchBtn").addEventListener("click", createBatch);
 
-function renderValid(items) {
+function renderValid(items, appendFrom) {
   var container = document.getElementById("valid-items");
-  document.getElementById("valid-count").textContent = items.length;
-  if (!items.length) { container.innerHTML = '<div class="muted">目前沒有可輔助填入項目</div>'; return; }
+  if (!items.length) {
+    container.innerHTML = '<div class="muted">目前沒有可輔助填入項目</div>';
+    updateValidCount(); return;
+  }
   var html = "";
   items.forEach(function (c, i) {
+    if (appendFrom != null && i < appendFrom) return;
     var itemId = c.manual_candidate_id || ("item-" + i);
-    var nums = (c.numbers || []).join(", ");
+    var groups = c.columns || [c.numbers || []];
+    var nums = groups.map(function(g){return g.map(function(n){return String(n).padStart(2,"0");}).join(" ");}).join(" × ");
     var stars = (c.stars || []).join("") + "星";
     var unit = c.unit != null ? c.unit + "支" : "";
     var money = c.money != null ? c.money + "元" : "";
@@ -159,7 +183,8 @@ function renderValid(items) {
     var betType = c.bet_type || c.type || "normal";
     var idx = c.index != null ? c.index : (c.item_index != null ? c.item_index : i);
     html += '<div class="item" id="valid-item-' + itemId + '">'
-      + '<div><strong>' + (nums || summary) + '</strong></div>'
+      + '<div><strong>' + escapeHtml(nums || summary) + '</strong></div>'
+      + '<div class="semantic-preview">' + escapeHtml(summary) + '</div>'
       + '<div style="font-size:14px;color:#64748b">' + betType + ' | ' + stars;
     if (unit) html += ' | ' + unit;
     if (money) html += ' | ' + money;
@@ -167,12 +192,26 @@ function renderValid(items) {
       + '<button class="assist-fill-btn" onclick="assistPanelFillBtn(this)"'
       + ' data-queue-path="' + panelState.queuePath + '"'
       + ' data-item-index="' + idx + '"'
-      + ' data-bet-type="' + betType + '"';
+      + ' data-bet-type="' + betType + '"'
+      + ' data-game="' + (c.game || panelState.game || getAssistGame()) + '"';
+    if (c.fill_supported === false) html += ' data-fill-unsupported="true"';
+    if (c.fill_supported === false || panelState.stale) html += ' disabled';
     if (c.manual_candidate_id) html += ' data-manual-id="' + c.manual_candidate_id + '"';
     html += '>輔助填入</button>'
+      + (c.fill_supported === false ? '<div class="fill-unsupported">' + escapeHtml(c.fill_unsupported_reason) + '</div>' : '')
       + '</div>';
   });
-  container.innerHTML = html;
+  if (appendFrom != null) {
+    container.querySelectorAll(':scope > .muted').forEach(function(el){el.remove();});
+    container.insertAdjacentHTML("beforeend", html);
+  } else container.innerHTML = html;
+  updateValidCount();
+}
+
+function updateValidCount() {
+  document.getElementById("valid-count").textContent = document.querySelectorAll(
+    '#valid-items .item:not(.assist-completed) .assist-fill-btn:not([data-fill-unsupported])'
+  ).length;
 }
 
 function renderReview(items) {
@@ -215,7 +254,7 @@ function removeReviewCandidateFromState(cid) {
 }
 
 function escapeHtml(s) {
-  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
 }
 
 var pinState = false;
@@ -268,23 +307,32 @@ function editReviewItem(btn) {
 }
 
 function submitEdit(cid) {
+  if (fillBusy) return;
   var ta = document.getElementById("edit-text-" + cid);
   if (!ta) return;
-  var newText = ta.value.trim();
-  if (!newText) { setStatus("請輸入牌文"); return; }
+  var newText = ta.value;
+  if (!newText.trim()) { setStatus("請輸入牌文"); return; }
   setStatus("重新解析中...");
+  var game = getAssistGame(), revision = inputRevision;
   fetch("/manual-reparse", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text: newText })
+    body: JSON.stringify({ text: newText, game: game })
   }).then(function (r) { return r.json(); }).then(function (data) {
     if (data.ok) {
+      if (revision !== inputRevision || game !== getAssistGame() || ta.value !== newText) {
+        setStatus("文字或彩種已變更，請重新解析。"); return;
+      }
       // Remove old review card
       var row = document.getElementById("review-item-" + cid);
       if (row) row.remove();
       removeReviewCandidateFromState(cid);
       // Build valid candidate from reparse result
       var newCand = {
+        columns: data.columns,
+        game: data.game,
+        fill_supported: data.fill_supported,
+        fill_unsupported_reason: data.fill_unsupported_reason,
         numbers: data.numbers || [],
         stars: data.stars || [],
         amounts: data.amounts || {},
@@ -295,10 +343,13 @@ function submitEdit(cid) {
         raw: newText,
         index: panelState.validCandidates ? panelState.validCandidates.length + 1 : 1
       };
-      panelState.validCandidates = (panelState.validCandidates || []).concat([newCand]);
-      renderValid(panelState.validCandidates);
+      var previousCount = (panelState.validCandidates || []).length;
+      var added = data.candidates || [newCand];
+      panelState.validCandidates = (panelState.validCandidates || []).concat(added);
+      renderValid(panelState.validCandidates, previousCount);
       updateReviewCount();
-      setStatus("已加入可輔助填入");
+      setStatus(added.every(function(c){return c.fill_supported !== false;})
+        ? "已加入可輔助填入" : "已保留解析結果；部分玩法填入欄位尚未支援。");
     } else {
       setStatus(data.error || data.reason || "解析失敗，仍需人工確認");
     }
@@ -364,6 +415,7 @@ function updateCompletedCount() {
   var cnt = document.querySelectorAll(".assist-completed").length;
   document.getElementById("completed-count").textContent = cnt;
   document.getElementById("clear-completed-btn").disabled = (cnt === 0);
+  updateValidCount();
 }
 
 function clearCompleted() {
@@ -371,98 +423,56 @@ function clearCompleted() {
   updateCompletedCount();
 }
 
-function assistPanelFillBtn(btn) {
-  var queuePath = btn.getAttribute("data-queue-path") || panelState.queuePath;
-  var itemIndex = parseInt(btn.getAttribute("data-item-index"), 10);
-  var betType = btn.getAttribute("data-bet-type") || "normal";
-  var manualId = btn.getAttribute("data-manual-id") || "";
-  btn.disabled = true;
-  btn.textContent = "處理中...";
-  var body;
-  if (manualId) {
-    body = JSON.stringify({ manual_candidate_id: manualId, bet_type: betType });
-  } else {
-    body = JSON.stringify({ queue_path: queuePath, item_index: itemIndex, bet_type: betType });
+function assistPanelFillBtn(btn, refill) {
+  if (fillBusy || btn.disabled || panelState.stale) return;
+  var game=btn.getAttribute("data-game") || panelState.game || getAssistGame();
+  if (game!==getAssistGame() || (panelState.text!=null && panelState.text!==document.getElementById("batch-text").value)) {
+    invalidateTextResult(); return;
   }
-  fetch("/assist-fill/start", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: body
-  }).then(function (r) { return r.json(); }).then(function (data) {
-    var row = btn.parentElement;
-    var isColumn = (betType === "column" || betType === "zhu_peng" || betType === "zhupeng");
-    var reallyOk = isColumn ? (data.ok === true) : (data.ok === true && data.amounts_verified === true && !(data.missing_targets && data.missing_targets.length) && !(data.missing_amount_stars && data.missing_amount_stars.length));
-    if (reallyOk && row) {
-      // Replace single button with [重新填入] + [已下牌]
-      var buttonsHtml = '<button class="assist-fill-btn" onclick="assistRefillBtn(this)"'
-        + ' data-queue-path="' + queuePath + '"'
-        + ' data-item-index="' + itemIndex + '"'
-        + ' data-bet-type="' + betType + '"';
-      if (manualId) buttonsHtml += ' data-manual-id="' + manualId + '"';
-      buttonsHtml += ' style="background:#059669">重新填入</button>'
-        + ' <button class="btn-manual" onclick="markItemDone(this)"'
-        + ' data-queue-path="' + queuePath + '"'
-        + ' data-item-index="' + itemIndex + '"';
-      if (manualId) buttonsHtml += ' data-manual-id="' + manualId + '"';
-      buttonsHtml += '>已下牌</button>';
-      btn.outerHTML = buttonsHtml;
-      setStatus("已輔助填入，請確認真站");
-    } else {
-      btn.disabled = false;
-      btn.textContent = "輔助填入";
-      var err = data.error || "";
-      if (data.missing_amount_stars && data.missing_amount_stars.length) {
-        err += " 缺星別: " + data.missing_amount_stars.join(",");
-      }
-      if (data.missing_targets && data.missing_targets.length) {
-        err += " 缺號: " + data.missing_targets.join(",");
-      }
-      setStatus(err || "輔助填入失敗");
-    }
-  }).catch(function () {
-    btn.disabled = false;
-    btn.textContent = "輔助填入";
-    setStatus("輔助填入失敗");
+  var queuePath=btn.getAttribute("data-queue-path") || panelState.queuePath;
+  var itemIndex=parseInt(btn.getAttribute("data-item-index"),10);
+  var betType=btn.getAttribute("data-bet-type") || "normal";
+  var manualId=btn.getAttribute("data-manual-id") || "";
+  var operationId=crypto.randomUUID();
+  var payload={game:game, bet_type:betType, operation_id:operationId, refill:!!refill};
+  if(manualId) payload.manual_candidate_id=manualId;
+  else {payload.queue_path=queuePath;payload.item_index=itemIndex;}
+  fillBusy=true;btn.disabled=true;btn.textContent="處理中...";
+  var aborter=new AbortController();
+  var timeout=setTimeout(function(){aborter.abort();},35000);
+  var locked=[];
+  document.querySelectorAll('#batch-text,#assist-game,#createBatchBtn,#review-items textarea,#review-items button').forEach(function(el){
+    locked.push([el,el.disabled]);el.disabled=true;
   });
+  fetch("/assist-fill/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),signal:aborter.signal})
+    .then(function(r){return r.json();}).then(function(data){
+      var reallyOk=data.ok===true && data.numbers_verified===true && data.amounts_verified===true && data.game_verified===true;
+      btn.textContent="重新填入";
+      btn.onclick=function(){assistRefillBtn(btn);};
+      if(reallyOk) {
+        setStatus("已輔助填入，請核對表單；尚未送出。");
+        var row=btn.parentElement;
+        if(!row.querySelector('.mark-done-btn')) {
+          var done=document.createElement('button');
+          done.className='btn-manual mark-done-btn';done.textContent='已下牌';
+          ['data-queue-path','data-item-index','data-manual-id'].forEach(function(a){if(btn.hasAttribute(a))done.setAttribute(a,btn.getAttribute(a));});
+          done.onclick=function(){markItemDone(done);};row.appendChild(done);
+        }
+      } else {
+        var detail = (data.missing_targets || []).length ? " 缺號：" + data.missing_targets.join(",") : "";
+        if((data.missing_amount_stars || []).length) detail += " 缺星別：" + data.missing_amount_stars.join(",");
+        setStatus((data.error || "填入或讀回不完整") + detail + "；請核對表單，未自動重試。");
+      }
+    }).catch(function(){
+      btn.textContent="重新填入";btn.onclick=function(){assistRefillBtn(btn);};
+      setStatus("連線中斷，填入結果未明；請先核對表單，未自動重試。");
+    }).finally(function(){
+      clearTimeout(timeout);
+      fillBusy=false;btn.disabled=!!panelState.stale;
+      locked.forEach(function(pair){pair[0].disabled=pair[1];});
+    });
 }
-
-function assistRefillBtn(btn) {
-  var queuePath = btn.getAttribute("data-queue-path") || panelState.queuePath;
-  var itemIndex = parseInt(btn.getAttribute("data-item-index"), 10);
-  var betType = btn.getAttribute("data-bet-type") || "normal";
-  var manualId = btn.getAttribute("data-manual-id") || "";
-  btn.disabled = true;
-  btn.textContent = "處理中...";
-  var body;
-  if (manualId) {
-    body = JSON.stringify({ manual_candidate_id: manualId, bet_type: betType, refill: true });
-  } else {
-    body = JSON.stringify({ queue_path: queuePath, item_index: itemIndex, bet_type: betType, refill: true });
-  }
-  fetch("/assist-fill/start", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: body
-  }).then(function (r) { return r.json(); }).then(function (data) {
-    var isColumn = (betType === "column" || betType === "zhu_peng" || betType === "zhupeng");
-    var reallyOk = isColumn ? (data.ok === true) : (data.ok === true && data.amounts_verified === true && !(data.missing_targets && data.missing_targets.length) && !(data.missing_amount_stars && data.missing_amount_stars.length));
-    if (reallyOk) {
-      btn.disabled = false;
-      btn.textContent = "重新填入";
-      setStatus("重新填入完成，請確認真站");
-    } else {
-      btn.disabled = false;
-      btn.textContent = "重新填入";
-      var err = data.error || "";
-      setStatus(err || "重新填入失敗，可按鈕再試");
-    }
-  }).catch(function () {
-    btn.disabled = false;
-    btn.textContent = "重新填入";
-    setStatus("重新填入失敗");
-  });
-}
-
+function assistRefillBtn(btn) { assistPanelFillBtn(btn, true); }
 function markItemDone(btn) {
   var queuePath = btn.getAttribute("data-queue-path") || panelState.queuePath;
   var itemIndex = parseInt(btn.getAttribute("data-item-index"), 10);
@@ -482,7 +492,12 @@ function markItemDone(btn) {
     body: body
   }).then(function (r) { return r.json(); }).then(function (data) {
     if (data.ok) {
-      if (row) row.remove();
+      if (row) {
+        row.classList.add("assist-completed");
+        row.querySelectorAll("button").forEach(function(b){b.disabled=true;});
+        btn.textContent="已下牌";
+        updateCompletedCount();
+      }
       setStatus("已標記下牌完成");
     } else {
       btn.disabled = false;

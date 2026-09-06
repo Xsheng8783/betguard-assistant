@@ -73,7 +73,7 @@ def test_parser_safe_car_literal_reformat_changes_no_digits() -> None:
         "01 08 09 21 3,4×1\n\n33×1車\n\n07 33 × 12 38 2×6"
     )
 
-    assert text == "01 08 09 21 3,4×1\n\n33車1\n\n07 33 × 12 38 2×6"
+    assert text == "01 08 09 21 3,4×1\n\n33車1支\n\n07 33 × 12 38 2×6"
     assert count == 1
 
 
@@ -314,7 +314,7 @@ def test_luna_service_result_stays_editable_and_records_original_prediction(
 
     assert result["ok"] is True
     assert result["reader"] == PROVIDER_ID
-    assert result["text"] == "05 × 08 09 33 × 10 20 39 2,3 × 1\n\n33車1"
+    assert result["text"] == "05 × 08 09 33 × 10 20 39 2,3 × 1\n\n33車1支"
     assert result["parser_preflight"]["all_parseable"] is True
     assert result["external_call_count"] == 1
     assert result["retry_count"] == 0

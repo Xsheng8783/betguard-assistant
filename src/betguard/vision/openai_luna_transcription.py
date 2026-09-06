@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from betguard.user_data import get_data_dir
+from betguard.vision.image_text_literals import normalize_parser_safe_literals
 
 
 PROVIDER_ID = "openai-gpt-5.6-luna-transcription"
@@ -38,9 +39,6 @@ DEFAULT_REASONING_EFFORT = "medium"
 _ALLOWED_IMAGE_DETAILS = frozenset({"low", "high", "auto", "original"})
 _ALLOWED_REASONING_EFFORTS = frozenset({"none", "low", "medium"})
 _CANCELLED_PROSE = ("(crossed out)", "crossed out")
-_CAR_LITERAL_LINE_RE = re.compile(
-    r"^(?P<number>\d{1,2})\s*[xX×]\s*(?P<amount>\d+(?:\.\d+)?)\s*車$"
-)
 
 PROMPT = """You are a literal visual transcription reader for handwritten lottery bet slips.
 Return only the strict JSON requested by the response schema. This is a typing aid, not betting
@@ -137,25 +135,6 @@ def get_config_from_env() -> LunaTranscriptionConfig:
 
 def has_api_key() -> bool:
     return bool(os.environ.get(API_KEY_ENV, "").strip())
-
-
-def normalize_parser_safe_literals(text: str) -> tuple[str, int]:
-    """Render an exact visible ``number × amount 車`` literal in parser syntax.
-
-    This only reorders an unambiguous full-line literal.  It never changes a
-    digit, fills uncertainty, or turns a partial line into a bet.
-    """
-    normalized: list[str] = []
-    reformatted = 0
-    for line in str(text or "").splitlines():
-        stripped = line.strip()
-        match = _CAR_LITERAL_LINE_RE.fullmatch(stripped)
-        if match is None:
-            normalized.append(line)
-            continue
-        normalized.append(f"{match.group('number')}車{match.group('amount')}")
-        reformatted += 1
-    return "\n".join(normalized), reformatted
 
 
 def build_output_schema() -> dict[str, Any]:

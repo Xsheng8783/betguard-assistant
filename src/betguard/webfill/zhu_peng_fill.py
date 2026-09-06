@@ -175,7 +175,7 @@ def _detect_column_slot_count(page: Any) -> int:
     try:
         return int(raw)
     except (TypeError, ValueError):
-        return 7  # safe default; most sites have 7
+        return 0  # Unknown capacity is not permission to fill.
 
 
 def build_zhu_peng_plan(parsed_item: dict[str, Any]) -> dict[str, Any]:
@@ -195,85 +195,51 @@ def build_zhu_peng_plan(parsed_item: dict[str, Any]) -> dict[str, Any]:
 
 
 def execute_zhu_peng_plan(page: Any, plan: dict[str, Any]) -> dict[str, Any]:
-    """Execute a ZhuPeng fill plan on a live page.
-
-    Returns a report dict with readback data.
-    Never submits or confirms.
-    """
-    numbers: list[list[int]] = plan["numbers"]
-    amounts: dict[str, int] = plan.get("amounts", {})
-
-    steps: list[dict[str, Any]] = []
-    blocked = False
-
-    # 1) Fill numbers per column
-    # Detect site column limit before any clicks
-    site_column_slots = _detect_column_slot_count(page)
-    steps.append({"step": "site_info", "visible_column_slots": site_column_slots})
-    if len(numbers) > site_column_slots:
-        blocked = True
-        steps[-1]["blocked"] = f"requested {len(numbers)} columns, site supports {site_column_slots}"
-
-    for col_idx, col_nums in enumerate(numbers):
-        if blocked:
-            break  # skip fill if already blocked
-        if col_idx > 0:
-            if col_idx >= site_column_slots:
-                steps.append({"step": f"col{col_idx}", "blocked": f"column index {col_idx} exceeds site slots {site_column_slots}"})
-                blocked = True
-                break
-            click_zhu_column(page, col_idx + 1)  # switch to column
-            time.sleep(0.05)
-        for num in col_nums:
-            click_number(page, num)
-            time.sleep(0.05)
-        data = readback_zhu_data(page)
-        steps.append({
-            "step": f"col{col_idx}",
-            "numbers": col_nums,
-            "data_lengths": data,
-            "col_data_len": data[col_idx] if col_idx < len(data) else None,
-        })
-        # Verify
-        expected_len = len(col_nums)
-        actual_len = data[col_idx] if col_idx < len(data) else 0
-        if actual_len != expected_len:
-            blocked = True
-            steps[-1]["blocked"] = f"expected {expected_len} nums, got {actual_len}"
-
-    # 2) Fill amounts
-    if amounts and not blocked:
-        set_pengbet_amounts(page, amounts)
-        time.sleep(0.1)
-        bet_readback = readback_pengbet_amounts(page)
-        steps.append({"step": "amounts", "amounts": amounts, "bet_readback": bet_readback})
-        for entry in bet_readback:
-            if str(entry.get("pengValue")) != str(entry.get("domValue")):
-                blocked = True
-                steps[-1]["blocked"] = "pengValue/domValue mismatch"
-
-    # Collect missing targets from readback
-    missing: list[str] = []
-    filled: list[str] = []
-    for col_idx, col_nums in enumerate(numbers):
-        for num in col_nums:
-            s = str(num).zfill(2)
-            found = any(
-                step.get("col_data_len", 0) > 0
-                for step in steps
-                if step.get("step") == f"col{col_idx}"
-            )
-            if found:
-                filled.append(s)
-            else:
-                missing.append(s)
-    return {
-        "ok": not blocked,
-        "blocked": blocked,
-        "numbers": numbers,
-        "amounts": amounts,
-        "steps": steps,
-        "site_column_slots": site_column_slots,
-        "filled_targets": filled,
-        "missing_targets": missing,
-    }
+    """Fill only allowed controls; verify exact membership and all star values."""
+    from betguard.webfill.fill_readback import read_selected, sync_column
+    numbers, amounts = plan["numbers"], plan.get("amounts", {})
+    report = {"ok": False, "blocked": True, "numbers": numbers, "amounts": amounts,
+              "numbers_verified": False, "amounts_verified": False,
+              "steps": [], "filled_targets": [], "missing_targets": [],
+              "auto_submit": False, "auto_confirm": False}
+    try:
+        slots = _detect_column_slot_count(page)
+        report["site_column_slots"] = slots
+        if not numbers or not amounts or slots < len(numbers) or slots > 20:
+            raise ValueError("無法確認柱位或倍率欄位")
+        # Empty unused columns too: prior bets must not leak into the new one.
+        for i in range(slots):
+            click_zhu_column(page, i + 1)
+            sync_column(page, numbers[i] if i < len(numbers) else [])
+        actual_groups = []
+        for i in range(slots):
+            click_zhu_column(page, i + 1)
+            actual_groups.append(sorted(read_selected(page)))
+        expected = [sorted(f"{int(n):02d}" for n in c) for c in numbers] + [[] for _ in range(slots-len(numbers))]
+        report["readback_columns"] = actual_groups
+        report["numbers_verified"] = actual_groups == expected
+        if not report["numbers_verified"]:
+            raise ValueError("柱群號碼讀回不一致；未繼續填倍率")
+        full_amounts = {s: amounts.get(s, 0) for s in ("二星", "三星", "四星")}
+        set_pengbet_amounts(page, full_amounts)
+        values = readback_pengbet_amounts(page)
+        report["readback_amounts"] = values
+        report["amounts_verified"] = len(values) == 3 and all(
+            str(v.get("domValue") or "0") == str(expected_amount)
+            and str(v.get("pengValue") or "0") == str(expected_amount)
+            and (not v.get("disabled") or expected_amount == 0)
+            for v, expected_amount in zip(values, full_amounts.values())
+        )
+        if not report["amounts_verified"]:
+            raise ValueError("柱碰倍率讀回不一致")
+        # Amount updates can re-render/reset selection: verify numbers again.
+        for i in range(slots):
+            click_zhu_column(page, i+1)
+            if sorted(read_selected(page)) != expected[i]:
+                report["numbers_verified"] = False
+                raise ValueError("倍率填入後柱群發生變動")
+        report.update(ok=True, blocked=False,
+                      filled_targets=[n for c in expected for n in c])
+    except Exception as exc:
+        report["error"] = str(exc)
+    return report

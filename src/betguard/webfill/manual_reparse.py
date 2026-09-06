@@ -9,26 +9,13 @@ from __future__ import annotations
 from typing import Any
 
 
-def _normalize_x_chain(
-    original_text: str,
-    bet_type: str,
-    columns: list[list[int]] | None,
-) -> tuple[str, list[list[int]] | None]:
-    """Convert single-number X-chain column to normal (連碰).
+def _normalize_x_chain(original_text: str, bet_type: str, columns):
+    """Existing review-console hook: preserve the parser's structure verbatim.
 
-    "07X17X27X37X05X15X25X35三四50" uses X as a plain number separator,
-    not a zhu-peng column-group separator.  Each parser-generated column
-    contains exactly one number and the text has no '/' — convert to normal.
+    Previously this hook flattened single-number columns after successful
+    parsing. Initial parse, review and editing must now share one contract.
     """
-    if bet_type != "column" or not columns:
-        return bet_type, columns
-    all_single = all(len(c) == 1 for c in columns)
-    has_x_sep = any(sep in original_text for sep in ("X", "x", "×"))
-    has_slash = "/" in original_text
-    if all_single and has_x_sep and not has_slash:
-        return "normal", None
     return bet_type, columns
-
 
 def reparse_text(text: str, *, game: str = "auto") -> dict[str, Any]:
     """Re-parse a single line of corrected text using the standard pipeline.
@@ -44,6 +31,21 @@ def reparse_text(text: str, *, game: str = "auto") -> dict[str, Any]:
 
     # Resolve game default
     actual_game = game if game and game != "auto" else "539"
+    if actual_game not in {"539", "六合"}:
+        return {"ok": False, "error": "請選擇 539 或六合。", "reason": "invalid_game"}
+    if "\n" in text or "各" in text:
+        from betguard.webfill.batch_mock_queue import build_batch_mock_queue
+        from betguard.webfill.text_preview import candidate_preview
+        queue = build_batch_mock_queue(text, game=actual_game)
+        preprocessing = queue["preprocessing"]
+        if preprocessing["invalid_fragments"] or not preprocessing["valid_candidates"]:
+            return {"ok": False, "error": "仍有無法完整解析的文字，請保留原文修正。", "reason": "needs_review"}
+        candidates = [
+            {**candidate_preview(vc["result"], game=actual_game), "raw": vc["raw"],
+             "original_lines": vc.get("original_lines", []), "ok": True}
+            for vc in preprocessing["valid_candidates"]
+        ]
+        return {**candidates[0], "candidates": candidates}
 
     try:
         from betguard.parser import parse_line
@@ -61,6 +63,8 @@ def reparse_text(text: str, *, game: str = "auto") -> dict[str, Any]:
         }
 
     validation = validate_bet(parsed)
+    if parsed.game != actual_game:
+        return {"ok": False, "error": "牌文彩種與工作彩種不一致，請明確選擇後重新解析。", "reason": "game_conflict"}
     if validation.status != "ok":
         return {
             "ok": False,
@@ -89,6 +93,8 @@ def reparse_text(text: str, *, game: str = "auto") -> dict[str, Any]:
             amounts[str(s)] = money
 
     numbers = [n for n in parsed.numbers if n]
+    if parsed.type == "car" and parsed.number is not None:
+        numbers = [parsed.number]
 
     if not numbers:
         return {
@@ -96,7 +102,7 @@ def reparse_text(text: str, *, game: str = "auto") -> dict[str, Any]:
             "error": "no numbers parsed",
             "reason": "needs_review",
         }
-    if not stars:
+    if not stars and getattr(parsed, "type", "") != "car":
         return {
             "ok": False,
             "error": "no stars parsed",
@@ -105,18 +111,26 @@ def reparse_text(text: str, *, game: str = "auto") -> dict[str, Any]:
 
     bet_type = getattr(parsed, "type", "normal")
     columns = getattr(parsed, "columns", None)
-    bet_type, columns = _normalize_x_chain(text, bet_type, columns)
+    # The same parser owns structure for initial parse AND edited text.
+    # Never reinterpret its single-number columns as a flat normal bet.
 
+    from betguard.models import BetReport
+    from betguard.webfill.text_preview import candidate_preview
+    preview = candidate_preview(BetReport(parsed, validation).to_dict(), game=actual_game)
+    preview["bet_type"] = bet_type
     return {
+        **preview,
         "ok": True,
         "numbers": numbers,
         "stars": sorted(set(stars)),
         "money": money,
         "amounts": amounts,
-        "summary": _format_summary(parsed),
+        "summary": preview["summary"],
         "source": "manual_correction",
         "type": bet_type,
         "columns": columns,
+        "game": actual_game,
+        "fill_supported": bet_type in {"normal", "column"} and bool(amounts),
     }
 
 
@@ -128,20 +142,3 @@ def _describe_validation_failure(validation: Any) -> str:
     if validation.warnings:
         parts.extend(validation.warnings)
     return "; ".join(parts) if parts else "validation failed"
-
-
-def _format_summary(parsed: Any) -> str:
-    """Format a ParsedBet as a compact Chinese summary string."""
-    try:
-        from betguard.models import to_dict
-
-        d = to_dict(parsed)
-        nums = ",".join(str(n) for n in d.get("numbers", []))
-        stars_list = d.get("stars", [])
-        stars_str = (
-            "".join(str(s) for s in stars_list) + "星" if stars_list else "?"
-        )
-        money = d.get("money", 0)
-        return f"{nums}｜{stars_str}｜{money}元"
-    except Exception:
-        return str(parsed)

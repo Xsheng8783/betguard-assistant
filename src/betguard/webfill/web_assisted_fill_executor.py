@@ -48,9 +48,9 @@ def _fast_select_numbers_knockout(page: Any, numbers: list[str]) -> None:
         "  var tds=f.document.querySelectorAll('td');"
         "  for(var i=0;i<tds.length;i++){"
         "   var txt=(tds[i].textContent||'').trim();"
-        "   if(target.indexOf(txt)>=0){"
+        "   if(/^\\d{2}$/.test(txt)&&tds[i].offsetParent!==null){"
         "    var ctx=ko.contextFor(tds[i]);"
-        "    if(ctx&&ctx.$data&&typeof ctx.$data.HasSeled==='function'&&!ctx.$data.HasSeled()){"
+        "    if(ctx&&ctx.$data&&typeof ctx.$data.HasSeled==='function'&&Boolean(ctx.$data.HasSeled())!==(target.indexOf(txt)>=0)){"
         "     mo.OnSwitchSel(ctx.$data,{});"
         "    }"
         "   }"
@@ -130,6 +130,12 @@ def _verify_filled_amounts(
         amount_mismatches.append({
             "error": "duplicate star results", "stars": duplicates,
         })
+    for star, entry in result_map.items():
+        if star not in expected_amounts and (
+            str(entry.get("actual_amount") or "0") != "0" or not entry.get("verified")
+        ):
+            amounts_verified = False
+            amount_mismatches.append({"error": "unexpected or unverified unused star", "star": star})
 
     return {
         "amounts_verified": amounts_verified,
@@ -139,118 +145,33 @@ def _verify_filled_amounts(
 
 
 def _fill_amounts_on_b03(page: Any, amounts: dict[str, int]) -> list[dict[str, Any]]:
-    """Fill per-star amounts with retry and readback verification.
-
-    On slow machines the website may re-render after number selection,
-    clearing amount fields.  This function retries up to 3 times per star,
-    reads back the actual value, and logs each attempt to UTF-8 log.
-    """
-    import time as _time
-
-    executed: list[dict[str, Any]] = []
-    amount_css = f'input[data-bind*="{AMOUNT_DATA_BIND_MARKER}"]'
-
-    for star, position in sorted(STAR_TO_POSITION.items()):
-        amt = amounts.get(str(star), amounts.get(star, 0))
-        if amt <= 0:
-            continue
-        star_name = STAR_NAMES.get(star, str(star))
-        result = None
-
-        for attempt in range(1, 4):  # up to 3 attempts
-            try:
-                # Wait for the amount field to be visible and editable
-                frame = page.frame(url="**" + B03_URL_MARKER + "**")
-                target = frame if frame is not None else page
-                try:
-                    target.locator(amount_css).nth(position).wait_for(state="visible", timeout=2000)
-                except Exception:
-                    # Field not yet visible — may still be rendering
-                    page.wait_for_timeout(300)
-                    if attempt < 3:
-                        continue  # retry
-
-                loc = target.locator(amount_css).nth(position)
-                loc.fill(str(amt))
-
-                # Trigger knockout events
-                try:
-                    loc.dispatch_event("input")
-                    loc.dispatch_event("change")
-                    loc.blur()
-                except Exception:
-                    pass
-
-                # Wait for knockout to process
-                page.wait_for_timeout(200)
-
-                # Readback: re-locate (field may have been re-rendered)
-                try:
-                    rloc = target.locator(amount_css).nth(position)
-                    actual = str(rloc.input_value() or "")
-                except Exception:
-                    try:
-                        actual = str(loc.evaluate("el => el.value") or "")
-                    except Exception:
-                        actual = ""
-
-                exp_norm = (str(amt).strip().lstrip("0") or "0")
-                act_norm = (actual.strip().lstrip("0") or "0")
-                verified = exp_norm == act_norm
-
-                _log_amount_attempt(star_name, amt, actual, attempt, verified, "")
-
-                if verified:
-                    result = {
-                        "type": "SET_AMOUNT",
-                        "star": star,
-                        "star_name": star_name,
-                        "amount": amt,
-                        "expected_amount": amt,
-                        "actual_amount": actual,
-                        "position": position,
-                        "executed": True,
-                        "verified": True,
-                        "attempts": attempt,
-                    }
-                    break  # success — exit retry loop
-
-            except Exception as exc:
-                _log_amount_attempt(star_name, amt, "", attempt, False, str(exc))
-                if attempt >= 3:
-                    result = {
-                        "type": "SET_AMOUNT",
-                        "star": star,
-                        "star_name": star_name,
-                        "amount": amt,
-                        "expected_amount": amt,
-                        "actual_amount": "",
-                        "position": position,
-                        "executed": False,
-                        "verified": False,
-                        "error": str(exc),
-                        "attempts": attempt,
-                    }
-
-        if result is None:
-            result = {
-                "type": "SET_AMOUNT",
-                "star": star,
-                "star_name": star_name,
-                "amount": amt,
-                "expected_amount": amt,
-                "actual_amount": "",
-                "position": position,
-                "executed": False,
-                "verified": False,
-                "error": "amount field not visible after 3 attempts",
-                "attempts": 3,
-            }
-        executed.append(result)
-
-    return executed
-
-
+    """Write each visible field once; clear stale stars and read all values."""
+    frame = page.frame(url="**" + B03_URL_MARKER + "**")
+    target = frame if frame is not None else page
+    fields = target.locator(f'input[data-bind*="{AMOUNT_DATA_BIND_MARKER}"]:visible')
+    if fields.count() != 3:
+        raise ValueError("無法確認完整二／三／四星金額欄位")
+    expected = {s: int(amounts.get(str(s), amounts.get(s, 0))) for s in STAR_TO_POSITION}
+    for star, position in STAR_TO_POSITION.items():
+        loc = fields.nth(position)
+        loc.fill(str(expected[star]) if expected[star] else "")
+        loc.dispatch_event("input")
+        loc.dispatch_event("change")
+        loc.blur()
+    # Only read again; never automatically retry a partially completed write.
+    page.wait_for_timeout(200)
+    records = []
+    for star, position in STAR_TO_POSITION.items():
+        loc = fields.nth(position)
+        actual = loc.input_value()
+        observable = loc.evaluate("""el => {
+          const c=window.ko.contextFor(el);
+          return c && c.$data && c.$data.PengBet ? String(c.$data.PengBet.Value()) : null;
+        }""")
+        verified = str(actual or "0") == str(expected[star]) and str(observable or "0") == str(expected[star])
+        records.append({"star": star, "executed": True, "verified": verified,
+                        "actual_amount": actual, "observable_amount": observable, "attempts": 1})
+    return records
 def _log_amount_attempt(star_name: str, expected: int, actual: str, attempt: int, verified: bool, error: str) -> None:
     """Log amount fill attempt to UTF-8 log (no site-sensitive data)."""
     try:

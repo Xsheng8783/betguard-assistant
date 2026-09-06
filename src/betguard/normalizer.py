@@ -16,6 +16,14 @@ MULTIPLY_SIGN = "\u00d7"
 FULL_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
 FULL_COMMA = "\uff0c"
 FULL_PERIOD = "\uff0e"
+MULTIPLIER_SCOPE_ERROR = "ambiguous or invalid multiplier scope requires manual review"
+_SCOPED_STARS = r"(?:[0-9](?:[ \t]*[,/，、][ \t]*[0-9]){1,2}|[234](?:[ \t]+[234]){1,2}|[234]{2,3}|[0-9])"
+_SCOPED_RULE = rf"{_SCOPED_STARS}[ \t]*[xX×*][ \t]*[0-9]+(?:\.[0-9]+)?(?:支|元|塊)?"
+_SCOPED_SUFFIX = re.compile(rf"{_SCOPED_RULE}(?:[ \t]+{_SCOPED_RULE})*[ \t]*$")
+_SCOPED_RULE_PARTS = re.compile(
+    rf"(?P<stars>{_SCOPED_STARS})[ \t]*[xX×*][ \t]*"
+    r"(?P<amount>[0-9]+(?:\.[0-9]+)?)(?P<kind>支|元|塊)?"
+)
 # Bracket pairs to normalize
 _BRACKET_PAIRS = [
     ("\u3010", "["), ("\u3011", "]"),  # 【 】
@@ -129,12 +137,15 @@ def normalize_for_parser(text: str) -> NormalizationResult:
         notes.append("normalized dotted star patterns")
     value = updated
 
+    value, scoped_notes = normalize_explicit_multiplier_suffix(value)
+    notes.extend(scoped_notes)
+
     updated = _normalize_star_multiplier(value)
     if updated != value:
         notes.append("normalized star multiplier")
     value = updated
 
-    updated = re.sub(r"[ \t]+", " ", value).strip()
+    updated = re.sub(r"[ \t\u3000]+", " ", value).strip()
     if updated != value:
         notes.append("normalized whitespace")
     value = updated
@@ -164,6 +175,46 @@ def _unwrap_star_parentheses(text: str) -> str:
         return match.group(0)
 
     return pattern.sub(replace, text)
+
+
+def normalize_explicit_multiplier_suffix(text: str) -> tuple[str, list[str]]:
+    """Separate explicit trailing rules from their shared, unchanged number scope.
+
+    Render only complete inline multi-rule or slash-category suffixes into the
+    existing Chinese per-star grammar. Never infer amounts, missing numbers or
+    column membership. This is also run before batch slash cleanup so a category
+    cannot be moved into the ordinary number list by that legacy cleanup.
+    """
+    prefix = ''
+    rules = []
+    for boundary in re.finditer(r'[ \t]+(?=\S)', text):
+        suffix = text[boundary.end():]
+        if not _SCOPED_SUFFIX.fullmatch(suffix):
+            continue
+        candidate_rules = list(_SCOPED_RULE_PARTS.finditer(suffix))
+        candidate_prefix = text[:boundary.start()].rstrip()
+        if (candidate_prefix.endswith(('x', 'X', '×', '*', '/', '碰'))
+                and re.fullmatch(r'[0-9]{2}', candidate_rules[0]['stars'])):
+            # A two-digit column member such as 23 or 34 is still a number.
+            # Search later boundaries for the actual multiplier suffix.
+            continue
+        prefix, rules = candidate_prefix, candidate_rules
+        break
+    if not rules or (len(rules) < 2 and '/' not in rules[0]['stars']):
+        return text, []
+    if prefix.endswith(('x', 'X', '×', '*', '/', '碰')):
+        return text, [MULTIPLIER_SCOPE_ERROR]
+    words = {'2': '二', '3': '三', '4': '四'}
+    rendered = []
+    seen = set()
+    for rule in rules:
+        stars = re.sub(r'[,/，、 \t]', '', rule['stars'])
+        for star in stars:
+            if star not in words or star in seen:
+                return text, [MULTIPLIER_SCOPE_ERROR]
+            seen.add(star)
+            rendered.append(f"{words[star]}星{rule['amount']}{rule['kind'] or '支'}")
+    return prefix + ' ' + ' '.join(rendered), ['normalized explicit scoped multiplier rules']
 
 
 def _looks_like_star_segment(value: str) -> bool:

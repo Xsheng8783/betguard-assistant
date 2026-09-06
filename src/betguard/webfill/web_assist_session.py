@@ -169,6 +169,8 @@ class _AssistWorker(threading.Thread):
         self.danger_detected: list[str] = []
         self.filled_amounts: list[dict[str, Any]] = []
         self._running = True
+        self._dispatch_lock = threading.Lock()
+        self._pending_result = None
 
     def dispatch(self, cmd: str, payload: Any, timeout: float = WORKER_TIMEOUT) -> dict[str, Any]:
         """Send a command to the worker and wait for the result."""
@@ -176,11 +178,18 @@ class _AssistWorker(threading.Thread):
         if cq is None:
             return {"ok": False, "error": "assisted fill worker is not running"}
         result = _CommandResult()
+        if not self._dispatch_lock.acquire(blocking=False):
+            return {"ok": False, "error": "another worker command is pending"}
         try:
+            if self._pending_result is not None and not self._pending_result._event.is_set():
+                return {"ok": False, "error": "previous command is still running; no automatic retry"}
+            self._pending_result = result
             cq.put((cmd, payload, result), timeout=2)
+            return result.wait(timeout=timeout)
         except queue.Full:
             return {"ok": False, "error": "worker command queue is full"}
-        return result.wait(timeout=timeout)
+        finally:
+            self._dispatch_lock.release()
 
     # ---- Worker loop ----
 
@@ -223,6 +232,14 @@ class _AssistWorker(threading.Thread):
             return False
 
     def _handle_start(self, payload: dict[str, Any], result: _CommandResult) -> None:
+        from betguard.webfill.local_text_form import local_fill_url
+        from urllib.parse import urlencode
+        import os
+        local_url = local_fill_url()
+        if local_url:
+            mode = "column" if payload.get("numbers") and isinstance(payload["numbers"][0], list) else "normal"
+            payload = {**payload, "url": local_url + "/__text_fill_test?" + urlencode(
+                {"game": payload.get("game", "539"), "mode": mode})}
         # BROWSER_IDLE → reuse existing browser, skip launch (if alive)
         if self.state == BROWSER_IDLE:
             if not self._is_browser_alive():
@@ -230,6 +247,8 @@ class _AssistWorker(threading.Thread):
                 self.state = IDLE
                 # Fall through to IDLE → launch new
             else:
+                if local_url and self._page.url != payload["url"]:
+                    self._page.goto(payload["url"], wait_until="domcontentloaded")
                 if payload.get("open_site_only"):
                     result.set({"ok": True, "state": BROWSER_IDLE, "reused": True})
                     return
@@ -263,10 +282,15 @@ class _AssistWorker(threading.Thread):
         try:
             self._playwright = sync_playwright().start()
             self._browser = self._playwright.chromium.launch(
-                headless=False,
+                headless=bool(local_url and os.environ.get("BETGUARD_LOCAL_FILL_HEADLESS") == "1"),
                 args=["--start-maximized", "--disable-popup-blocking"],
             )
             self._context = self._browser.new_context(no_viewport=True)
+            if local_url:
+                from urllib.parse import urlparse
+                self._context.route("**/*", lambda route: route.continue_()
+                    if urlparse(route.request.url).hostname in {"127.0.0.1", "::1", "localhost"}
+                    else route.abort())
             self._page = self._context.new_page()
             url = payload.get("url", "https://www.gts362.com")
             self._page.goto(url, wait_until="domcontentloaded", timeout=15000)
@@ -282,7 +306,8 @@ class _AssistWorker(threading.Thread):
                 payload.get("assist_panel_url")
                 or "http://127.0.0.1:8765/assist-panel"
             )
-            self._page.evaluate(_assist_panel_popup_script(assist_panel_url))
+            if not local_url:
+                self._page.evaluate(_assist_panel_popup_script(assist_panel_url))
         except Exception:
             pass
 
@@ -361,6 +386,7 @@ class _AssistWorker(threading.Thread):
                 "diagnostic": self._collect_diagnostics(),
             })
         except Exception as exc:
+            self.state = BROWSER_IDLE
             result.set({"ok": False, "error": f"page check failed: {exc}"})
 
     def _handle_execute_fill(self, result: _CommandResult) -> None:
@@ -371,6 +397,11 @@ class _AssistWorker(threading.Thread):
             if self._page is None:
                 result.set({"ok": False, "error": "page is not available"})
                 return
+            from betguard.webfill.fill_readback import verify_game
+            if not verify_game(self._page, getattr(self, "game", None)):
+                result.set({"ok": False, "game_verified": False, "error": "無法確認表單彩種，未填入。請先選擇正確彩種。"})
+                self.state = BROWSER_IDLE
+                return
             # Pre-fill diagnostic: check if numbers/amounts are likely findable
             pre_diag = self._collect_diagnostics()
             # Zero-pad numbers 1-9 to "01"-"09" (site uses two-digit format)
@@ -380,6 +411,9 @@ class _AssistWorker(threading.Thread):
                 self.filled_amounts = _fill_amounts_on_b03(self._page, self.amounts)
             except Exception as exc:
                 pre_diag["fill_error"] = str(exc)
+                # This command has stopped. A fresh explicit operation may check
+                # the page again; the failed operation itself is never retried.
+                self.state = BROWSER_IDLE
                 result.set({"ok": False, "error": f"fill execution error: {exc}", "diagnostic": pre_diag})
                 return
             self.state = BROWSER_IDLE  # browser stays open for reuse
@@ -406,8 +440,10 @@ class _AssistWorker(threading.Thread):
             for n in padded:
                 if n not in selected_set:
                     missing.append(n)
-            all_targets_selected = (len(missing) == 0)
-            success = amounts_ok and all_targets_selected and len(self.numbers) > 0
+            unexpected = sorted(selected_set - set(padded))
+            all_targets_selected = (len(missing) == 0 and not unexpected)
+            game_verified = verify_game(self._page, self.game)
+            success = amounts_ok and all_targets_selected and game_verified and len(self.numbers) > 0
             warnings: list[str] = []
             if selected != len(padded):
                 if selected > len(padded):
@@ -436,6 +472,9 @@ class _AssistWorker(threading.Thread):
                 "numbers_expected": len(padded),
                 "filled_targets": [n for n in padded if n not in missing],
                 "missing_targets": missing,
+                "unexpected_targets": unexpected,
+                "numbers_verified": all_targets_selected,
+                "game_verified": game_verified,
                 "possible_site_limit": selected < len(padded) and selected == 7,
                 "warnings": warnings,
                 "danger_buttons_detected": self.danger_detected,
@@ -444,6 +483,7 @@ class _AssistWorker(threading.Thread):
                 "auto_confirm": False,
             })
         except Exception as exc:
+            self.state = BROWSER_IDLE
             result.set({"ok": False, "error": f"fill execution error: {exc}"})
 
     def _handle_zhu_peng_execute(self, payload: dict[str, Any], result: _CommandResult) -> None:
@@ -458,15 +498,24 @@ class _AssistWorker(threading.Thread):
                 result.set({"ok": False, "error": "page is not available"})
                 return
             item = payload.get("item", {})
+            from betguard.webfill.fill_readback import verify_game
+            if not verify_game(self._page, getattr(self, "game", None)):
+                result.set({"ok": False, "game_verified": False, "error": "無法確認表單彩種，未填入。"})
+                self.state = BROWSER_IDLE
+                return
             fill_report = zhu_peng_fill_execute(self._page, item)
             fill_report.setdefault("auto_submit", False)
             fill_report.setdefault("auto_confirm", False)
             fill_report.setdefault("danger_buttons_clicked", [])
             fill_report.setdefault("danger_buttons_detected", self.danger_detected)
-            fill_report["ok"] = not fill_report.get("blocked", False)
+            fill_report["game_verified"] = verify_game(self._page, self.game)
+            fill_report["ok"] = (fill_report.get("ok") is True and
+                fill_report.get("numbers_verified") is True and
+                fill_report.get("amounts_verified") is True and fill_report["game_verified"])
             self.state = BROWSER_IDLE
             result.set(fill_report)
         except Exception as exc:
+            self.state = BROWSER_IDLE
             result.set({"ok": False, "error": f"zhu peng execute error: {exc}"})
 
     def _handle_close(self, result: _CommandResult) -> None:

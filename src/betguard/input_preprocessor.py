@@ -4,6 +4,8 @@ import re
 from collections.abc import Iterable
 from typing import Any
 
+from betguard.normalizer import MULTIPLIER_SCOPE_ERROR, normalize_explicit_multiplier_suffix
+
 
 REPEATED_DOT_SPLIT_PATTERN = re.compile(r"\.{2,}")
 # Tiantianle 住碰 header (天天[樂] + x-joined 3-4 digit groups) and its bare tail
@@ -35,6 +37,9 @@ MULTI_FULL_CAR_EACH_PATTERN = re.compile(
 )
 MULTI_CAR_EACH_PATTERN = re.compile(
     r"^(?P<numbers>\d{1,2}(?:[.\s、,，]+\d{1,2})+)\s*各\s*(?P<amount>\d+(?:\.\d+)?)\s*車$"
+)
+MULTI_CAR_EACH_HALF_PATTERN = re.compile(
+    r"^(?P<numbers>\d{1,2}(?:[.\s、,，]+\d{1,2})+)\s*各\s*半車$"
 )
 TIME_ONLY_PATTERN = re.compile(r"^(?:上午|下午)?\s*\d{1,2}:\d{2}$")
 LINE_PREFIX_PATTERN = re.compile(r"^(?P<time>(?:上午|下午)?\d{1,2}:\d{2})\s+(?P<sender>\S+)\s+(?P<body>.+)$")
@@ -74,7 +79,7 @@ def _join_dotdot_grouped_bet(raw: str) -> str:
     return f"{'.'.join(parts[:-1])} {parts[-1]}".strip()
 
 
-def preprocess_batch_input(text_or_lines: str | Iterable[str], *, game: str = "539") -> dict[str, Any]:
+def preprocess_batch_input(text_or_lines: str | Iterable[str], *, game: str = "539", adjacent_rule_scope: bool = True) -> dict[str, Any]:
     """Split pasted chat text into parser-ready betting fragments.
 
     The preprocessor deliberately does not decide whether a fragment is valid.
@@ -141,6 +146,28 @@ def preprocess_batch_input(text_or_lines: str | Iterable[str], *, game: str = "5
             "preprocessing_notes": notes,
         }
         if pending is not None:
+            # A bare multiplier has scope only when immediately following an
+            # already explicit normal/column rule, without a blank/sender gap.
+            # Preserve standalone single-number car shorthand elsewhere.
+            if (adjacent_rule_scope and line_no == pending["line_no"] + len(pending["original_lines"])
+                    and "removed LINE time/sender prefix" not in notes
+                    and re.fullmatch(r"[234](?:\s*[,，/]\s*[234])*\s*[xX×]\s*\d+(?:\.\d+)?", cleaned)):
+                from betguard.parser import ParseError, parse_line
+                try:
+                    previous = parse_line(pending["raw"], default_game=game)
+                except ParseError:
+                    previous = None
+                if previous is not None and previous.type in {"normal", "column"} and previous.stars and (
+                    previous.bets or previous.money is not None
+                ):
+                    # Normalize the new explicit rule alone with the original
+                    # stem; the normalizer detects conflicting star scopes.
+                    source = " ".join(pending["original_lines"] + [line])
+                    merged, merge_notes = normalize_explicit_multiplier_suffix(source)
+                    pending["raw"] = merged
+                    pending["original_lines"].append(line)
+                    pending["preprocessing_notes"].extend(merge_notes + ["explicit adjacent multiplier scope"])
+                    continue
             car_merge = _merge_car_number_lines(pending["raw"], cleaned)
             if car_merge is not None:
                 pending["raw"] = car_merge
@@ -268,6 +295,8 @@ def preprocess_batch_input(text_or_lines: str | Iterable[str], *, game: str = "5
 
 def is_metadata_line(line: str) -> bool:
     value = line.strip()
+    if re.search(r"同上|同前|照上|共用|全部同", value):
+        return False  # A scope instruction is not a sender name or metadata.
     if not value:
         return True
     if value in STANDALONE_GAME_LABELS or value.strip(" .。") in STANDALONE_GAME_LABELS:
@@ -891,6 +920,11 @@ def _clean_line_content(line: str) -> tuple[str, list[str]]:
         notes.append("normalized multiplier symbol")
     value = updated
 
+    value, scoped_notes = normalize_explicit_multiplier_suffix(value)
+    notes.extend(scoped_notes)
+    if MULTIPLIER_SCOPE_ERROR in scoped_notes:
+        return value, _dedupe(notes)
+
     updated = _normalize_confirmed_star_text(value, notes)
     value = updated
 
@@ -1226,7 +1260,9 @@ def _suspicious_paste_notes(value: str) -> list[str]:
     if "改" in value:
         notes.append("suspicious pasted token requires manual review")
     if any(token in value for token in ("半車", "坪", "嫌")):
-        if _is_confirmed_car_metadata_format(value):
+        if MULTI_CAR_EACH_HALF_PATTERN.fullmatch(value.strip()):
+            notes.append("explicit per-number half-car units")
+        elif _is_confirmed_car_metadata_format(value):
             notes.append("car metadata ignored")
         else:
             notes.append("suspicious pasted token requires manual review")
@@ -1322,6 +1358,13 @@ def _is_confirmed_car_metadata_format(value: str) -> bool:
 
 
 def _expand_multi_car_fragment(value: str) -> list[str]:
+    half_each = MULTI_CAR_EACH_HALF_PATTERN.fullmatch(value.strip())
+    if half_each:
+        numbers = re.findall(r"\d{1,2}", half_each.group('numbers'))
+        if len({int(number) for number in numbers}) != len(numbers):
+            return [value]  # Preserve contradictory source instead of duplicating bets.
+        return [f"{number}車0.5支" for number in numbers]
+
     hyphen_car = HYPHEN_CAR_PATTERN.fullmatch(value.strip())
     if hyphen_car:
         return [f"{hyphen_car.group('number')}車{hyphen_car.group('amount')}支"]

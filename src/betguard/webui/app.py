@@ -1129,6 +1129,13 @@ def build_workbench_handler(
         def do_GET(self) -> None:  # noqa: N802 -- stdlib name
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path
+            if path.startswith("/__text_fill_test"):
+                from betguard.webfill.local_text_form import local_fill_url, render_test_form
+                if local_fill_url() and self.client_address[0] in {"127.0.0.1", "::1"}:
+                    self._send_html(render_test_form(self.path))
+                else:
+                    self._send_text("Local test mode is disabled", status=404)
+                return
 
             if path == "/" or path == "":
                 self._send_html(_render_empty_dashboard())
@@ -2119,7 +2126,9 @@ def build_workbench_handler(
                 return
 
             try:
-                self._assist_fill_start_inner(data)
+                from betguard.webfill.fill_operation import FillOperation
+                with FillOperation(data, RUNS_DIR / "assist-fill-operations"):
+                    self._assist_fill_start_inner(data)
             except Exception as exc:
                 self._send_json({
                     "ok": False,
@@ -2161,24 +2170,30 @@ def build_workbench_handler(
                 if candidate is None:
                     self._send_json({"ok": False, "error": f"manual candidate not found: {manual_id}"})
                     return
+                if candidate.get("fill_supported") is False:
+                    self._send_json({"ok": False, "error": candidate.get("fill_unsupported_reason") or "此筆尚不可填入。"})
+                    return
                 validation = {
                     "ok": True,
                     "numbers": candidate["numbers"],
                     "stars": candidate["stars"],
                     "amounts": candidate["amounts"],
                     "game": candidate.get("game", "539"),
+                    "bet_type": candidate.get("bet_type") or candidate.get("type", "normal"),
                 }
             else:
                 # Queue path: use previously initialized bet_type
-                if bet_type == "column":
-                    # Column bets skip normal _validate_candidate (which requires flat "numbers")
-                    validation = {"ok": True, "bet_type": "column",
-                                  "url": "https://www.gts362.com",
-                                  "game": data.get("game", "539")}
-                else:
-                    _err, validation = self._validate_candidate(data)
-                    if validation is None:
-                        return
+                _err, validation = self._validate_candidate(data)
+                if validation is None:
+                    return
+
+            bet_type = validation.get("bet_type", bet_type)
+            if bet_type not in {"normal", "column"}:
+                self._send_json({"ok": False, "error": "此玩法的填入欄位尚未支援，請人工處理。"})
+                return
+            if data.get("game") and data["game"] != validation.get("game"):
+                self._send_json({"ok": False, "error": "彩種已變更，請重新解析。"})
+                return
 
             if not validation.get("ok"):
                 self._send_json(validation)
@@ -2210,7 +2225,8 @@ def build_workbench_handler(
                             "stars": stars,
                             "money": money,
                             "amounts": amounts,
-                            "star_amounts": {str(s): {"unit": 1, "money": money} for s in stars},
+                            "star_amounts": {str(s): {"money": amounts[str(s)]} for s in stars},
+                            "game": candidate["game"],
                             "accepted_by_human": True,
                             "approved_source": {"from_webui_assist_button": True, "source": "webui_column_assist_manual"},
                         }
@@ -2299,9 +2315,8 @@ def build_workbench_handler(
                     stars = vc_result.get("stars") or []
                     money = vc_result.get("money")
                     unit = vc_result.get("unit")
-                    star_amounts = {}
-                    if money is not None and stars:
-                        star_amounts = {str(s): {"unit": unit, "money": money} for s in stars}
+                    amounts = _derive_star_amounts(vc_result, stars)
+                    star_amounts = {str(s): {"money": amounts[str(s)]} for s in stars}
                     zhu_item = {
                         "index": vc_item.get("index"),
                         "original_fragment": vc_item.get("original_fragment") or vc_item.get("raw", ""),
@@ -2315,6 +2330,8 @@ def build_workbench_handler(
                         "money": money,
                         "unit": unit,
                         "star_amounts": star_amounts,
+                        "amounts": amounts,
+                        "game": validation["game"],
                         "accepted_at": accepted_at,
                         "accepted_by_human": True,
                         "approved_source": {
@@ -2349,7 +2366,7 @@ def build_workbench_handler(
                     return
 
                 start_payload = {
-                    "numbers": zhu_item.get("numbers", []),
+                    "numbers": zhu_item.get("columns") or zhu_item.get("numbers", []),
                     "stars": zhu_item.get("stars", []),
                     "amounts": zhu_item.get("amounts", {}),
                     "url": validation.get("url", "https://www.gts362.com"),
@@ -2399,6 +2416,7 @@ def build_workbench_handler(
                                 "numbers": list(validation.get("numbers", [])),
                                 "stars": list(validation.get("stars", [])),
                                 "amounts": dict(validation.get("amounts", {})),
+                                "game": validation["game"],
                                 "accepted_at": accepted_at,
                                 "accepted_by_human": True,
                                 "approved_source": {
@@ -3115,6 +3133,7 @@ window.assistPanelFill = assistPanelFill;
             vc_out = []
             for vc in valid_candidates:
                 result = vc.get("result", {})
+                from betguard.webfill.text_preview import candidate_preview
                 vc_out.append({
                     "index": vc.get("index"),
                     "raw": vc.get("raw") or vc.get("original_fragment", ""),
@@ -3123,6 +3142,7 @@ window.assistPanelFill = assistPanelFill;
                     "numbers": result.get("numbers") or [],
                     "stars": result.get("stars") or [],
                     "money": result.get("money"),
+                    **candidate_preview(result, game=game),
                 })
             iv_out = []
             for iv in invalid_fragments:
@@ -3135,11 +3155,15 @@ window.assistPanelFill = assistPanelFill;
             # Save queue to runs/ for later review + assist-fill access
             import datetime as _dt
             ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d_%H%M%S")
-            slug = f"batch_{ts}.json"
+            from uuid import uuid4
+            slug = f"batch_{ts}_{uuid4().hex}.json"
             qdir = RUNS_DIR / "assist-panel-batches"
             qdir.mkdir(parents=True, exist_ok=True)
             qpath = qdir / slug
-            qpath.write_text(_json_module.dumps(queue, ensure_ascii=False, indent=2), encoding="utf-8")
+            queue["source_text"] = data.get("text", "")
+            queue["game"] = game
+            with qpath.open("x", encoding="utf-8") as stream:
+                stream.write(_json_module.dumps(queue, ensure_ascii=False, indent=2))
             rel = _runs_url(qpath.relative_to(RUNS_DIR))
             queue_path = f"{RUNS_DIR.as_posix()}/{rel}"
 
@@ -3150,6 +3174,7 @@ window.assistPanelFill = assistPanelFill;
                 "batch_id": batch_id,
                 "queue_path": queue_path,
                 "source": source,
+                "game": game,
                 "valid_candidates": vc_out,
                 "invalid_fragments": iv_out,
             })
@@ -3268,7 +3293,8 @@ window.assistPanelFill = assistPanelFill;
             data = self._read_json_body()
             if data is None:
                 return
-            text = (data.get("text") or "").strip()
+            original_text = data.get("text") or ""
+            text = original_text.strip()
             game = (data.get("game") or "六合").strip()
             register_candidate = bool(data.get("register_candidate", True))
             if not text:
@@ -3277,17 +3303,24 @@ window.assistPanelFill = assistPanelFill;
             from betguard.webfill.manual_reparse import reparse_text
 
             result = reparse_text(text, game=game)
+            result["original_text"] = original_text
             result.setdefault("auto_submit", False)
             result.setdefault("auto_confirm", False)
 
             # Preserve the existing manual-correction flow by default, while
             # allowing review surfaces to request a read-only parser preview.
             if result.get("ok") and register_candidate:
+                for corrected in result.get("candidates", []):
+                    corrected["manual_candidate_id"] = _register_manual_candidate({
+                        **corrected, "original_text": original_text, "game": game,
+                    })
                 cid = _register_manual_candidate({
-                    "original_text": text,
+                    **result,
+                    "original_text": original_text,
                     "numbers": result["numbers"],
                     "stars": result["stars"],
                     "amounts": result["amounts"],
+                    "money": result.get("money"),
                     "summary": result.get("summary", ""),
                     "game": game,
                     "source": "manual_correction",
@@ -3726,7 +3759,13 @@ def _validate_assist_fill_item(
         }
 
     numbers = result.get("numbers", [])
+    if queue.get("game") and result.get("game") != queue["game"]:
+        return {"ok": False, "error": "牌文與工作彩種不一致，請重新解析。"}
+    if result.get("type") == "column":
+        numbers = [n for group in result.get("columns", []) for n in group]
     stars = result.get("stars", [])
+    if result.get("type") not in {"normal", "column"}:
+        return {"ok": False, "error": "此玩法可解析，但目前填入欄位尚未支援。"}
 
     if not numbers:
         return {"ok": False, "error": f"item #{item_index} parsed result has no numbers; BLOCKED"}
@@ -3749,6 +3788,8 @@ def _validate_assist_fill_item(
         "numbers": [int(n) for n in numbers],
         "stars": [int(s) for s in stars],
         "amounts": star_amounts,
+        "bet_type": result.get("type", "normal"),
+        "columns": result.get("columns"),
         "game": result.get("game") or "539",
     }
 

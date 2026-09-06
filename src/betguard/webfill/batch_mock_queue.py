@@ -31,9 +31,9 @@ FINAL_DECISION = {
 }
 
 
-def build_batch_mock_queue(text_or_lines: str | Iterable[str], *, game: str = "539") -> dict[str, Any]:
+def build_batch_mock_queue(text_or_lines: str | Iterable[str], *, game: str = "539", adjacent_rule_scope: bool = True) -> dict[str, Any]:
     raw_text = "\n".join(text_or_lines) if not isinstance(text_or_lines, str) else text_or_lines
-    preprocessing = preprocess_batch_input(text_or_lines, game=game)
+    preprocessing = preprocess_batch_input(text_or_lines, game=game, adjacent_rule_scope=adjacent_rule_scope)
     candidates = list(preprocessing.get("candidate_bet_lines", []))
     review_result = _review_candidates(candidates, game=game)
     can_continue = bool(review_result.get("can_continue"))

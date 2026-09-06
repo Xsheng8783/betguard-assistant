@@ -7,7 +7,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from betguard.expander import expand_tail
 from betguard.games import ACTIVE_GAMES
 from betguard.models import BetAmount, JsonNumber, ParsedBet
-from betguard.normalizer import normalize_for_parser
+from betguard.normalizer import MULTIPLIER_SCOPE_ERROR, normalize_for_parser
 
 
 COMMON_MONEY_VALUES = {50, 100, 200, 500, 1000}
@@ -70,6 +70,8 @@ class ParseError(ValueError):
 def parse_line(text: str, *, default_game: str = "539") -> ParsedBet:
     normalized = normalize_for_parser(text)
     raw = normalized.normalized_text
+    if MULTIPLIER_SCOPE_ERROR in normalized.parse_notes:
+        raise ParseError(MULTIPLIER_SCOPE_ERROR)
     if TIANTIAN_ZHUPENG_PATTERN.search(raw):
         raise ParseError("Tiantianle 住碰 continuation requires manual review")
     if _is_standalone_star_amount_line(raw):
